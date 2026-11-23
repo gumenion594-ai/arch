@@ -253,7 +253,7 @@ export function saveProject(p: Project) {
   const list = loadProjects();
   const i = list.findIndex(x => x.id === p.id);
   if (i >= 0) list[i] = p; else list.push(p);
-  if (!saveProjects(list)) alert('Could not save: browser storage is full (textures take the most space).');
+  if (!saveProjects(list)) window.dispatchEvent(new CustomEvent('arch-save-failed'));
 }
 export function deleteProject(id: string) {
   saveProjects(loadProjects().filter(p => p.id !== id));
@@ -271,4 +271,34 @@ export class History {
     return s ? JSON.parse(s) : null;
   }
   clear() { this.stack = []; }
+}
+
+/** Example building for an empty project list: four storeys, a colonnade, windows and a hip roof. */
+export function sampleProject(): Project {
+  const p = createProject('Example house', { name: 'Example house', baseLength: 20, floors: 5, floorHeight: 3, ground: 1, x: 0, y: 0 });
+  const b = p.buildings[0];
+  const pt = (x: number, y: number, n: number) => ({ id: uid(), n, x, y });
+  const loop = (pl: StructurePlan, coords: [number, number][]) => {
+    pl.points = coords.map(([x, y], i) => pt(x, y, i + 1));
+    pl.segments = pl.points.map((q, i) => ({ id: uid(), a: q.id, b: pl.points[(i + 1) % pl.points.length].id }));
+    pl.nextN = coords.length + 1;
+  };
+  const base = b.plans[0];
+  base.name = 'Main';
+  loop(base, [[0.15, 0.2], [0.85, 0.2], [0.85, 0.8], [0.15, 0.8]]);
+  base.floorIds = b.floors.slice(0, 4).map(f => f.id);
+  base.segments[0].kind = 'colonnade'; base.segments[0].divisions = 6; // front colonnade
+  base.segments.slice(1).forEach(s => (s.divisions = 4));
+  const roof = newPlan('Roof storey', [b.floors[4].id]);
+  loop(roof, [[0.15, 0.2], [0.85, 0.2], [0.85, 0.8], [0.15, 0.8]]);
+  roof.connect = 'loft';
+  const ridge = newPlan('Ridge');
+  ridge.points = [pt(0.3, 0.5, 1), pt(0.7, 0.5, 2)];
+  ridge.segments = [{ id: uid(), a: ridge.points[0].id, b: ridge.points[1].id }];
+  b.plans.push(roof, ridge);
+  b.topPlanId = ridge.id;
+  b.floors[4].height = 3.5;
+  const win = b.windowShapes[0];
+  for (const f of b.floors.slice(1, 4)) for (const s of base.segments.slice(1)) for (let k = 0; k < 4; k++) b.windows[windowKey(f.id, s.id, k)] = win.id;
+  return p;
 }

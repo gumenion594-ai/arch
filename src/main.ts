@@ -1,10 +1,12 @@
 import './style.css';
-import { createProject, createSite, deleteProject, loadProjects, saveProject, totalHeight } from './model';
+import { createProject, createSite, deleteProject, loadProjects, sampleProject, saveProject, totalHeight } from './model';
 import { buildingDialog } from './dialogs';
 import { fmt } from './planner';
 import { Editor } from './editor';
 import { SiteEditor } from './site';
-import { app, h } from './ui';
+import { app, h, toast } from './ui';
+import { askConfirm, askText } from './ui';
+window.addEventListener('arch-save-failed', () => toast('Could not save: browser storage is full (textures take the most space)'));
 
 // ======================================================================
 // Project list: building projects (one building) and site projects (several placed buildings)
@@ -27,12 +29,12 @@ function showList() {
         h('div', { class: 'muted' }, `${info} · edited ${new Date(p.updated).toLocaleString()}${usedBy.length ? ` · on site: ${usedBy.join(', ')}` : ''}`),
       ),
       h('button', { onclick: () => openProject(p.id) }, 'Open'),
-      h('button', { onclick: () => { const n = prompt('Rename project', p.name); if (n?.trim()) { p.name = n.trim(); saveProject(p); showList(); } } }, 'Rename'),
+      h('button', { onclick: async () => { const n = await askText('Rename project', p.name); if (n?.trim()) { p.name = n.trim(); saveProject(p); showList(); } } }, 'Rename'),
       h('button', {
         class: 'danger',
-        onclick: () => {
+        onclick: async () => {
           const warn = usedBy.length ? `\n\nIt is used on: ${usedBy.join(', ')}.` : '';
-          if (confirm(`Delete "${p.name}"? This cannot be undone.${warn}`)) { deleteProject(p.id); showList(); }
+          if (await askConfirm(`Delete "${p.name}"? This cannot be undone.${warn}`)) { deleteProject(p.id); showList(); }
         },
       }, 'Delete'),
     );
@@ -41,7 +43,8 @@ function showList() {
   app.append(h('div', { class: 'list-screen' },
     h('h1', {}, 'Arch'),
     h('div', { class: 'row' }, h('h2', {}, 'Buildings'), h('button', { class: 'primary', onclick: newProjectDialog }, '+ New building project')),
-    buildings.length ? h('div', { class: 'projects' }, ...buildings.map(row)) : h('p', { class: 'muted' }, 'No building projects yet.'),
+    buildings.length ? h('div', { class: 'projects' }, ...buildings.map(row)) : h('div', { class: 'row' }, h('span', { class: 'muted' }, 'No building projects yet.'),
+      h('button', { onclick: () => { const p = sampleProject(); saveProject(p); openProject(p.id); } }, 'Load example')),
     h('div', { class: 'row' }, h('h2', {}, 'Sites'), h('button', { class: 'primary', onclick: newSite }, '+ New site')),
     h('p', { class: 'muted small' }, 'A site places several of your building projects together.'),
     sites.length ? h('div', { class: 'projects' }, ...sites.map(row)) : h('p', { class: 'muted' }, 'No sites yet.'),
@@ -58,8 +61,8 @@ function newProjectDialog() {
   });
 }
 
-function newSite() {
-  const name = prompt('Site name', 'Untitled site');
+async function newSite() {
+  const name = await askText('Site name', 'Untitled site');
   if (!name?.trim()) return;
   const p = createSite(name.trim());
   saveProject(p); openProject(p.id);

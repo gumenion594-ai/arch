@@ -10,7 +10,7 @@ import { WindowPlanner } from './windowplanner';
 import { V2, enclosedFaces, planValid } from './geometry';
 import { Selection, interiorForFloor } from './build3d';
 import { calculate, Report } from './stats';
-import { app, h, num, put, toast } from './ui';
+import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
 type Mode = 'view' | 'structure' | 'floorplan' | 'window';
 type PickMode = 'division' | 'wall' | 'floor';
@@ -533,11 +533,11 @@ export class Editor {
       h('div', { class: 'row' },
         h('button', { onclick: () => this.mutate(() => { const s = { id: uid(), name: `Window ${b.windowShapes.length + 1}`, points: [] }; b.windowShapes.push(s); this.activeShape = s.id; }) }, 'New'),
         h('button', { disabled: !sh, onclick: () => sh && this.mutate(() => { const c = { ...JSON.parse(JSON.stringify(sh)), id: uid(), name: `${sh.name} copy` }; b.windowShapes.push(c); this.activeShape = c.id; }) }, 'Duplicate'),
-        h('button', { disabled: !sh, onclick: () => { const n = sh && prompt('Rename window shape', sh.name); if (sh && n?.trim()) this.mutate(() => (sh.name = n.trim())); } }, 'Rename'),
+        h('button', { disabled: !sh, onclick: async () => { const n = sh && await askText('Rename window shape', sh.name); if (sh && n?.trim()) this.mutate(() => (sh.name = n.trim())); } }, 'Rename'),
         h('button', {
           class: 'danger', disabled: !sh,
-          onclick: () => {
-            if (sh && confirm(`Delete ${sh.name}? Windows using it are removed.`)) this.mutate(() => {
+          onclick: async () => {
+            if (sh && await askConfirm(`Delete ${sh.name}? Windows using it are removed.`)) this.mutate(() => {
               b.windowShapes = b.windowShapes.filter(x => x !== sh);
               for (const [k, v] of Object.entries(b.windows)) if (v === sh.id) delete b.windows[k];
               this.activeShape = b.windowShapes[0]?.id ?? null;
@@ -637,11 +637,11 @@ export class Editor {
             list.push(c); this.setActivePlan(c.id);
           }),
         }, 'Duplicate'),
-        h('button', { disabled: !pl, onclick: () => { const n = pl && prompt('Rename plan', pl.name); if (pl && n?.trim()) this.mutate(() => (pl.name = n.trim())); } }, 'Rename'),
+        h('button', { disabled: !pl, onclick: async () => { const n = pl && await askText('Rename plan', pl.name); if (pl && n?.trim()) this.mutate(() => (pl.name = n.trim())); } }, 'Rename'),
         h('button', {
           class: 'danger', disabled: !pl,
-          onclick: () => {
-            if (pl && confirm(`Delete ${pl.name}?`)) this.mutate(() => {
+          onclick: async () => {
+            if (pl && await askConfirm(`Delete ${pl.name}?`)) this.mutate(() => {
               list.splice(list.indexOf(pl), 1);
               if (p.topPlanId === pl.id) p.topPlanId = null;
               this.setActivePlan(list[0]?.id ?? null);
