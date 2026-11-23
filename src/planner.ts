@@ -1,5 +1,6 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
 import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, divisionBorders, segColT, segKind, uid } from './model';
+import { columnPositions } from './build3d';
 import { V2, distToSeg, enclosedFaces, enclosedFacesSegs, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
 
 export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator';
@@ -427,7 +428,7 @@ export class Planner {
       const pp = polyParams(sp), lenM = polyLength(sp) * this.h.baseLength();
       const us = divisionBorders(lenM, this.h.divLen(s)).map(x => (lenM ? x / lenM : 0)).slice(1, -1);
       if (kind === 'colonnade') {
-        const cus = s.columns ? s.columns.map(m => (lenM ? m / lenM : 0)) : us;
+        const cus = columnPositions(plan, s, divisionBorders(lenM, this.h.divLen(s)).map(x => (lenM ? x / lenM : 0)), lenM, segColT(plan, s));
         const cpx = Math.max(4, (segColT(plan, s) / this.h.baseLength()) * b.s);
         g.fillStyle = sel ? '#ffd400' : '#f0f0f0';
         for (const u of cus) { const q = this.toScreen(polyAt(sp, pp, u)); g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx); }

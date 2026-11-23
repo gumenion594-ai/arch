@@ -6,7 +6,7 @@ import {
   divisionBorders, floorLabel, planForFloor, segColT, segDivLen, segKind, uid,
 } from './model';
 import { polyLength, sampleSeg } from './geometry';
-import { columnRange } from './build3d';
+import { autoColumns, columnRange } from './build3d';
 import { Hit } from './viewer';
 import { ShapeEditor, ShapeHost } from './shapeeditor';
 import { formatOf, importDesignFile, deleteAsset } from './assets';
@@ -267,7 +267,13 @@ function columnBox(ed: Editor, keys: string[]) {
   if (!found.length) return null;
   const lenOf = (plan: StructurePlan, seg: PlanSegment) => polyLength(sampleSeg(plan, seg)) * b.baseLength;
   /** First edit: turn the automatic columns (on the division borders) into a list we can change. */
-  const own = (plan: StructurePlan, seg: PlanSegment) => { if (!seg.columns) seg.columns = wallBorders(ed, plan, seg).slice(1, -1); return seg.columns; };
+  const own = (plan: StructurePlan, seg: PlanSegment) => {
+    if (!seg.columns) {
+      const L = lenOf(plan, seg);
+      seg.columns = autoColumns(plan, seg, wallBorders(ed, plan, seg).map(m => (L ? m / L : 0)), L, segColT(plan, seg)).map(m => Math.round(m * 100) / 100);
+    }
+    return seg.columns;
+  };
   /** Keep the whole column on its line (and clear of corner columns). */
   const range = (plan: StructurePlan, seg: PlanSegment) => columnRange(plan, seg, lenOf(plan, seg), segColT(plan, seg));
   const fit = (plan: StructurePlan, seg: PlanSegment, m: number) => { const [lo, hi] = range(plan, seg); return Math.round(Math.min(hi, Math.max(lo, m)) * 100) / 100; };
@@ -283,7 +289,8 @@ function columnBox(ed: Editor, keys: string[]) {
     if (stopped) toast('A column stops at the end of its line');
   };
   const one = found.length === 1 ? found[0] : null;
-  const pos = one ? (one.seg.columns ?? wallBorders(ed, one.plan, one.seg).slice(1, -1))[one.idx] ?? 0 : 0;
+  const autoOf = (plan: StructurePlan, seg: PlanSegment) => { const L = lenOf(plan, seg); return autoColumns(plan, seg, wallBorders(ed, plan, seg).map(m => (L ? m / L : 0)), L, segColT(plan, seg)); };
+  const pos = one ? (one.seg.columns ?? autoOf(one.plan, one.seg))[one.idx] ?? 0 : 0;
   return h('div', { class: 'sub' },
     h('div', { class: 'box-title' }, `Column${found.length > 1 ? 's' : ''}`),
     h('div', { class: 'row move' },
@@ -319,7 +326,7 @@ function columnBox(ed: Editor, keys: string[]) {
       }, 'Delete'),
       h('button', { title: 'Put the columns back on the division borders', onclick: () => { ed.mutate(() => found.forEach(f => (f.seg.columns = null))); ed.selElements.clear(); ed.refresh(); } }, 'Reset line'),
     ),
-    h('div', { class: 'muted small' }, 'Columns belong to their line in the plan, so a change shows on every floor that uses that plan.'),
+    h('div', { class: 'muted small' }, 'A column always stays on its line and stands inside it, so it never sticks out past the floor or ceiling. Corner columns belong to one of the two lines and move like the others. A change shows on every floor that uses the same plan.'),
   );
 }
 

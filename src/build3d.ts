@@ -183,11 +183,11 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       const above = interior ? null : planAtLevel(p, i + 1);
       let vert: Vertical | undefined;
       const rowsBySeg = new Map<string, { rows: Row[]; bottom: V2[] }>();
-      const colAlong = (rows: Row[], t: number, ct: number, bottom: V2[], pick: PickInfo, seg: PlanSegment, material: string, selected: boolean) => {
-        // columns stand inside the line, their outer face on it (like the walls)
+      const colAlong = (rows: Row[], t: number, ct: number, bottom: V2[], pick: PickInfo, seg: PlanSegment, material: string, selected: boolean, shift?: V2) => {
+        // columns stand inside the line, their outer face on it (like the walls); corner columns get their own shift
         const fs = interior ? 0 : faceSide(plan, seg);
         const d0 = norm({ x: bottom[bottom.length - 1].x - bottom[0].x, y: bottom[bottom.length - 1].y - bottom[0].y });
-        const inward = { x: -d0.y * fs * (ct / 2 / L), y: d0.x * fs * (ct / 2 / L) };
+        const inward = shift ?? { x: -d0.y * fs * (ct / 2 / L), y: d0.x * fs * (ct / 2 / L) };
         // around a floored area (a porch), straight columns stand on the floor slab and reach the ceiling
         const onSlab = fs !== 0 && rows.length === 2;
         const c0 = onSlab ? y0 + slabs[i].floor : y0, c1 = onSlab ? y1 - slabs[i].ceiling : y1;
@@ -309,23 +309,12 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         } else {
           // colonnade: columns on the division borders (+ free-standing ends)
           // columns: on the division borders, unless they have been moved / added / removed by hand
-          columnPositions(seg, borders, lenM, columnRange(plan, seg, lenM, segColT(plan, seg))).forEach((u, k) => {
+          columnPositions(plan, seg, borders, lenM, segColT(plan, seg)).forEach((u, k) => {
             const id = `col:${seg.id}:${k}`;
             colAlong(rows, u, segColT(plan, seg), bottom, { ...pick, placementId: id }, seg, material, selected || sel.elements.has(id));
           });
           rowsBySeg.set(seg.id, { rows, bottom });
         }
-      }
-
-      // free corners of colonnades (no solid wall meeting there) get one column
-      for (const pt of plan.points) {
-        const segs = plan.segments.filter(s => s.a === pt.id || s.b === pt.id);
-        if (segs.some(s => segKind(s) === 'wall')) continue;
-        const c = segs.find(s => segKind(s) === 'colonnade');
-        if (!c) continue;
-        const r = rowsBySeg.get(c.id)!;
-        const selected = floorSel || sel.walls.has(`${floor.id}|${c.id}`);
-        colAlong(r.rows, c.a === pt.id ? 0 : 1, segColT(plan, c), r.bottom, { floorId: floor.id, floorIndex: i, segId: c.id, interior }, c, segMaterial(plan, c), selected);
       }
 
       // (single unconnected points build nothing: they only serve as targets for the floor below)
@@ -476,24 +465,31 @@ export const BALCONY_HEIGHT = BALCONY_AT;
 /** Baluster silhouette (radius, height) turned on a lathe. */
 const BALUSTER = [[0, 0], [0.055, 0], [0.055, 0.05], [0.035, 0.1], [0.06, 0.32], [0.065, 0.4], [0.03, 0.55], [0.025, 0.7], [0.045, 0.75], [0.045, 0.8], [0, 0.8]].map(([x, y]) => new THREE.Vector2(x, y));
 
-/** Column positions along a colonnade (u 0..1): hand-placed ones, else the inner division borders. */
-export function columnPositions(seg: PlanSegment, borders: number[], lenM: number, range?: [number, number]): number[] {
-  const [lo, hi] = range ?? [0, lenM];
-  if (seg.columns) return seg.columns.map(m => (lenM ? Math.min(hi, Math.max(lo, m)) / lenM : 0));
-  return borders.slice(1, -1);
-}
-
 /**
- * Where a column's centre may be along a colonnade (m from its start): the whole column stays on the
- * line, and clear of the corner columns standing at free ends.
+ * Columns of a colonnade line, as metres from its start: the ones placed by hand, or automatically
+ * one on every inner division border plus a corner column at each free end (a corner with no wall),
+ * which belongs to the first colonnade line meeting there.
  */
-export function columnRange(plan: StructurePlan, seg: PlanSegment, lenM: number, ct: number): [number, number] {
-  const cornerCol = (id: string) => {
+export function autoColumns(plan: StructurePlan, seg: PlanSegment, borders: number[], lenM: number, ct: number): number[] {
+  const owns = (id: string) => {
     const segs = plan.segments.filter(x => x.a === id || x.b === id);
-    return !segs.some(x => segKind(x) === 'wall') && segs.some(x => segKind(x) === 'colonnade');
+    if (segs.some(x => segKind(x) === 'wall')) return false;
+    return segs.find(x => segKind(x) === 'colonnade') === seg;
   };
-  const lo = cornerCol(seg.a) ? ct : ct / 2, hi = lenM - (cornerCol(seg.b) ? ct : ct / 2);
-  return lo <= hi ? [lo, hi] : [lenM / 2, lenM / 2];
+  const list = borders.slice(1, -1).map(u => u * lenM);
+  if (owns(seg.a)) list.unshift(ct / 2);
+  if (owns(seg.b)) list.push(lenM - ct / 2);
+  return list;
+}
+/** Where a column's centre may be (m from the line's start): the whole column stays on its line. */
+export function columnRange(_plan: StructurePlan, _seg: PlanSegment, lenM: number, ct: number): [number, number] {
+  return ct <= lenM ? [ct / 2, lenM - ct / 2] : [lenM / 2, lenM / 2];
+}
+/** Column positions as u (0..1), kept on the line. Sideways they stand inside it, so a column at an end fills the corner. */
+export function columnPositions(plan: StructurePlan, seg: PlanSegment, borders: number[], lenM: number, ct: number): number[] {
+  const [lo, hi] = columnRange(plan, seg, lenM, ct);
+  const list = seg.columns ?? autoColumns(plan, seg, borders, lenM, ct);
+  return list.map(m => (lenM ? Math.min(hi, Math.max(lo, m)) / lenM : 0));
 }
 
 /** +1: the wall runs counter-clockwise around an enclosed area (inside on its left), −1: clockwise, 0: not around one. */
