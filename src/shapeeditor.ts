@@ -20,7 +20,17 @@ export interface ShapeHost {
   single?: boolean; // closed mode: only one outline (new points always join it)
   allowOverlap?: boolean; // closed mode: outlines may overlap each other (they add up), e.g. floor areas
   ghostLines?(): V2[][]; // faint reference lines (e.g. walls)
+  /** Points and lines new / dragged points snap to (e.g. wall corners and wall lines). */
+  snapPoints?(): V2[];
+  snapLines?(): V2[][];
+  /** Grid step (0..1 units) for snapping; default 1/20. */
+  gridStep?(): number;
+  /** Closed areas the "pick" tool adds with one click (e.g. rooms). */
+  faces?(): V2[][];
+  /** Fill colour of the outlines (default: dark, opaque). */
+  fill?(): string;
 }
+export type ShapeTool = 'points' | 'rect' | 'pick';
 export type ShapeMode = 'closed' | 'profileX' | 'profileY';
 
 export class ShapeEditor {
@@ -31,6 +41,14 @@ export class ShapeEditor {
   private drag: { o: number; i: number; began: boolean } | null = null;
   private hover: V2 | null = null;
   private ro: ResizeObserver;
+  /** closed mode: how a click adds shapes (points one by one, a dragged rectangle, or a whole room). */
+  tool: ShapeTool = 'points';
+  private rect: { a: V2; b: V2 } | null = null;
+  private snapped: { q: V2; kind: 'point' | 'line' | 'grid' | 'free' } | null = null;
+  // view: zoom (mouse wheel, at the cursor) and pan (right / middle drag)
+  private zoom = 1;
+  private pan = { x: 0, y: 0 };
+  private panning: { x: number; y: number } | null = null;
 
   constructor(private host: HTMLElement, private h: ShapeHost, private mode: ShapeMode = 'closed') {
     host.appendChild(this.canvas);
@@ -38,6 +56,8 @@ export class ShapeEditor {
     this.ro.observe(host);
     this.canvas.addEventListener('mousedown', e => this.down(e));
     this.canvas.addEventListener('dblclick', e => this.dbl(e));
+    this.canvas.addEventListener('wheel', e => this.wheel(e), { passive: false });
+    this.canvas.addEventListener('contextmenu', e => e.preventDefault());
     window.addEventListener('mousemove', this.move);
     window.addEventListener('mouseup', this.up);
   }
@@ -47,23 +67,70 @@ export class ShapeEditor {
     window.removeEventListener('mouseup', this.up);
     this.canvas.remove();
   }
-  reset() { this.sel = null; this.cur = null; }
+  reset() { this.sel = null; this.cur = null; this.rect = null; }
+  resetView() { this.zoom = 1; this.pan = { x: 0, y: 0 }; this.draw(); }
+  private wheel(e: WheelEvent) {
+    e.preventDefault();
+    const r = this.canvas.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const before = this.P(e);
+    this.zoom = clamp(this.zoom * Math.exp(-e.deltaY * 0.0015), 0.5, 40);
+    // keep the point under the cursor where it is
+    const b = this.box, sx = b.x0 + before.x * b.sw, sy = b.y0 + (1 - before.y) * b.sh;
+    this.pan.x += mx - sx; this.pan.y += my - sy;
+    this.draw();
+  }
 
   private get box() {
     const w = this.canvas.clientWidth, hh = this.canvas.clientHeight;
     const aspect = this.h.aspect() || 1;
     const avail = Math.max(40, Math.min(w, hh) - 56);
-    const sw = aspect >= 1 ? avail : avail * aspect, sh = aspect >= 1 ? avail / aspect : avail;
-    return { x0: (w - sw) / 2, y0: (hh - sh) / 2, s: Math.min(sw, sh), sw, sh };
+    const sw0 = aspect >= 1 ? avail : avail * aspect, sh0 = aspect >= 1 ? avail / aspect : avail;
+    const z = this.zoom, sw = sw0 * z, sh = sh0 * z;
+    return { x0: w / 2 - sw / 2 + this.pan.x, y0: hh / 2 - sh / 2 + this.pan.y, s: Math.min(sw, sh), sw, sh };
   }
   private S(p: V2) { const b = this.box; return { x: b.x0 + p.x * b.sw, y: b.y0 + (1 - p.y) * b.sh }; }
   private P(e: MouseEvent): V2 {
     const r = this.canvas.getBoundingClientRect(), b = this.box;
     return { x: (e.clientX - r.left - b.x0) / b.sw, y: 1 - (e.clientY - r.top - b.y0) / b.sh };
   }
-  private snap(p: V2, on: boolean): V2 {
+  /** Snap: wall corners / other points first, then wall lines, then the grid (Alt: no snapping). */
+  private snap(p: V2, on: boolean, exclude?: WinPoint): V2 {
     const q = { x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
-    return on ? { x: Math.round(q.x * 20) / 20, y: Math.round(q.y * 20) / 20 } : q;
+    const res = (r: V2, kind: 'point' | 'line' | 'grid' | 'free') => { this.snapped = { q: r, kind }; return r; };
+    if (!on) return res(q, 'free');
+    const b = this.box, px = (a: V2, c: V2) => Math.hypot((a.x - c.x) * b.sw, (a.y - c.y) * b.sh);
+    const own = (this.h.getOutlines() ?? []).flat().filter(r => !exclude || r.x !== exclude.x || r.y !== exclude.y);
+    let best: V2 | null = null, bd = 11;
+    for (const r of [...(this.h.snapPoints?.() ?? []), ...own]) { const d = px(r, q); if (d < bd) { bd = d; best = r; } }
+    if (best) return res({ x: best.x, y: best.y }, 'point');
+    let line: V2 | null = null; bd = 8;
+    for (const pl of this.h.snapLines?.() ?? []) for (let i = 0; i + 1 < pl.length; i++) {
+      const a = pl[i], c = pl[i + 1], dx = c.x - a.x, dy = c.y - a.y, l2 = dx * dx + dy * dy;
+      if (l2 < 1e-12) continue;
+      const t = clamp(((q.x - a.x) * dx + (q.y - a.y) * dy) / l2, 0, 1), f = { x: a.x + dx * t, y: a.y + dy * t };
+      const d = px(f, q);
+      if (d < bd) { bd = d; line = f; }
+    }
+    if (line) return res(line, 'line');
+    const g = this.h.gridStep?.() ?? 1 / 20;
+    return res({ x: clamp(Math.round(q.x / g) * g, 0, 1), y: clamp(Math.round(q.y / g) * g, 0, 1) }, 'grid');
+  }
+  /** Shift: keep the new point level / plumb with the previous one. */
+  private lock(p: V2, e: MouseEvent, prev?: V2): V2 {
+    if (!e.shiftKey || !prev) return p;
+    return Math.abs(p.x - prev.x) > Math.abs(p.y - prev.y) ? { x: p.x, y: prev.y } : { x: prev.x, y: p.y };
+  }
+  private faceAt(p: V2): V2[] | null {
+    const fs = (this.h.faces?.() ?? []).filter(f => f.length >= 3 && pointInPoly(p, f));
+    if (!fs.length) return null;
+    const area = (f: V2[]) => Math.abs(f.reduce((s, a, i) => { const c = f[(i + 1) % f.length]; return s + a.x * c.y - c.x * a.y; }, 0));
+    return fs.sort((a, c) => area(a) - area(c))[0]; // the smallest (innermost) room
+  }
+  private addOutline(pts: V2[]) {
+    const next = this.copy();
+    next.push(pts.map(q => ({ x: q.x, y: q.y })));
+    if (!this.valid(next)) return this.h.toast('Outlines cannot cross themselves');
+    this.h.begin(); this.h.setOutlines(next); this.sel = null; this.cur = null; this.h.commit(); this.h.selectionChanged(); this.draw();
   }
   private get profile() { return this.mode !== 'closed'; }
   private order(pts: WinPoint[]) { return this.mode === 'profileX' ? pts.sort((a, b) => a.x - b.x) : pts.sort((a, b) => a.y - b.y); }
@@ -106,14 +173,26 @@ export class ShapeEditor {
   private copy() { return (this.h.getOutlines() ?? []).map(o => o.map(q => ({ ...q }))); }
 
   private down(e: MouseEvent) {
+    if (e.button === 1 || e.button === 2) { e.preventDefault(); this.panning = { x: e.clientX, y: e.clientY }; return; }
     const ols = this.h.getOutlines();
     if (!ols || e.button !== 0) return;
     const p = this.P(e);
     const hit = this.hitPoint(ols, p);
-    if (hit) { this.sel = hit; this.cur = this.profile ? null : hit.o; this.drag = { ...hit, began: false }; this.h.selectionChanged(); this.draw(); return; }
+    if (hit) {
+      // clicking the first point of the outline being drawn closes it
+      const closing = !this.profile && hit.o === this.cur && hit.i === 0 && ols[hit.o].length >= 3 && this.sel?.o === hit.o && this.sel.i === ols[hit.o].length - 1;
+      this.sel = hit; this.cur = this.profile || closing ? null : hit.o; this.drag = { ...hit, began: false }; this.h.selectionChanged(); this.draw(); return;
+    }
     if (!this.profile && this.hitEdge(ols, p)) return; // double-click inserts a point there
     if (p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1) return;
-    const np = this.snap(p, !e.altKey);
+    if (!this.profile && this.tool === 'pick') {
+      const f = this.faceAt(p);
+      if (!f) return this.h.toast('No closed area here: click inside a room');
+      return this.addOutline(f);
+    }
+    if (!this.profile && this.tool === 'rect') { const a = this.snap(p, !e.altKey); this.rect = { a, b: a }; return; }
+    const curOl = !this.profile && this.cur !== null ? ols[this.cur] : undefined;
+    const np = this.lock(this.snap(p, !e.altKey), e, curOl?.[curOl.length - 1]);
     const next = this.copy();
     let o: number, i: number;
     if (this.profile) {
@@ -143,11 +222,23 @@ export class ShapeEditor {
     this.h.begin(); this.h.setOutlines(next); this.sel = { o: hit.o, i: hit.i + 1 }; this.h.commit(); this.draw();
   }
   private move = (e: MouseEvent) => {
+    if (this.panning) {
+      this.pan.x += e.clientX - this.panning.x; this.pan.y += e.clientY - this.panning.y;
+      this.panning = { x: e.clientX, y: e.clientY };
+      this.draw(); return;
+    }
     const ols = this.h.getOutlines();
     if (!ols) return;
     this.hover = e.target === this.canvas ? this.P(e) : null;
+    this.snapped = null;
+    if (this.rect) { this.rect.b = this.snap(this.P(e), !e.altKey); this.draw(); return; }
+    if (this.hover && !this.drag && !this.profile && this.tool !== 'pick') {
+      const curOl = this.cur !== null ? ols[this.cur] : undefined;
+      this.hover = this.lock(this.snap(this.hover, !e.altKey), e, this.tool === 'points' ? curOl?.[curOl.length - 1] : undefined);
+      const sn = this.snapped as { q: V2 } | null; if (sn) sn.q = this.hover;
+    }
     if (this.drag) {
-      const d = this.drag, np = this.snap(this.P(e), !e.altKey);
+      const d = this.drag, np = this.snap(this.P(e), !e.altKey, ols[d.o]?.[d.i]);
       const next = this.copy();
       Object.assign(next[d.o][d.i], np);
       if (this.profile) { const moved = next[d.o][d.i]; this.order(next[d.o]); d.i = next[d.o].indexOf(moved); this.sel = { o: d.o, i: d.i }; }
@@ -158,7 +249,18 @@ export class ShapeEditor {
     }
     this.draw();
   };
-  private up = () => { if (this.drag?.began) this.h.commit(); this.drag = null; };
+  private up = () => {
+    this.panning = null;
+    if (this.rect) {
+      const { a, b } = this.rect;
+      this.rect = null;
+      if (Math.abs(a.x - b.x) > 1e-4 && Math.abs(a.y - b.y) > 1e-4) this.addOutline([a, { x: b.x, y: a.y }, b, { x: a.x, y: b.y }]);
+      else this.draw();
+      return;
+    }
+    if (this.drag?.began) this.h.commit();
+    this.drag = null;
+  };
 
   /** Enter / Space: finish the outline being drawn; the next click starts a new one. */
   finish() {
@@ -268,7 +370,7 @@ export class ShapeEditor {
       } else if (ol.length >= 3) {
         const poly = smoothClosed(ol, def, 16).map(p => this.S(p));
         g.beginPath(); poly.forEach((q, i) => (i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y))); g.closePath();
-        g.fillStyle = 'rgba(25,25,25,0.95)'; g.fill();
+        g.fillStyle = this.h.fill?.() ?? 'rgba(25,25,25,0.95)'; g.fill();
         g.strokeStyle = active ? '#9fd3ff' : '#d0d0d0'; g.lineWidth = 2; g.stroke();
       }
       const pts = ol.map(p => this.S(p));
@@ -278,7 +380,7 @@ export class ShapeEditor {
         if (ol.length >= 3 && !active) g.closePath();
         g.stroke(); g.setLineDash([]);
         if (active && this.hover && pts.length) {
-          const q = this.S(this.snap(this.hover, true));
+          const q = this.S(this.hover);
           g.setLineDash([5, 5]); g.strokeStyle = '#7fc8ff';
           g.beginPath(); g.moveTo(pts[pts.length - 1].x, pts[pts.length - 1].y); g.lineTo(q.x, q.y);
           if (pts.length >= 2) g.lineTo(pts[0].x, pts[0].y);
@@ -292,6 +394,32 @@ export class ShapeEditor {
         if (p.s != null) { g.strokeStyle = '#9fd3ff'; g.lineWidth = 1.5; g.beginPath(); g.arc(q.x, q.y, 8, 0, Math.PI * 2); g.stroke(); }
       });
     });
+    if (this.h.fill) for (const gl of this.h.ghostLines?.() ?? []) { // reference lines stay visible over see-through fills
+      if (gl.length < 2) continue;
+      g.strokeStyle = 'rgba(255,255,255,0.55)'; g.lineWidth = 1.5;
+      g.beginPath(); gl.forEach((q, i) => { const p2 = this.S(q); i ? g.lineTo(p2.x, p2.y) : g.moveTo(p2.x, p2.y); }); g.stroke();
+    }
+    if (this.rect) {
+      const a = this.S(this.rect.a), c = this.S(this.rect.b);
+      g.fillStyle = 'rgba(127,200,255,0.2)'; g.fillRect(Math.min(a.x, c.x), Math.min(a.y, c.y), Math.abs(c.x - a.x), Math.abs(c.y - a.y));
+      g.strokeStyle = '#7fc8ff'; g.lineWidth = 2; g.strokeRect(Math.min(a.x, c.x), Math.min(a.y, c.y), Math.abs(c.x - a.x), Math.abs(c.y - a.y));
+      const L = this.h.readout({ x: Math.abs(this.rect.b.x - this.rect.a.x), y: Math.abs(this.rect.b.y - this.rect.a.y) });
+      g.fillStyle = '#cfe8ff'; g.fillText(L.replace(', ', ' × '), Math.max(a.x, c.x) + 6, Math.min(a.y, c.y) - 4);
+    }
+    if (!this.profile && this.tool === 'pick' && this.hover && !this.drag) {
+      const f = this.faceAt(this.hover);
+      if (f) {
+        g.beginPath(); f.forEach((q, i) => { const s2 = this.S(q); i ? g.lineTo(s2.x, s2.y) : g.moveTo(s2.x, s2.y); }); g.closePath();
+        g.fillStyle = 'rgba(127,200,255,0.25)'; g.fill(); g.strokeStyle = '#7fc8ff'; g.lineWidth = 2; g.stroke();
+      }
+    }
+    if (this.snapped && this.snapped.kind !== 'free' && !this.profile && (this.tool !== 'pick' || this.drag)) {
+      const s2 = this.S(this.snapped.q);
+      g.strokeStyle = this.snapped.kind === 'point' ? '#ffd400' : this.snapped.kind === 'line' ? '#7fffb0' : 'rgba(255,255,255,0.5)'; g.lineWidth = 1.5;
+      if (this.snapped.kind === 'point') g.strokeRect(s2.x - 6, s2.y - 6, 12, 12);
+      else if (this.snapped.kind === 'line') { g.beginPath(); g.moveTo(s2.x - 6, s2.y - 6); g.lineTo(s2.x + 6, s2.y + 6); g.moveTo(s2.x + 6, s2.y - 6); g.lineTo(s2.x - 6, s2.y + 6); g.stroke(); }
+      else { g.beginPath(); g.arc(s2.x, s2.y, 3, 0, Math.PI * 2); g.stroke(); }
+    }
     if (this.hover && this.hover.x >= 0 && this.hover.x <= 1 && this.hover.y >= 0 && this.hover.y <= 1) {
       g.fillStyle = '#aaa';
       g.fillText(this.h.readout(this.hover), 8, hh - 8);

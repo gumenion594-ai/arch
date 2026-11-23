@@ -5,10 +5,10 @@ import {
   BalconyShape, DESIGN_CATEGORIES, Design, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
   divisionBorders, floorLabel, planForFloor, segColT, segDivLen, segKind, uid,
 } from './model';
-import { polyLength, sampleSeg } from './geometry';
-import { autoColumns, autoFloorAreas, columnRange } from './build3d';
+import { enclosedFaces, polyLength, sampleSeg } from './geometry';
+import { autoColumns, autoFloorAreas, columnRange, interiorForFloor } from './build3d';
 import { Hit } from './viewer';
-import { ShapeEditor, ShapeHost } from './shapeeditor';
+import { ShapeEditor, ShapeHost, ShapeTool } from './shapeeditor';
 import { formatOf, importDesignFile, deleteAsset } from './assets';
 import { BUILTIN_DESIGNS } from './builtin';
 import { askConfirm, askText, h, num, put, toast } from './ui';
@@ -664,6 +664,12 @@ export function setupFloorAreaMode(ed: Editor) {
     smooth: () => 0,
     begin: () => ed.begin(), commit: () => ed.commit(), toast, selectionChanged: () => ed.renderRight(),
     aspect: () => 1,
+    fill: () => (ed.maskSub === 'carves' ? 'rgba(217,90,74,0.35)' : 'rgba(90,150,217,0.3)'),
+    gridStep: () => 0.25 / L(),
+    // snap to the walls of this floor, the floor below and the floor plan (internal walls)
+    snapPoints: () => refPlans(ed).flatMap(pl => pl.points.map(q => ({ x: q.x, y: q.y }))),
+    snapLines: () => refPlans(ed).flatMap(pl => pl.segments.map(sg => sampleSeg(pl, sg))),
+    faces: () => refPlans(ed).flatMap(pl => enclosedFaces(pl)),
     labels: { bottom: 'building area, seen from above', top: '' },
     readout: q => `${fmt(q.x * L())} m, ${fmt(q.y * L())} m`,
     ghostLines: () => {
@@ -676,6 +682,15 @@ export function setupFloorAreaMode(ed: Editor) {
       return [...walls, ...other.map(o => [...o, o[0]])];
     },
   })];
+  ed.shapeEds[0].tool = ed.maskTool;
+}
+
+/** Plans whose walls the floor-area editor snaps to: this floor's, the floor below's and this floor's floor plan. */
+function refPlans(ed: Editor) {
+  const { i, f } = maskOf(ed);
+  if (!f) return [];
+  const out = [planForFloor(ed.b, f.id), i > 0 ? planForFloor(ed.b, ed.b.floors[i - 1].id) : undefined, interiorForFloor(ed.b, f.id) ?? undefined];
+  return out.filter((x, k): x is NonNullable<typeof x> => !!x && out.indexOf(x) === k);
 }
 
 export function renderFloorAreaPanel(ed: Editor) {
@@ -686,12 +701,19 @@ export function renderFloorAreaPanel(ed: Editor) {
     ...b.floors.map((fl, k) => h('option', { value: fl.id }, `Floor ${floorLabel(b, k)}${fl.mask ? ' (edited)' : ''}`)));
   if (f) floorSel.value = f.id;
   const sub = (k: 'areas' | 'carves', label: string) => h('button', { class: ed.maskSub === k ? 'tab active' : 'tab', onclick: () => { ed.maskSub = k; main?.reset(); ed.refresh(); } }, label);
+  const tool = (t: ShapeTool, label: string) => h('button', { class: main?.tool === t ? 'tab active' : 'tab', onclick: () => { if (main) { main.finish(); main.tool = t; ed.maskTool = t; } ed.refresh(); } }, label);
   ed.right.innerHTML = '';
   put(ed.right,
     h('div', { class: 'box-title' }, 'Floor areas'),
     h('label', {}, 'Floor', floorSel),
     f ? h('div', { class: 'muted small' }, f.mask ? 'Edited by hand.' : 'Automatic: what the walls of this floor enclose (and areas of the floor below whose walls go straight up). Edit it to change it.') : null,
     h('div', { class: 'row' }, sub('areas', 'Floor area'), sub('carves', 'Carve')),
+    h('div', { class: 'box-title' }, ed.maskSub === 'areas' ? 'Add floor by' : 'Carve by'),
+    h('div', { class: 'row' }, tool('pick', 'Clicking a room'), tool('rect', 'Rectangle'), tool('points', 'Points')),
+    h('div', { class: 'muted small' }, main?.tool === 'pick' ? 'Click inside any area closed by walls (this floor, the floor below, or the floor plan rooms).'
+      : main?.tool === 'rect' ? 'Drag a rectangle. Corners snap to walls.'
+      : 'Click points (they snap to wall corners and wall lines; Shift keeps it straight, Alt turns snapping off). Click the first point or press Enter to close.'),
+    h('div', { class: 'row' }, h('button', { onclick: () => main?.resetView() }, 'Reset zoom'), h('span', { class: 'muted small' }, 'Wheel zooms · right-drag pans')),
     pt ? h('div', { class: 'box' },
       h('div', { class: 'box-title' }, 'Selected point'),
       h('div', { class: 'row' },
@@ -706,8 +728,8 @@ export function renderFloorAreaPanel(ed: Editor) {
     ),
     h('div', { class: 'muted small help' },
       ed.maskSub === 'areas'
-        ? 'Each floor builds only its floor: the floor above is its ceiling (the top floor also gets a roof). Drag points to change the floor, click to start a new area (Enter finishes it), double-click an edge to add a point. Areas may overlap; they add up.'
-        : 'Draw shapes to cut out of the floor: stair openings, double-height spaces, light wells. Click to add points, Enter finishes a shape, drag to adjust.',
+        ? 'Each floor builds only its floor: the floor above is its ceiling (the top floor also gets a roof). Drag points to change it, double-click an edge to add a point. Overlapping areas merge into one floor.'
+        : 'Cut shapes out of the floor: stair openings, double-height spaces, light wells. Drag points to adjust.',
       ' The walls of the floor are shown in white. Columns stand on the floor where there is floor, and join the column below where it is carved away.'),
     void i,
   );

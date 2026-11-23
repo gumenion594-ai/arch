@@ -6,7 +6,7 @@ import {
 } from './model';
 import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
-import { ShapeEditor } from './shapeeditor';
+import { ShapeEditor, ShapeTool } from './shapeeditor';
 import { DesignMode, PickMode, onPick, renderDesignPanel, renderFloorAreaPanel, renderViewPanel, setupDesignMode, setupFloorAreaMode } from './decor';
 import { V2, enclosedFaces, planValid, signedArea } from './geometry';
 import { Selection, interiorForFloor, loftPointTarget } from './build3d';
@@ -41,6 +41,7 @@ export class Editor {
   upTo: number | null = null; // cutaway (3D view)
   maskFloor: string | null = null; // floor whose floor area is being edited
   maskSub: 'areas' | 'carves' = 'areas';
+  maskTool: ShapeTool = 'pick';
   shapeEds: ShapeEditor[] = [];
   report: Report | null = null;
   root = h('div', { class: 'editor' });
