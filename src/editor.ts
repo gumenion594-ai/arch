@@ -8,7 +8,7 @@ import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
 import { WindowPlanner } from './windowplanner';
 import { V2, enclosedFaces, planValid } from './geometry';
-import { Selection, interiorForFloor, loftPointTarget } from './build3d';
+import { Selection, interiorForFloor, loftPointTarget, slotFits } from './build3d';
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
@@ -89,8 +89,9 @@ export class Editor {
   refresh() {
     this.renderHeader();
     this.renderLeft();
-    this.renderRight();
+    // 3D first: the side panel shows numbers the build produces (e.g. windows that no longer fit)
     if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea });
+    this.renderRight();
     this.planner?.draw();
     this.wplanner?.draw();
   }
@@ -512,11 +513,19 @@ export class Editor {
         h('div', { class: 'row' },
           h('button', {
             class: 'primary', disabled: !this.carveShape || !slots.length,
-            onclick: () => this.mutate(() => slots.forEach(k => (b.windows[k] = this.carveShape!))),
+            onclick: () => {
+              // fixed-size windows only go where the division is wide (and the floor tall) enough
+              const ok = slots.filter(k => { const [fid, sid] = k.split('|'); return slotFits(b, fid, sid, this.carveShape!); });
+              const skipped = slots.length - ok.length;
+              if (!ok.length) return toast(`This window does not fit any of the ${slots.length} selected division(s)`);
+              this.mutate(() => ok.forEach(k => (b.windows[k] = this.carveShape!)));
+              toast(skipped ? `Carved ${ok.length} window(s); ${skipped} division(s) are too small for it` : `Carved ${ok.length} window(s)`);
+            },
           }, `Carve windows (${slots.length})`),
           h('button', { disabled: !slots.length, onclick: () => this.mutate(() => slots.forEach(k => delete b.windows[k])) }, 'Remove windows'),
         ),
         h('div', { class: 'muted small' }, 'One window per wall division. Give a wall more divisions (structure planner) for more windows.'),
+        this.viewer?.stats.windowSkipped ? h('div', { class: 'warn' }, `${this.viewer.stats.windowSkipped} fixed-size window(s) no longer fit their division (the wall or floor changed) and are not built.`) : null,
         h('button', { onclick: () => this.clearSel() }, 'Clear selection'),
       ) : null,
       this.reportBox(),
@@ -580,6 +589,7 @@ export class Editor {
         }, 'Delete'),
       ),
       sh ? this.slider('Smoothness (whole shape)', sh.smooth, v => (sh.smooth = v)) : null,
+      sh ? this.fixedSizeBox(sh) : null,
       pt ? h('div', { class: 'box' },
         h('div', { class: 'box-title' }, 'Selected point'),
         this.slider(`Smoothness at this point${pt.s == null ? ' (shape default)' : ''}`, pt.s ?? null, v => (pt.s = v), () => (pt.s = null)),
@@ -600,6 +610,42 @@ export class Editor {
     );
   }
 
+
+  /** Fixed size: width / height / sill in metres instead of filling the division. */
+  private fixedSizeBox(sh: WindowShape) {
+    const fx = sh.fixed;
+    const cb = h('input', {
+      type: 'checkbox', checked: !!fx,
+      onchange: () => this.mutate(() => (sh.fixed = cb.checked ? { w: 1.2, h: 1.5, sill: 0.9 } : null)),
+    });
+    const field = (label: string, key: 'w' | 'h' | 'sill', min: number) => {
+      const inp = h('input', {
+        type: 'number', step: 0.05, value: fmt(fx![key]),
+        onchange: () => {
+          const v = num(inp.value);
+          if (!(v >= min && v <= 100)) { toast(`${label}: ${min} to 100 m`); return this.refresh(); }
+          this.mutate(() => (fx![key] = v));
+        },
+      });
+      return h('label', {}, label, inp);
+    };
+    return h('div', { class: 'box' },
+      h('label', { class: 'chk', title: 'Same size in every division instead of stretching with it' }, cb, 'Fixed size (metres)'),
+      fx ? h('div', { class: 'row' }, field('Width', 'w', 0.05), field('Height', 'h', 0.05), field('Sill', 'sill', 0)) : null,
+      fx && sh.outlines.some(o => o.length) ? h('button', {
+        title: 'Stretch the drawing so the openings fill the whole box (exactly width × height)',
+        onclick: () => this.mutate(() => {
+          const all = sh.outlines.flat();
+          const x0 = Math.min(...all.map(p => p.x)), x1 = Math.max(...all.map(p => p.x));
+          const y0 = Math.min(...all.map(p => p.y)), y1 = Math.max(...all.map(p => p.y));
+          for (const p of all) { p.x = x1 > x0 ? (p.x - x0) / (x1 - x0) : 0.5; p.y = y1 > y0 ? (p.y - y0) / (y1 - y0) : 0.5; }
+        }),
+      }, 'Fit outline to box') : null,
+      h('div', { class: 'muted small' }, fx
+        ? 'The outline fills this box, centred in each division. Divisions narrower than the width (or floors lower than sill + height) get no window. The window still follows the wall: on slanted or curved walls it slants and bends with it; the width is measured along the bottom of the wall.'
+        : 'Off: the outline stretches to fill each wall division and the floor height.'),
+    );
+  }
 
   // ---- structure / floor planner panel ----
   private renderPlanPanel() {

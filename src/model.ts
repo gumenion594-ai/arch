@@ -44,6 +44,8 @@ export interface WindowShape {
   id: string; name: string;
   outlines: WinPoint[][]; // several openings may share one wall division
   smooth: number; // default smoothness 0..1
+  /** Fixed size in metres: the outline fills a w × h box, centred in the division, sill metres above the floor. */
+  fixed?: { w: number; h: number; sill: number } | null;
   points?: WinPoint[]; // (older projects: single outline)
 }
 export const hasFloor = (f: Floor) => f.hasFloor !== false;

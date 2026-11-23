@@ -38,15 +38,19 @@ export class WindowPlanner {
   }
   reset() { this.sel = null; this.cur = null; }
 
+  /** Drawing area: a square for division-relative shapes, the window's own proportions for fixed-size ones. */
   private get box() {
     const w = this.canvas.clientWidth, hh = this.canvas.clientHeight;
-    const s = Math.max(50, Math.min(w, hh) - 80);
-    return { x0: (w - s) / 2, y0: (hh - s) / 2, s };
+    const fx = this.h.getShape()?.fixed;
+    const aspect = fx ? fx.w / fx.h : 1;
+    const avail = Math.max(50, Math.min(w, hh) - 80);
+    const sw = aspect >= 1 ? avail : avail * aspect, sh = aspect >= 1 ? avail / aspect : avail;
+    return { x0: (w - sw) / 2, y0: (hh - sh) / 2, s: Math.min(sw, sh), sw, sh };
   }
-  private S(p: V2) { const b = this.box; return { x: b.x0 + p.x * b.s, y: b.y0 + (1 - p.y) * b.s }; }
+  private S(p: V2) { const b = this.box; return { x: b.x0 + p.x * b.sw, y: b.y0 + (1 - p.y) * b.sh }; }
   private P(e: MouseEvent): V2 {
     const r = this.canvas.getBoundingClientRect(), b = this.box;
-    return { x: (e.clientX - r.left - b.x0) / b.s, y: 1 - (e.clientY - r.top - b.y0) / b.s };
+    return { x: (e.clientX - r.left - b.x0) / b.sw, y: 1 - (e.clientY - r.top - b.y0) / b.sh };
   }
   private snap(p: V2, on: boolean): V2 {
     const q = { x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
@@ -180,19 +184,23 @@ export class WindowPlanner {
     const g = this.ctx, b = this.box;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = '#232323'; g.fillRect(0, 0, w, hh);
-    g.fillStyle = '#5a5249'; g.fillRect(b.x0, b.y0, b.s, b.s);
+    const sh = this.h.getShape(), fx = sh?.fixed;
+    g.fillStyle = fx ? '#3e4a55' : '#5a5249'; g.fillRect(b.x0, b.y0, b.sw, b.sh);
     g.strokeStyle = 'rgba(255,255,255,0.08)'; g.lineWidth = 1;
     for (let i = 1; i < 20; i++) {
-      const o = (b.s * i) / 20;
-      g.beginPath(); g.moveTo(b.x0 + o, b.y0); g.lineTo(b.x0 + o, b.y0 + b.s); g.stroke();
-      g.beginPath(); g.moveTo(b.x0, b.y0 + o); g.lineTo(b.x0 + b.s, b.y0 + o); g.stroke();
+      const ox = (b.sw * i) / 20, oy = (b.sh * i) / 20;
+      g.beginPath(); g.moveTo(b.x0 + ox, b.y0); g.lineTo(b.x0 + ox, b.y0 + b.sh); g.stroke();
+      g.beginPath(); g.moveTo(b.x0, b.y0 + oy); g.lineTo(b.x0 + b.sw, b.y0 + oy); g.stroke();
     }
-    g.strokeStyle = '#e6e6e6'; g.strokeRect(b.x0, b.y0, b.s, b.s);
+    g.strokeStyle = '#e6e6e6'; g.strokeRect(b.x0, b.y0, b.sw, b.sh);
     g.fillStyle = '#888'; g.font = '11px system-ui';
-    g.fillText('floor', b.x0 + 4, b.y0 + b.s + 14);
-    g.fillText('ceiling', b.x0 + 4, b.y0 - 6);
-    g.fillText('one wall division →', b.x0 + b.s - 110, b.y0 + b.s + 14);
-    const sh = this.h.getShape();
+    if (fx) {
+      g.fillText(`window box ${fx.w} m wide × ${fx.h} m high, ${fx.sill} m above the floor`, b.x0 + 4, b.y0 + b.sh + 14);
+    } else {
+      g.fillText('floor', b.x0 + 4, b.y0 + b.sh + 14);
+      g.fillText('ceiling', b.x0 + 4, b.y0 - 6);
+      g.fillText('one wall division →', b.x0 + b.sw - 110, b.y0 + b.sh + 14);
+    }
     if (!sh) { g.fillStyle = '#aaa'; g.fillText('Create a window shape on the right', b.x0 + 10, b.y0 + 20); return; }
     sh.outlines.forEach((ol, o) => {
       if (!ol.length) return;
@@ -226,7 +234,9 @@ export class WindowPlanner {
     });
     if (this.hover && this.hover.x >= 0 && this.hover.x <= 1 && this.hover.y >= 0 && this.hover.y <= 1) {
       g.fillStyle = '#aaa';
-      g.fillText(`x ${this.hover.x.toFixed(2)}  y ${this.hover.y.toFixed(2)}  (${(this.hover.y * this.h.floorHeight()).toFixed(2)} m up on a ${this.h.floorHeight().toFixed(2)} m floor)`, 12, hh - 12);
+      g.fillText(fx
+        ? `x ${this.hover.x.toFixed(2)}  y ${this.hover.y.toFixed(2)}  (${(this.hover.x * fx.w).toFixed(2)} m across, ${(fx.sill + this.hover.y * fx.h).toFixed(2)} m above the floor)`
+        : `x ${this.hover.x.toFixed(2)}  y ${this.hover.y.toFixed(2)}  (${(this.hover.y * this.h.floorHeight()).toFixed(2)} m up on a ${this.h.floorHeight().toFixed(2)} m floor)`, 12, hh - 12);
     }
   }
 }

@@ -25,7 +25,7 @@ export class Viewer {
   private ro: ResizeObserver;
   private disposed = false;
   private frameKey = '';
-  stats: BuildStats = { windowCount: 0, windowArea: 0 };
+  stats: BuildStats = { windowCount: 0, windowArea: 0, windowSkipped: 0 };
   onPick?: (hit: Hit | null, e: MouseEvent) => void;
 
   constructor(private host: HTMLElement) {
@@ -145,7 +145,7 @@ export class Viewer {
     g.position.set((B.x0 + B.x1) / 2, -0.0005 * span, (B.z0 + B.z1) / 2);
     this.content.add(g);
 
-    this.stats = { windowCount: 0, windowArea: 0 };
+    this.stats = { windowCount: 0, windowArea: 0, windowSkipped: 0 };
     for (const b of s.buildings) this.addBuilding(s, b, !o.activeId || o.activeId === '*' || b.id === o.activeId, o);
   }
 
@@ -238,7 +238,7 @@ export class Viewer {
       tex: id => this.texMat(s, id),
     };
     const { group, stats } = buildStructure(b, { detailed, interior: detailed, mats, selection: sel, textures: s.textures });
-    this.stats.windowCount += stats.windowCount; this.stats.windowArea += stats.windowArea;
+    this.stats.windowCount += stats.windowCount; this.stats.windowArea += stats.windowArea; this.stats.windowSkipped += stats.windowSkipped;
     grp.add(group);
   }
 

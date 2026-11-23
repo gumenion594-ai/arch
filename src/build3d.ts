@@ -39,7 +39,7 @@ export interface BuildOpts {
   selection?: Selection;
   textures: Texture[];
 }
-export interface BuildStats { windowCount: number; windowArea: number }
+export interface BuildStats { windowCount: number; windowArea: number; windowSkipped: number }
 
 /** Plan that sits at a level (0..N). Level N is the "Top" (roof) level. */
 export function planAtLevel(b: Building, k: number): StructurePlan | null {
@@ -87,7 +87,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   const g = new THREE.Group();
   const L = p.baseLength, N = p.floors.length, mats = o.mats;
   const W = (v: V2, y: number) => toWorld(p, v, y);
-  const stats: BuildStats = { windowCount: 0, windowArea: 0 };
+  const stats: BuildStats = { windowCount: 0, windowArea: 0, windowSkipped: 0 };
   const sel = o.selection ?? emptySelection();
 
   const add = (geo: THREE.BufferGeometry, mat: THREE.Material, pick?: PickInfo, stat?: StatInfo, edges = true) => {
@@ -166,9 +166,16 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
               const shapeId = p.windows[windowKey(floor.id, seg.id, k)];
               const shape = shapeId && p.windowShapes.find(s => s.id === shapeId);
               if (!shape) continue;
+              // fixed-size windows: scale the outline into a w × h box (measured along the bottom of the wall)
+              const divLen = (polyLength(bottom) * L) / d, wallH = y1 - y0;
+              const fx = shape.fixed;
+              if (fx && !windowFits(fx, divLen, wallH)) { stats.windowSkipped++; continue; }
+              const map = fx
+                ? (q: V2) => ({ x: 0.5 + (q.x - 0.5) * (fx.w / divLen), y: (fx.sill + q.y * fx.h) / wallH })
+                : (q: V2) => q;
               for (const outline of shape.outlines) {
                 if (outline.length < 3) continue;
-                let hole = smoothClosed(outline, shape.smooth).map(q => ({
+                let hole = smoothClosed(outline, shape.smooth).map(map).map(q => ({
                   x: clamp01((k + clamp(q.x, 0.004, 0.996)) / d),
                   y: clamp(q.y, 0.004, 0.996),
                 }));
@@ -253,6 +260,21 @@ function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStair
     place(new THREE.BoxGeometry(t, h, ob.d - 2 * t), ob.w / 2 - t / 2, y0 + h / 2, 0);
     place(new THREE.BoxGeometry(t, h, ob.d - 2 * t), -ob.w / 2 + t / 2, y0 + h / 2, 0);
   }
+}
+
+/** A fixed-size window fits a division if it is narrower than the division and fits the wall height. */
+export const windowFits = (fx: { w: number; h: number; sill: number }, divLen: number, wallH: number) =>
+  fx.w <= divLen - 0.02 && fx.sill + fx.h <= wallH - 0.02;
+
+/** Can this window shape be built in this wall division? (fixed-size shapes need room) */
+export function slotFits(b: Building, floorId: string, segId: string, shapeId: string): boolean {
+  const shape = b.windowShapes.find(s => s.id === shapeId);
+  if (!shape?.fixed) return true;
+  const fl = b.floors.find(f => f.id === floorId), plan = fl && planForFloor(b, floorId);
+  const seg = plan?.segments.find(s => s.id === segId);
+  if (!fl || !plan || !seg) return false;
+  const d = Math.max(1, seg.divisions ?? 1);
+  return windowFits(shape.fixed, (polyLength(sampleSeg(plan, seg)) * b.baseLength) / d, fl.height);
 }
 
 /** The point of the plan above nearest to v. */
