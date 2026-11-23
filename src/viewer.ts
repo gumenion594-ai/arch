@@ -1,13 +1,14 @@
 // Three.js 3D view: ground, building-area wireframe, walls, slabs; click to pick.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Building, MATERIALS, Texture, elevation, segConnect, segKind } from './model';
+import { Building, Design, MATERIALS, Texture, elevation, segConnect, segKind } from './model';
+import { designObject } from './assets';
 import { enclosedFaces, sampleSeg, V2 } from './geometry';
 import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, loftPointTarget, planAtLevel, toWorld } from './build3d';
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
 
-export interface Scene3D { id: string; buildings: Building[]; textures: Texture[] }
+export interface Scene3D { id: string; buildings: Building[]; textures: Texture[]; designs?: Design[] }
 export interface ViewOpts {
   activeId: string | null; // building drawn bright ('*' or null = all)
   mode: ViewMode;
@@ -78,6 +79,7 @@ export class Viewer {
 
   private clear() {
     const shared = new Set(this.sharedMats);
+    this.content.traverse(o => { const m = (o as THREE.Mesh).material as THREE.Material | undefined; if (m && !m.visible) shared.add(m); });
     this.content.traverse(o => {
       const m = o as THREE.Mesh;
       m.geometry?.dispose();
@@ -127,9 +129,27 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
   }
 
+  private last: Scene3D | null = null;
+  /** Camera presets. Front looks from the south (plan y = 0 side) towards the north. */
+  look(dir: 'front' | 'back' | 'left' | 'right' | 'top' | 'corner') {
+    if (!this.last) return;
+    const B = this.bounds(this.last);
+    const cx = (B.x0 + B.x1) / 2, cz = (B.z0 + B.z1) / 2, cy = (B.y0 + B.y1) / 2;
+    const r = Math.max(B.x1 - B.x0, B.z1 - B.z0, B.y1 - B.y0) * 1.5;
+    const d: Record<string, [number, number, number]> = {
+      front: [0, 0.25, 1], back: [0, 0.25, -1], left: [-1, 0.25, 0], right: [1, 0.25, 0], top: [0, 1, 0.001], corner: [0.7, 0.5, 0.7],
+    };
+    const [x, y, z] = d[dir];
+    const v = new THREE.Vector3(x, y, z).normalize().multiplyScalar(r);
+    this.controls.target.set(cx, cy * 0.8, cz);
+    this.camera.position.set(cx + v.x, cy * 0.8 + v.y, cz + v.z);
+    this.controls.update();
+  }
+
   /** Rebuild the scene. */
   update(s: Scene3D, o: ViewOpts) {
     this.clear();
+    this.last = s;
     const key = s.id + ':' + s.buildings.map(b => b.id + b.x + ',' + b.y).join(';');
     if (key !== this.frameKey) { this.frame(s); this.frameKey = key; }
     const B = this.bounds(s);
@@ -229,8 +249,14 @@ export class Viewer {
         color: m === 'structural' ? 0xbdbdbd : MATERIALS[m]?.color ?? 0xd8d2c4, roughness: 0.9, side: THREE.DoubleSide,
         transparent: m === 'glass', opacity: m === 'glass' ? 0.45 : 1,
       })),
-      column: m => std('c' + m, () => new THREE.MeshStandardMaterial({ color: detailed ? MATERIALS[m]?.color ?? 0xe6e1d6 : 0xc8c8c8, roughness: 0.8 })),
-      slab: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1 }),
+      column: m => std('c' + m, () => new THREE.MeshStandardMaterial({ color: detailed ? MATERIALS[m]?.color ?? 0xe6e1d6 : 0xc8c8c8, roughness: 0.8, side: THREE.DoubleSide })),
+      color: css => std('k' + css, () => new THREE.MeshStandardMaterial({ color: new THREE.Color(css), roughness: 0.85, side: THREE.DoubleSide })),
+      deco: new THREE.MeshStandardMaterial({ color: detailed ? 0xeee8dc : 0xd0d0d0, roughness: 0.75, side: THREE.DoubleSide }),
+      design: id => {
+        const d = id ? s.designs?.find(x => x.id === id) : undefined;
+        return d ? designObject(d, () => this.onTexture?.()) : null;
+      },
+      slab: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1, side: THREE.DoubleSide }),
       object: new THREE.MeshStandardMaterial({ color: 0xa8b4c0, roughness: 0.8 }),
       edge: new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: detailed ? 0.25 : active ? 0.6 : 0.3 }),
       selected: new THREE.MeshStandardMaterial({ color: 0xffd400, emissive: 0x6b5800, roughness: 0.8, side: THREE.DoubleSide }),

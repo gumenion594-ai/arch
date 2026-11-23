@@ -1,19 +1,20 @@
 // Building project editor: floors panel, 3D view, structure / floor / window planners.
 import {
-  Building, ConnectMode, Floor, History, segConnect, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan, WindowShape,
+  Building, BalconyShape, ConnectMode, DesignCategory, Floor, History, OpeningShape, PlacementType, segConnect, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan,
   clamp, elevation, floorBase, floorLabel, formatRanges, newInteriorPlan, newPlan, parseRanges, planForFloor, saveProject,
-  segKind, totalHeight, uid, windowKey,
+  segKind, totalHeight, uid,
 } from './model';
 import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
-import { WindowPlanner } from './windowplanner';
+import { ShapeEditor } from './shapeeditor';
+import { DesignMode, PickMode, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
 import { V2, enclosedFaces, planValid, signedArea } from './geometry';
-import { Selection, interiorForFloor, loftPointTarget, slotFits } from './build3d';
+import { Selection, interiorForFloor, loftPointTarget } from './build3d';
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
-type Mode = 'view' | 'structure' | 'floorplan' | 'window';
-type PickMode = 'division' | 'wall' | 'floor';
+type Mode = 'view' | 'structure' | 'floorplan' | DesignMode;
+const isDesign = (m: Mode): m is DesignMode => m === 'openings' || m === 'niches' || m === 'balconies';
 const PLAN_COLORS = ['#4a90d9', '#d97a4a', '#5cb85c', '#b05cd9', '#d9c84a', '#4ad9c8', '#d94a7a', '#8a8a8a'];
 
 const pref = (k: string, d: string) => { try { return localStorage.getItem('arch.pref.' + k) ?? d; } catch { return d; } };
@@ -32,8 +33,12 @@ export class Editor {
   pickMode: PickMode = 'wall';
   private anchor: string | null = null;
   activePlan: Record<'structure' | 'floorplan', string | null> = { structure: null, floorplan: null };
-  activeShape: string | null = null;
-  carveShape: string | null = null;
+  activeDesign: Record<DesignMode, string | null> = { openings: null, niches: null, balconies: null };
+  selBorders = new Set<string>(); // floorId|segId|k
+  selElements = new Set<string>(); // placement ids
+  addType: PlacementType = 'opening';
+  libCategory: DesignCategory = 'frame';
+  shapeEds: ShapeEditor[] = [];
   report: Report | null = null;
   root = h('div', { class: 'editor' });
   left = h('div', { class: 'left panel' });
@@ -42,14 +47,11 @@ export class Editor {
   header = h('div', { class: 'header' });
   viewer: Viewer | null = null;
   planner: Planner | null = null;
-  wplanner: WindowPlanner | null = null;
 
   constructor(p: Project, private onBack: () => void) {
     this.p = p;
     this.activePlan.structure = this.b.plans[0]?.id ?? null;
     this.activePlan.floorplan = this.b.interiorPlans[0]?.id ?? null;
-    this.activeShape = this.b.windowShapes[0]?.id ?? null;
-    this.carveShape = this.activeShape;
     this.root.append(this.header, this.left, this.center, this.right);
     app.innerHTML = '';
     app.append(this.root);
@@ -59,7 +61,7 @@ export class Editor {
 
   destroy() {
     window.removeEventListener('keydown', this.onKey);
-    this.viewer?.dispose(); this.planner?.dispose(); this.wplanner?.dispose();
+    this.viewer?.dispose(); this.planner?.dispose(); this.shapeEds.forEach(e => e.dispose());
   }
 
   /** The building (a building project has exactly one). */
@@ -77,45 +79,42 @@ export class Editor {
     for (const id of [...this.selFloors]) if (!fids.has(id)) this.selFloors.delete(id);
     if (!this.b.plans.some(pl => pl.id === this.activePlan.structure)) this.activePlan.structure = this.b.plans[0]?.id ?? null;
     if (!this.b.interiorPlans.some(pl => pl.id === this.activePlan.floorplan)) this.activePlan.floorplan = this.b.interiorPlans[0]?.id ?? null;
-    if (!this.b.windowShapes.some(s => s.id === this.activeShape)) this.activeShape = this.b.windowShapes[0]?.id ?? null;
+    const pids = new Set(this.b.placements.map(x => x.id));
+    for (const id of [...this.selElements]) if (!pids.has(id)) this.selElements.delete(id);
     saveProject(this.p);
     this.report = null;
     this.planner?.prune();
     this.refresh();
   }
 
-  get selection(): Selection { return { floors: this.selFloors, walls: this.selWalls, divisions: this.selDivs }; }
+  get selection(): Selection { return { floors: this.selFloors, walls: this.selWalls, divisions: this.selDivs, borders: this.selBorders, elements: this.selElements }; }
 
   refresh() {
     this.renderHeader();
     this.renderLeft();
     // 3D first: the side panel shows numbers the build produces (e.g. windows that no longer fit)
-    if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea });
+    if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures, designs: this.p.designs }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea });
     this.renderRight();
     this.planner?.draw();
-    this.wplanner?.draw();
+    this.shapeEds.forEach(e => e.draw());
   }
 
   setMode(m: Mode) {
     this.mode = m;
     this.viewer?.dispose(); this.viewer = null;
     this.planner?.dispose(); this.planner = null;
-    this.wplanner?.dispose(); this.wplanner = null;
+    this.shapeEds.forEach(e => e.dispose()); this.shapeEds = [];
     this.center.innerHTML = '';
+    this.center.classList.toggle('niche-grid', m === 'niches');
     this.root.classList.add('with-right');
     if (m === 'view') {
       this.viewer = new Viewer(this.center);
       this.viewer.onTexture = () => this.refresh();
-      this.viewer.onPick = (hit, e) => this.onPick(hit, e);
-    } else if (m === 'window') {
-      this.wplanner = new WindowPlanner(this.center, {
-        getShape: () => this.shape(),
-        begin: () => this.begin(),
-        commit: () => this.commit(),
-        toast,
-        floorHeight: () => this.b.floors[this.b.ground]?.height ?? 3,
-        selectionChanged: () => this.renderRight(),
-      });
+      this.viewer.onPick = (hit, e) => onPick(this, hit, e);
+    } else if (isDesign(m)) {
+      const list = m === 'balconies' ? this.b.balconyShapes : this.b.openingShapes.filter(x => x.kind === (m === 'openings' ? 'opening' : 'niche'));
+      if (!list.some(x => x.id === this.activeDesign[m])) this.activeDesign[m] = list[0]?.id ?? null;
+      setupDesignMode(this, m);
     } else {
       this.planner = new Planner(this.center, {
         getPlan: () => this.plan(),
@@ -123,6 +122,7 @@ export class Editor {
         links: () => this.ghostLinks(),
         allowed: () => (this.mode === 'floorplan' ? this.allowedArea() : null),
         baseLength: () => this.b.baseLength,
+        divLen: sg => sg.divLen ?? this.b.divLen,
         begin: () => this.begin(),
         commit: () => this.commit(),
         toast,
@@ -138,7 +138,9 @@ export class Editor {
     return this.plans().find(pl => pl.id === this.activePlan[key]) ?? null;
   }
   setActivePlan(id: string | null) { this.activePlan[this.mode === 'floorplan' ? 'floorplan' : 'structure'] = id; }
-  shape(): WindowShape | null { return this.b.windowShapes.find(s => s.id === this.activeShape) ?? null; }
+  /** Opening / niche shape being designed. */
+  oshape(): OpeningShape | null { const m = this.mode === 'niches' ? 'niches' : 'openings'; return this.b.openingShapes.find(s => s.id === this.activeDesign[m]) ?? null; }
+  balcony(): BalconyShape | null { return this.b.balconyShapes.find(s => s.id === this.activeDesign.balconies) ?? null; }
 
   /** Floor planner: external-wall plan of the first floor this floor plan is used on. */
   private refStructure(): StructurePlan | null {
@@ -174,8 +176,8 @@ export class Editor {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) { e.preventDefault(); this.undo(); return; }
     if (typing) return;
     const finishKey = e.key === 'Enter' || e.key === ' ';
-    if (this.wplanner && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); this.wplanner.deleteSelected(); return; }
-    if (this.wplanner && (finishKey || e.key === 'Escape')) { e.preventDefault(); this.wplanner.finish(); return; }
+    if (this.shapeEds.length && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); this.shapeEds.forEach(x => x.selectedPoint() && x.deleteSelected()); return; }
+    if (this.shapeEds.length && (finishKey || e.key === 'Escape')) { e.preventDefault(); this.shapeEds.forEach(x => x.finish()); return; }
     if (this.mode === 'view' && e.key === 'Escape') { this.clearSel(); return; }
     if (!this.planner) return;
     if (e.key === 'Escape' || finishKey) { e.preventDefault(); this.planner.endChain(); }
@@ -209,7 +211,7 @@ export class Editor {
     put(this.header, 
       h('button', { onclick: () => this.onBack() }, '← Projects'),
       nameIn,
-      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure planner'), tab('floorplan', 'Floor planner'), tab('window', 'Window planner')),
+      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('openings', 'Openings'), tab('niches', 'Niches'), tab('balconies', 'Balconies')),
       this.mode === 'view' ? vm : null,
       this.mode === 'view' ? h('label', { class: 'chk', title: 'Show the building-area outline and floor lines' }, area, 'Area lines') : null,
       h('div', { class: 'spacer' }),
@@ -452,7 +454,8 @@ export class Editor {
     const f = this.b.floors[i];
     this.mutate(() => {
       const lower = Math.round(f.height * ratio * 100) / 100;
-      const nf = { id: uid(), height: Math.round((f.height - lower) * 100) / 100 };
+      // the new part becomes a subfloor (5 -> 5 and 5.1; later subfloors renumber in order)
+      const nf: Floor = { id: uid(), height: Math.round((f.height - lower) * 100) / 100, sub: true };
       f.height = lower;
       this.b.floors.splice(i + 1, 0, nf);
       planForFloor(this.b, f.id)?.floorIds.push(nf.id);
@@ -487,94 +490,28 @@ export class Editor {
 
   // ---- right panel ----
   renderRight() {
-    if (this.mode === 'view') return this.renderViewPanel();
-    if (this.mode === 'window') return this.renderWindowPanel();
+    if (this.mode === 'view') return renderViewPanel(this);
+    if (isDesign(this.mode)) return renderDesignPanel(this, this.mode);
     this.renderPlanPanel();
   }
 
-  // ---- 3D view: selection, actions, calculation ----
-  private onPick(hit: Hit | null, e: MouseEvent) {
-    if (!hit) { if (!e.shiftKey) this.clearSel(); return; }
-    const add = e.shiftKey || e.ctrlKey || e.metaKey;
-    const toggle = (set: Set<string>, key: string) => {
-      if (!add) { this.selFloors.clear(); this.selWalls.clear(); this.selDivs.clear(); set.add(key); return; }
-      set.has(key) ? set.delete(key) : set.add(key);
-    };
-    if (this.pickMode === 'floor' || !hit.segId || hit.interior) toggle(this.selFloors, hit.floorId);
-    else if (this.pickMode === 'wall' || !hit.uvOf) toggle(this.selWalls, `${hit.floorId}|${hit.segId}`);
-    else {
-      const d = hit.divisions ?? 1;
-      const k = Math.min(d - 1, Math.floor(hit.uvOf(hit.point).u * d));
-      toggle(this.selDivs, `${hit.floorId}|${hit.segId}|${k}`);
-    }
-    this.refresh();
-  }
-  clearSel() { this.selFloors.clear(); this.selWalls.clear(); this.selDivs.clear(); this.refresh(); }
+  clearSets() { this.selFloors.clear(); this.selWalls.clear(); this.selDivs.clear(); this.selBorders.clear(); this.selElements.clear(); }
+  clearSel() { this.clearSets(); this.refresh(); }
 
-  /** Window slots (floorId|segId|k) covered by the 3D selection. */
-  private selectedSlots(): string[] {
-    const b = this.b, out: string[] = [];
-    const segSlots = (floorId: string, seg: PlanSegment) => {
-      if (segKind(seg) !== 'wall') return;
-      for (let k = 0; k < Math.max(1, seg.divisions ?? 1); k++) out.push(windowKey(floorId, seg.id, k));
-    };
-    for (const fid of this.selFloors) planForFloor(b, fid)?.segments.forEach(s => segSlots(fid, s));
-    for (const key of this.selWalls) {
-      const [fid, sid] = key.split('|');
-      const seg = planForFloor(b, fid)?.segments.find(s => s.id === sid);
-      if (seg) segSlots(fid, seg);
-    }
-    out.push(...this.selDivs);
-    return [...new Set(out)];
+  /** Number input committing on change (with undo). */
+  numInput(val: number, set: (v: number) => void, min: number, max: number, allowNeg = false) {
+    const inp = h('input', {
+      type: 'number', step: 0.05, value: fmt(val),
+      onchange: () => {
+        const v = num(inp.value);
+        if (!isFinite(v) || v < (allowNeg ? -max : min) || v > max) { toast(`Use a value from ${allowNeg ? -max : min} to ${max}`); return this.refresh(); }
+        this.mutate(() => set(v));
+      },
+    });
+    return inp;
   }
 
-  private renderViewPanel() {
-    const b = this.b;
-    const nSel = this.selFloors.size + this.selWalls.size + this.selDivs.size;
-    const pm = (m: PickMode, label: string) => h('button', { class: this.pickMode === m ? 'tab active' : 'tab', onclick: () => { this.pickMode = m; this.refresh(); } }, label);
-    const first = [...this.selWalls, ...this.selDivs][0]?.split('|') ?? (this.selFloors.size ? [[...this.selFloors][0]] : null);
-    const shapeSel = h('select', { onchange: () => (this.carveShape = shapeSel.value) },
-      ...b.windowShapes.map(s => h('option', { value: s.id }, s.name)));
-    if (!b.windowShapes.some(s => s.id === this.carveShape)) this.carveShape = b.windowShapes[0]?.id ?? null;
-    if (this.carveShape) shapeSel.value = this.carveShape;
-    const slots = nSel ? this.selectedSlots() : [];
-
-    this.right.innerHTML = '';
-    put(this.right, 
-      h('div', { class: 'box-title' }, 'Select in 3D'),
-      h('div', { class: 'row' }, pm('division', 'Division'), pm('wall', 'Wall'), pm('floor', 'Floor')),
-      h('div', { class: 'muted small' }, 'Click a wall in the 3D view (Shift = add). Selection is yellow. Esc clears. Floors can also be picked in the floor bar.'),
-      nSel ? h('div', { class: 'box' },
-        h('div', { class: 'box-title' }, `Selected: ${[this.selFloors.size && `${this.selFloors.size} floor(s)`, this.selWalls.size && `${this.selWalls.size} wall(s)`, this.selDivs.size && `${this.selDivs.size} division(s)`].filter(Boolean).join(', ')}`),
-        first ? h('div', { class: 'row' },
-          h('button', { onclick: () => this.editFloorIn('structure', first[0], first[1]) }, 'Edit in structure planner'),
-          h('button', { onclick: () => this.editFloorIn('floorplan', first[0]) }, 'Edit floor plan'),
-        ) : null,
-        h('div', { class: 'box-title' }, 'Windows'),
-        b.windowShapes.length ? h('label', {}, 'Window shape', shapeSel) : h('div', { class: 'muted small' }, 'Draw a window shape in the Window planner first.'),
-        h('div', { class: 'row' },
-          h('button', {
-            class: 'primary', disabled: !this.carveShape || !slots.length,
-            onclick: () => {
-              // fixed-size windows only go where the division is wide (and the floor tall) enough
-              const ok = slots.filter(k => { const [fid, sid] = k.split('|'); return slotFits(b, fid, sid, this.carveShape!); });
-              const skipped = slots.length - ok.length;
-              if (!ok.length) return toast(`This window does not fit any of the ${slots.length} selected division(s)`);
-              this.mutate(() => ok.forEach(k => (b.windows[k] = this.carveShape!)));
-              toast(skipped ? `Carved ${ok.length} window(s); ${skipped} division(s) are too small for it` : `Carved ${ok.length} window(s)`);
-            },
-          }, `Carve windows (${slots.length})`),
-          h('button', { disabled: !slots.length, onclick: () => this.mutate(() => slots.forEach(k => delete b.windows[k])) }, 'Remove windows'),
-        ),
-        h('div', { class: 'muted small' }, 'One window per wall division. Give a wall more divisions (structure planner) for more windows.'),
-        this.viewer?.stats.windowSkipped ? h('div', { class: 'warn' }, `${this.viewer.stats.windowSkipped} fixed-size window(s) no longer fit their division (the wall or floor changed) and are not built.`) : null,
-        h('button', { onclick: () => this.clearSel() }, 'Clear selection'),
-      ) : null,
-      this.reportBox(),
-    );
-  }
-
-  private reportBox() {
+  reportBox() {
     const r = this.report;
     const t = (rows: (string | number)[][]) => h('table', { class: 'stats' }, ...rows.map(cells => h('tr', {}, ...cells.map((c, i) => h(i ? 'td' : 'th', {}, String(c))))));
     const kg = (v: number) => (v >= 1000 ? `${fmt(v / 1000)} t` : `${fmt(v)} kg`);
@@ -603,92 +540,6 @@ export class Editor {
   }
 
   // ---- window planner panel ----
-  private renderWindowPanel() {
-    const b = this.b, sh = this.shape(), wp = this.wplanner;
-    const used = (id: string) => Object.values(b.windows).filter(x => x === id).length;
-    const pt = wp?.selectedPoint() ?? null;
-    this.right.innerHTML = '';
-    put(this.right,
-      h('div', { class: 'box-title' }, 'Window shapes'),
-      h('div', { class: 'plans' }, ...b.windowShapes.map(s => h('div', {
-        class: 'plan-row' + (s.id === this.activeShape ? ' active' : ''),
-        onclick: () => { this.activeShape = s.id; wp?.reset(); this.refresh(); },
-      }, s.name, h('span', { class: 'muted small' }, ` ${s.outlines.length} opening${s.outlines.length === 1 ? '' : 's'} · used ${used(s.id)}×`)))),
-      h('div', { class: 'row' },
-        h('button', { onclick: () => this.mutate(() => { const s: WindowShape = { id: uid(), name: `Window ${b.windowShapes.length + 1}`, outlines: [], smooth: 0 }; b.windowShapes.push(s); this.activeShape = s.id; wp?.reset(); }) }, 'New'),
-        h('button', { disabled: !sh, onclick: () => sh && this.mutate(() => { const c = { ...JSON.parse(JSON.stringify(sh)), id: uid(), name: `${sh.name} copy` }; b.windowShapes.push(c); this.activeShape = c.id; wp?.reset(); }) }, 'Duplicate'),
-        h('button', { disabled: !sh, onclick: async () => { const n = sh && await askText('Rename window shape', sh.name); if (sh && n?.trim()) this.mutate(() => (sh.name = n.trim())); } }, 'Rename'),
-        h('button', {
-          class: 'danger', disabled: !sh,
-          onclick: async () => {
-            if (sh && await askConfirm(`Delete ${sh.name}? Windows using it are removed.`)) this.mutate(() => {
-              b.windowShapes = b.windowShapes.filter(x => x !== sh);
-              for (const [k, v] of Object.entries(b.windows)) if (v === sh.id) delete b.windows[k];
-              this.activeShape = b.windowShapes[0]?.id ?? null;
-              wp?.reset();
-            });
-          },
-        }, 'Delete'),
-      ),
-      sh ? this.slider('Smoothness (whole shape)', sh.smooth, v => (sh.smooth = v)) : null,
-      sh ? this.fixedSizeBox(sh) : null,
-      pt ? h('div', { class: 'box' },
-        h('div', { class: 'box-title' }, 'Selected point'),
-        this.slider(`Smoothness at this point${pt.s == null ? ' (shape default)' : ''}`, pt.s ?? null, v => (pt.s = v), () => (pt.s = null)),
-        h('div', { class: 'row' },
-          h('button', { onclick: () => wp?.deleteSelected() }, 'Delete point'),
-          h('button', { onclick: () => wp?.deleteOutline() }, 'Delete this opening'),
-        ),
-      ) : null,
-      sh ? h('div', { class: 'row' },
-        h('button', { disabled: wp?.cur == null, onclick: () => wp?.finish() }, 'Finish outline (Enter)'),
-        h('button', { class: 'danger', disabled: !sh.outlines.length, onclick: () => wp?.clear() }, 'Clear all'),
-      ) : null,
-      h('div', { class: 'muted small help' },
-        'Click to add points; the outline closes back to its first point. Press Enter or Space to finish it: the next click starts another opening in the same shape. ',
-        'Drag points to move them, double-click an edge to add a point. Points snap to a 0.05 grid (hold Alt for free placement). ',
-        'Smoothness rounds the corners; set it on single points for shapes like arches (a ring marks points with their own value). ',
-        'x runs across one wall division, y up the floor: points at y = 0 make a door. Then select walls, divisions or floors in the 3D view and press Carve windows.'),
-    );
-  }
-
-
-  /** Fixed size: width / height / sill in metres instead of filling the division. */
-  private fixedSizeBox(sh: WindowShape) {
-    const fx = sh.fixed;
-    const cb = h('input', {
-      type: 'checkbox', checked: !!fx,
-      onchange: () => this.mutate(() => (sh.fixed = cb.checked ? { w: 1.2, h: 1.5, sill: 0.9 } : null)),
-    });
-    const field = (label: string, key: 'w' | 'h' | 'sill', min: number) => {
-      const inp = h('input', {
-        type: 'number', step: 0.05, value: fmt(fx![key]),
-        onchange: () => {
-          const v = num(inp.value);
-          if (!(v >= min && v <= 100)) { toast(`${label}: ${min} to 100 m`); return this.refresh(); }
-          this.mutate(() => (fx![key] = v));
-        },
-      });
-      return h('label', {}, label, inp);
-    };
-    return h('div', { class: 'box' },
-      h('label', { class: 'chk', title: 'Same size in every division instead of stretching with it' }, cb, 'Fixed size (metres)'),
-      fx ? h('div', { class: 'row' }, field('Width', 'w', 0.05), field('Height', 'h', 0.05), field('Sill', 'sill', 0)) : null,
-      fx && sh.outlines.some(o => o.length) ? h('button', {
-        title: 'Stretch the drawing so the openings fill the whole box (exactly width × height)',
-        onclick: () => this.mutate(() => {
-          const all = sh.outlines.flat();
-          const x0 = Math.min(...all.map(p => p.x)), x1 = Math.max(...all.map(p => p.x));
-          const y0 = Math.min(...all.map(p => p.y)), y1 = Math.max(...all.map(p => p.y));
-          for (const p of all) { p.x = x1 > x0 ? (p.x - x0) / (x1 - x0) : 0.5; p.y = y1 > y0 ? (p.y - y0) / (y1 - y0) : 0.5; }
-        }),
-      }, 'Fit outline to box') : null,
-      h('div', { class: 'muted small' }, fx
-        ? 'The outline fills this box, centred in each division. Divisions narrower than the width (or floors lower than sill + height) get no window. The window still follows the wall: on slanted or curved walls it slants and bends with it; the width is measured along the bottom of the wall.'
-        : 'Off: the outline stretches to fill each wall division and the floor height.'),
-    );
-  }
-
   // ---- structure / floor planner panel ----
   private renderPlanPanel() {
     if (!this.planner) return;
@@ -1007,19 +858,38 @@ export class Editor {
     const kind = common(segKind);
     const kindBtn = (k: SegKind, label: string) => h('button', { class: kind === k ? 'tab active' : 'tab', onclick: () => setAll(s => (s.kind = k)) }, label);
     wrap.append(h('div', { class: 'box-title' }, 'Type'), h('div', { class: 'row' },
-      kindBtn('wall', 'Wall'), interior ? kindBtn('door', 'Door') : null, kindBtn('colonnade', 'Colonnade'), kindBtn('open', 'Open')));
+      kindBtn('wall', 'Wall'), interior ? kindBtn('door', 'Door') : null, kindBtn('colonnade', 'Colonnade'), kindBtn('balustrade', 'Balusters'), kindBtn('open', 'Open')));
     if (kind === 'wall' || kind === 'colonnade') {
-      const div = common(s => s.divisions ?? 1);
+      const dl = common(s => s.divLen ?? null);
       const dIn = h('input', {
-        type: 'number', min: 1, step: 1, value: div === 'mixed' ? '' : div, placeholder: 'mixed',
-        onchange: () => { const v = Math.round(num(dIn.value)); if (!(v >= 1 && v <= 500)) { toast('Divisions: 1 to 500'); return this.refresh(); } setAll(s => (s.divisions = v)); },
+        type: 'number', min: 0.3, step: 0.1, value: dl === 'mixed' || dl === null ? '' : fmt(dl), placeholder: dl === 'mixed' ? 'mixed' : `default ${fmt(this.b.divLen)}`,
+        onchange: () => {
+          if (dIn.value.trim() === '') return setAll(s => (s.divLen = null));
+          const v = num(dIn.value);
+          if (!(v >= 0.3 && v <= 1000)) { toast('Division length: 0.3 to 1000 m'); return this.refresh(); }
+          setAll(s => (s.divLen = v));
+        },
       });
-      wrap.append(h('label', {}, kind === 'colonnade' ? 'Divisions (columns sit between them)' : 'Divisions (one window slot each)', dIn));
+      wrap.append(h('label', {}, kind === 'colonnade' ? 'Column spacing (m, empty = default division)' : 'Division length (m, empty = default)', dIn));
     }
+    const designPick = (cat: DesignCategory, key: 'columnDesign' | 'balusterDesign', label: string) => {
+      const vals = new Set(segs.map(x => x[key] ?? ''));
+      const sel = h('select', { onchange: () => setAll(x => (x[key] = sel.value || null)) },
+        vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null,
+        h('option', { value: '' }, 'Plain'), ...this.p.designs.filter(d => d.category === cat).map(d => h('option', { value: d.id }, d.name)));
+      sel.value = vals.size > 1 ? '__m' : [...vals][0];
+      return h('label', {}, label, sel);
+    };
     if (kind === 'colonnade') {
       const ct = common(s => s.columnThickness ?? null);
       wrap.append(this.numField('Column thickness (m), empty = wall thickness', ct === 'mixed' ? null : ct, v => segs.forEach(s => (s.columnThickness = v)), L / 2, true));
+      wrap.append(designPick('column', 'columnDesign', 'Column design (detailed view)'));
     }
+    if (kind === 'balustrade' || kind === 'wall') wrap.append(designPick('baluster', 'balusterDesign', kind === 'wall' ? 'Baluster design for balconies on this wall' : 'Baluster design (detailed view)'));
+    const colIn = h('input', { type: 'color', value: segs.find(x => x.color)?.color ?? '#d8cfc0' });
+    wrap.append(h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Colour'), colIn,
+      h('button', { onclick: () => setAll(x => (x.color = colIn.value)) }, 'Apply'),
+      h('button', { onclick: () => setAll(x => (x.color = null)) }, 'Clear')));
     wrap.append(this.materialField(common(s => s.material ?? null), v => segs.forEach(s => (s.material = v)), true));
     const sm = common(s => s.smooth ?? null);
     wrap.append(this.slider(`Smoothness${sm === null ? ' (plan default)' : ''}`, sm === 'mixed' ? null : sm, v => segs.forEach(s => (s.smooth = v)), () => segs.forEach(s => (s.smooth = null))));

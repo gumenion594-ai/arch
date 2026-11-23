@@ -1,6 +1,6 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
-import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, segColT, segKind, uid } from './model';
-import { V2, distToSeg, enclosedFaces, planValid, pointInPoly, polyAt, polyParams, sampleSeg } from './geometry';
+import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, divisionBorders, segColT, segKind, uid } from './model';
+import { V2, distToSeg, enclosedFaces, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
 
 export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator';
 
@@ -12,6 +12,7 @@ export interface PlannerHost {
   /** Lines from points of the plan below to the points they connect to here (lofted walls). */
   links?(): [V2, V2][];
   baseLength(): number;
+  divLen(s: PlanSegment): number; // division length of a wall
   begin(): void; // snapshot for undo, before a change
   commit(): void; // persist + refresh UI after a change
   toast(msg: string): void;
@@ -407,28 +408,23 @@ export class Planner {
         g.strokeStyle = sel ? 'rgba(255,212,0,0.35)' : 'rgba(255,255,255,0.15)'; g.lineWidth = tpx;
         path(sp); g.stroke();
       }
-      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : '#f0f0f0';
+      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : kind === 'balustrade' ? '#c9b8ff' : '#f0f0f0';
       g.lineWidth = sel ? 2.5 : 1.5;
-      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : kind === 'door' ? [8, 4] : []);
+      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : kind === 'door' ? [8, 4] : kind === 'balustrade' ? [1, 3] : []);
       path(sp); g.stroke();
       g.setLineDash([]);
+      // division borders (by length: full divisions in the middle, shorter ones at the ends)
+      const pp = polyParams(sp), lenM = polyLength(sp) * this.h.baseLength();
+      const us = divisionBorders(lenM, this.h.divLen(s)).map(x => (lenM ? x / lenM : 0)).slice(1, -1);
       if (kind === 'colonnade') {
-        // column positions at the division points
-        const d = Math.max(1, s.divisions ?? 1), pp = polyParams(sp);
         const cpx = Math.max(4, (segColT(plan, s) / this.h.baseLength()) * b.s);
         g.fillStyle = sel ? '#ffd400' : '#f0f0f0';
-        for (let k = 1; k < d; k++) {
-          const q = this.toScreen(polyAt(sp, pp, k / d));
-          g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx);
-        }
-      } else if (kind === 'wall' && (s.divisions ?? 1) > 1) {
-        // division ticks across the wall
-        const d = s.divisions!, pp = polyParams(sp);
-        g.strokeStyle = sel ? '#ffd400' : '#f0f0f0'; g.lineWidth = 1.5;
-        for (let k = 1; k < d; k++) {
-          const a = polyAt(sp, pp, (k - 0.01) / d), c = polyAt(sp, pp, (k + 0.01) / d), q = this.toScreen(polyAt(sp, pp, k / d));
-          const A = this.toScreen(a), C = this.toScreen(c);
-          const nx = -(C.y - A.y), ny = C.x - A.x, nl = Math.hypot(nx, ny) || 1, len = tpx / 2 + 4;
+        for (const u of us) { const q = this.toScreen(polyAt(sp, pp, u)); g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx); }
+      } else if (kind === 'wall') {
+        g.strokeStyle = sel ? '#ffd400' : 'rgba(240,240,240,0.7)'; g.lineWidth = 1;
+        for (const u of us) {
+          const A = this.toScreen(polyAt(sp, pp, Math.max(0, u - 0.002))), C = this.toScreen(polyAt(sp, pp, Math.min(1, u + 0.002))), q = this.toScreen(polyAt(sp, pp, u));
+          const nx = -(C.y - A.y), ny = C.x - A.x, nl = Math.hypot(nx, ny) || 1, len = tpx / 2 + 3;
           g.beginPath(); g.moveTo(q.x + (nx / nl) * len, q.y + (ny / nl) * len); g.lineTo(q.x - (nx / nl) * len, q.y - (ny / nl) * len); g.stroke();
         }
       }

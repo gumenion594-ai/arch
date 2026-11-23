@@ -1,20 +1,25 @@
 // Turns a building into 3D geometry (structural / detailed views).
 import * as THREE from 'three';
 import {
-  Building, PlanObject, PlanSegment, StructurePlan, Texture, elevation, hasCeiling, hasFloor, planForFloor, segColT, segConnect, segConnectSmooth, segSmoothSpan,
-  segKind, segMaterial, windowKey,
+  Building, Floor, OpeningShape, Placement, PlanObject, PlanSegment, StructurePlan, Texture, WinPoint, divisionBorders, elevation, hasCeiling, hasFloor,
+  BALCONY_AT, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
 } from './model';
+import { fitDesign } from './assets';
 import { V2, enclosedFacesSegs, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
 
 export type Mats = {
   wall(material: string): THREE.Material;
   column(material: string): THREE.Material;
+  color(css: string): THREE.Material; // a user-chosen colour
   slab: THREE.Material;
   object: THREE.Material;
+  deco: THREE.Material; // cornices, pilasters, balconies, balusters (plain stone)
   edge: THREE.LineBasicMaterial;
   selected: THREE.Material;
   selLine: THREE.LineBasicMaterial;
   tex: (id: string) => THREE.Material | null;
+  /** Loaded imported design (null while loading / in views that don't show designs). */
+  design?: (id: string | null | undefined) => THREE.Object3D | null;
 };
 
 /** What a mesh represents: used for clicking (selection) and for weight calculation. */
@@ -23,14 +28,19 @@ export interface PickInfo {
   floorIndex: number;
   segId?: string;
   interior?: boolean;
-  divisions?: number;
+  placementId?: string;
+  /** Division borders of the wall as u (0..1 along it). */
+  borders?: number[];
+  /** Openings / niches on the wall: their extent in u/v, to pick them by clicking the wall. */
+  holes?: { id: string; u0: number; u1: number; v0: number; v1: number }[];
   /** Wall coordinates (u along the wall 0..1, v up the wall 0..1) of a point on its surface. */
   uvOf?: (p: THREE.Vector3) => { u: number; v: number };
 }
 export interface StatInfo { cat: 'ext' | 'int' | 'col'; material: string }
 
-export interface Selection { floors: Set<string>; walls: Set<string>; divisions: Set<string> } // ids: floorId, floorId|segId, floorId|segId|k
-export const emptySelection = (): Selection => ({ floors: new Set(), walls: new Set(), divisions: new Set() });
+/** ids: floors floorId · walls floorId|segId · divisions floorId|segId|k · borders floorId|segId|k · elements placement id */
+export interface Selection { floors: Set<string>; walls: Set<string>; divisions: Set<string>; borders: Set<string>; elements: Set<string> }
+export const emptySelection = (): Selection => ({ floors: new Set(), walls: new Set(), divisions: new Set(), borders: new Set(), elements: new Set() });
 
 export interface BuildOpts {
   detailed: boolean;
@@ -67,7 +77,9 @@ function ceilingFaces(b: Building, i: number): V2[][] {
   const out: V2[][] = [];
   let lofted = false;
   for (const f of enclosedFacesSegs(pl)) {
-    if (f.segIds.every(id => segConnect(pl, pl.segments.find(s => s.id === id)!) === 'straight')) out.push(f.poly);
+    const segs = f.segIds.map(id => pl.segments.find(s => s.id === id)!);
+    if (segs.some(s => segKind(s) === 'balustrade')) continue; // an open terrace
+    if (segs.every(s => segConnect(pl, s) === 'straight')) out.push(f.poly);
     else lofted = true;
   }
   const above = planAtLevel(b, i + 1);
@@ -106,7 +118,9 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 1 });
     geo.rotateX(-Math.PI / 2);
     geo.translate(p.x, y + k * 1e-4 * t, -p.y); // tiny offset: overlapping slabs don't flicker
-    add(geo, sel.floors.has(p.floors[i].id) ? mats.selected : mats.slab, { floorId: p.floors[i].id, floorIndex: i });
+    const fl = p.floors[i];
+    const tex = o.detailed && fl.texture ? mats.tex(fl.texture) : null;
+    add(geo, sel.floors.has(fl.id) ? mats.selected : tex ?? (fl.color ? mats.color(fl.color) : mats.slab), { floorId: fl.id, floorIndex: i });
   });
   for (let i = 0; i < N; i++) {
     if (slabs[i].floor) slab(floorFaces(p, i), elevation(p, i), slabs[i].floor, i);
@@ -114,6 +128,31 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   }
 
   // ---------- walls / columns per floor ----------
+  const segMat = (seg: PlanSegment, material: string, column = false) => {
+    const tex = o.detailed && seg.texture ? mats.tex(seg.texture) : null;
+    return tex ?? (seg.color ? mats.color(seg.color) : column ? mats.column(material) : mats.wall(o.detailed ? material : 'structural'));
+  };
+  const placeMat = (pl: Placement, fallback: THREE.Material) => {
+    if (sel.elements.has(pl.id)) return mats.selected;
+    const tex = o.detailed && pl.texture ? mats.tex(pl.texture) : null;
+    return tex ?? (pl.color ? mats.color(pl.color) : fallback);
+  };
+  /** An imported design fitted into a box, only in the detailed view (null otherwise). */
+  const designAt = (id: string | null | undefined, c: THREE.Vector3, along: THREE.Vector3, up: THREE.Vector3, out: THREE.Vector3, w: number, h: number, d: number, recolor?: THREE.Material | null, pick?: PickInfo) => {
+    if (!o.detailed || !id || !mats.design) return false;
+    const src = mats.design(id);
+    if (!src) return false;
+    const obj = fitDesign(src, c, along, up, out, w, h, d);
+    obj.traverse(x => {
+      const m = x as THREE.Mesh;
+      if (!m.isMesh) return;
+      if (recolor) m.material = recolor;
+      m.userData = { pick };
+    });
+    g.add(obj);
+    return true;
+  };
+
   for (let i = 0; i < N; i++) {
     const floor = p.floors[i];
     // external walls run the full floor height; internal walls stand between floor and ceiling
@@ -133,76 +172,115 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       const above = interior ? null : planAtLevel(p, i + 1);
       let vert: Vertical | undefined;
       const rowsBySeg = new Map<string, { rows: Row[]; bottom: V2[] }>();
-      const colAlong = (rows: Row[], t: number, ct: number, bottom: V2[], pick: PickInfo, material: string, selected: boolean) => {
+      const colAlong = (rows: Row[], t: number, ct: number, bottom: V2[], pick: PickInfo, seg: PlanSegment, material: string, selected: boolean) => {
         const pts = rows.map((r, ri) => W(polyAt(r.poly, r.params, t), y0 + (y1 - y0) * (ri / (rows.length - 1))));
         for (let k = 0; k + 1 < pts.length; k++) {
-          add(column(pts[k], pts[k + 1], ct, bottom), selected ? mats.selected : mats.column(material), pick, { cat: 'col', material });
+          const a = pts[k], c = pts[k + 1];
+          // imported column design (detailed view), else a plain square column
+          const dir = norm({ x: bottom[bottom.length - 1].x - bottom[0].x, y: bottom[bottom.length - 1].y - bottom[0].y });
+          const along = new THREE.Vector3(dir.x, 0, -dir.y), up = new THREE.Vector3().subVectors(c, a);
+          const mid = new THREE.Vector3().addVectors(a, c).multiplyScalar(0.5);
+          const out = new THREE.Vector3().crossVectors(along, up).normalize();
+          if (pts.length === 2 && designAt(seg.columnDesign, mid, along, up, out, ct, a.distanceTo(c), ct, selected ? mats.selected : seg.color ? mats.color(seg.color) : null, pick)) continue;
+          add(column(a, c, ct, bottom), selected ? mats.selected : segMat(seg, material, true), pick, { cat: 'col', material });
         }
       };
+      const placements = interior ? [] : p.placements.filter(pl => pl.floorId === floor.id);
 
       for (const seg of plan.segments) {
         const kind = segKind(seg);
         if (kind === 'open') continue;
         const material = segMaterial(plan, seg);
         const bottom = sampleSeg(plan, seg);
+        const lenM = polyLength(bottom) * L;
+        const borders = divisionBorders(lenM, segDivLen(p, seg)).map(x => (lenM > 0 ? x / lenM : 0));
+        const wallKey = `${floor.id}|${seg.id}`;
+        const selected = floorSel || sel.walls.has(wallKey);
+        const pick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, interior, borders };
+
+        if (kind === 'balustrade') {
+          const yb = y0 + slabs[i].floor;
+          balusters(bottom.map(q => W(q, yb)), seg.balusterDesign, selected ? mats.selected : seg.color ? mats.color(seg.color) : mats.deco, pick);
+          continue;
+        }
         let top = bottom;
         const loft = !interior && segConnect(plan, seg) === 'loft' && above && above.points.length > 0;
         if (loft) top = loftTarget(plan, above!, seg);
         const rows = buildGrid(bottom, top, loft ? segConnectSmooth(plan, seg) : 0,
           loft && segSmoothSpan(plan, seg) ? (vert ??= verticalFor(p, i)) : undefined);
-        const d = Math.max(1, seg.divisions ?? 1);
-        const wallKey = `${floor.id}|${seg.id}`;
-        const selected = floorSel || sel.walls.has(wallKey);
-        const pick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, interior, divisions: d };
 
         if (kind === 'wall' || kind === 'door') {
-          const offs = offsets(plan, seg, bottom, plan.wallThickness / 2 / L);
-          const tex = o.detailed && seg.texture ? mats.tex(seg.texture) : null;
-          const texInfo = tex ? o.textures.find(t => t.id === seg.texture) : undefined;
+          // +1 side of the wall = outside of the building
+          const flip = !interior && outsideIsMinus(plan, seg);
+          const offs = offsets(plan, seg, bottom, plan.wallThickness / 2 / L).map(v => (flip ? { x: -v.x, y: -v.y } : v));
+          const texInfo = seg.texture ? o.textures.find(t => t.id === seg.texture) : undefined;
           const tileH = floor.height, tileW = texInfo ? tileH * (texInfo.w / texInfo.h) : 1;
           // a door segment is just the lintel above a 2.1 m opening
           const yb = kind === 'door' ? y0 + Math.min(2.1, (y1 - y0) * 0.8) : y0;
-          const holes: V2[][] = [];
-          if (kind === 'wall' && !interior) {
-            for (let k = 0; k < d; k++) {
-              const shapeId = p.windows[windowKey(floor.id, seg.id, k)];
-              const shape = shapeId && p.windowShapes.find(s => s.id === shapeId);
-              if (!shape) continue;
-              // fixed-size windows: scale the outline into a w × h box (measured along the bottom of the wall)
-              const divLen = (polyLength(bottom) * L) / d, wallH = y1 - y0;
-              const fx = shape.fixed;
-              if (fx && !windowFits(fx, divLen, wallH)) { stats.windowSkipped++; continue; }
-              const map = fx
-                ? (q: V2) => ({ x: 0.5 + (q.x - 0.5) * (fx.w / divLen), y: (fx.sill + q.y * fx.h) / wallH })
-                : (q: V2) => q;
-              for (const outline of shape.outlines) {
-                if (outline.length < 3) continue;
-                let hole = smoothClosed(outline, shape.smooth).map(map).map(q => ({
-                  x: clamp01((k + clamp(q.x, 0.004, 0.996)) / d),
-                  y: clamp(q.y, 0.004, 0.996),
-                }));
-                if (Math.abs(signedArea(hole)) < 1e-9) continue;
-                if (signedArea(hole) > 0) hole = hole.reverse(); // holes run clockwise
-                holes.push(hole);
-              }
+          const wall = new WallSolid(rows, offs, polyParams(bottom), yb, y1, W, L, tileW, tileH, plan.wallThickness);
+          const wallH = y1 - yb;
+
+          // openings and niches: holes in u/v; big ones reach into the neighbouring divisions
+          const holes: Hole[] = [];
+          pick.holes = [];
+          for (const pl of placements) {
+            if (pl.segId !== seg.id || (pl.type !== 'opening' && pl.type !== 'niche') || kind !== 'wall') continue;
+            const shape = p.openingShapes.find(x => x.id === pl.shapeId);
+            if (!shape || !shape.outlines.some(ol => ol.length >= 3)) continue;
+            const k = Math.min(Math.max(0, pl.div ?? 0), borders.length - 2);
+            const sc = ((borders[k] + borders[k + 1]) / 2) * lenM + pl.dx;
+            const yLow = shape.anchor === 'bottom' ? slabs[i].floor + pl.dy : (wallH - shape.h) / 2 + pl.dy;
+            const polys = shape.outlines.filter(ol => ol.length >= 3).map(ol => smoothClosed(ol, shape.smooth).map(q => ({
+              x: (sc + (q.x - 0.5) * shape.w) / lenM,
+              y: (yLow + q.y * shape.h) / wallH,
+            }))).map(poly => clipRect(poly, 0.003, 0.997)).filter(poly => poly.length >= 3 && Math.abs(signedArea(poly)) > 1e-7);
+            if (!polys.length) { stats.windowSkipped++; continue; }
+            const bb = { u0: Math.min(...polys.flat().map(q => q.x)), u1: Math.max(...polys.flat().map(q => q.x)), v0: Math.min(...polys.flat().map(q => q.y)), v1: Math.max(...polys.flat().map(q => q.y)) };
+            // overlapping another opening on this wall: not built (it would tear the wall)
+            if (pick.holes.some(hb => hb.u0 < bb.u1 && bb.u0 < hb.u1 && hb.v0 < bb.v1 && bb.v0 < hb.v1)) { stats.windowSkipped++; continue; }
+            pick.holes.push({ id: pl.id, ...bb });
+            const nicheDepth = shape.kind === 'niche' ? nicheDepthFn(shape, bb, Math.min(shape.depth ?? 0.2, plan.wallThickness * 0.85)) : undefined;
+            for (const poly of polys) holes.push({ poly: signedArea(poly) > 0 ? [...poly].reverse() : poly, depth: nicheDepth });
+            if (shape.kind === 'opening') {
+              stats.windowCount++;
+              stats.windowArea += polys.reduce((sum, q) => sum + Math.abs(signedArea(q)), 0) * lenM * wallH;
+            }
+            // frames / surrounds / niche decorations (imported designs, detailed view)
+            const uc = (bb.u0 + bb.u1) / 2, vc = (bb.v0 + bb.v1) / 2;
+            const fr = wall.frame(uc, vc);
+            const ww = (bb.u1 - bb.u0) * lenM, hh = (bb.v1 - bb.v0) * wallH;
+            const sm = sel.elements.has(pl.id) ? mats.selected : pl.color ? mats.color(pl.color) : null;
+            const ppick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, placementId: pl.id };
+            if (shape.kind === 'opening') {
+              designAt(pl.frameId, fr.mid, fr.along, fr.up, fr.out, ww, hh, plan.wallThickness * 0.9, sm, ppick);
+              designAt(pl.surroundId, fr.face.clone().addScaledVector(fr.out, 0.04), fr.along, fr.up, fr.out, ww * 1.3, hh * 1.15, 0.08, sm, ppick);
+            } else {
+              designAt(pl.designId, fr.face.clone().addScaledVector(fr.out, 0.05), fr.along, fr.up, fr.out, ww * 1.25, hh * 1.1, 0.1, sm, ppick);
+            }
+            if (sel.elements.has(pl.id)) for (const poly of polys) line([...poly, poly[0]].map(q => wall.at(q.x, q.y, 1.06)), mats.selLine);
+            // invisible surface across the opening, so clicking it picks this element
+            for (const poly of polys) {
+              const tris = THREE.ShapeUtils.triangulateShape(poly.map(q => new THREE.Vector2(q.x * lenM, q.y * wallH)), []);
+              const pos: number[] = [];
+              for (const t of tris) for (const k2 of t) { const v = wall.at(poly[k2].x, poly[k2].y, shape.kind === 'niche' ? 0.6 : 0); pos.push(v.x, v.y, v.z); }
+              const geo = new THREE.BufferGeometry();
+              geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+              add(geo, HIDDEN, ppick, undefined, false);
             }
           }
-          const wall = new WallSolid(rows, offs, polyParams(bottom), yb, y1, W, L, tileW, tileH);
           const geo = wall.build(holes);
-          stats.windowCount += holes.length;
-          stats.windowArea += holes.reduce((s, h) => s + Math.abs(signedArea(h)), 0) * wall.lenM * (y1 - yb);
           pick.uvOf = q => wall.uvOf(q);
-          add(geo, selected ? mats.selected : tex ?? mats.wall(o.detailed ? material : 'structural'), pick, { cat: interior ? 'int' : 'ext', material });
-          // division lines + selected division outlines
-          for (let k = 0; k <= d; k++) {
-            if (k > 0 && k < d) for (const side of [1, -1] as const) line(wall.vline(k / d, side), mats.edge);
-            if (k < d && sel.divisions.has(`${wallKey}|${k}`)) {
-              for (const side of [1.03, -1.03]) line(wall.rect(k / d, (k + 1) / d, side), mats.selLine);
-            }
+          add(geo, selected ? mats.selected : segMat(seg, material), pick, { cat: interior ? 'int' : 'ext', material });
+          // division lines + selected division / border outlines
+          for (let k = 0; k < borders.length; k++) {
+            if (k > 0 && k < borders.length - 1) for (const side of [1, -1] as const) line(wall.vline(borders[k], side), mats.edge);
+            if (k < borders.length - 1 && sel.divisions.has(`${wallKey}|${k}`)) for (const side of [1.03, -1.03]) line(wall.rect(borders[k], borders[k + 1], side), mats.selLine);
+            if (sel.borders.has(`${wallKey}|${k}`)) for (const side of [1.08, -1.08]) line(wall.vline(borders[k], side), mats.selLine);
           }
+          if (!interior) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id));
         } else {
-          // colonnade: columns between divisions (+ free-standing ends)
-          for (let k = 1; k < d; k++) colAlong(rows, k / d, segColT(plan, seg), bottom, pick, material, selected);
+          // colonnade: columns on the division borders (+ free-standing ends)
+          for (let k = 1; k < borders.length - 1; k++) colAlong(rows, borders[k], segColT(plan, seg), bottom, pick, seg, material, selected);
           rowsBySeg.set(seg.id, { rows, bottom });
         }
       }
@@ -215,18 +293,255 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         if (!c) continue;
         const r = rowsBySeg.get(c.id)!;
         const selected = floorSel || sel.walls.has(`${floor.id}|${c.id}`);
-        colAlong(r.rows, c.a === pt.id ? 0 : 1, segColT(plan, c), r.bottom, { floorId: floor.id, floorIndex: i, segId: c.id, interior }, segMaterial(plan, c), selected);
+        colAlong(r.rows, c.a === pt.id ? 0 : 1, segColT(plan, c), r.bottom, { floorId: floor.id, floorIndex: i, segId: c.id, interior }, c, segMaterial(plan, c), selected);
       }
 
       // (single unconnected points build nothing: they only serve as targets for the floor below)
 
-      // stairs climb to the top of the next floor's slab (top floor: to its ceiling)
-      const yStairs = i + 1 < N ? elevation(p, i + 1) + slabs[i + 1].floor : y1;
+      // stairs climb to the next main floor (subfloors are part of the same floor)
+      const nm = nextMainFloor(p, i);
+      const yStairs = nm < N ? elevation(p, nm) + slabs[nm].floor : y1;
       if (interior) for (const ob of plan.objects) buildObject(ob, p, y0, y1, yStairs, mats.object, (geo: THREE.BufferGeometry) => add(geo, mats.object, { floorId: floor.id, floorIndex: i, interior: true }));
     }
   }
+
+  // free-standing imported 3D models (detailed view only)
+  for (const pl of p.placements) {
+    if (pl.type !== 'model' || !o.detailed || !mats.design) continue;
+    const src = mats.design(pl.designId);
+    const fl = p.floors.findIndex(f => f.id === pl.floorId);
+    if (!src || fl < 0) continue;
+    const size = (src.userData.size as THREE.Vector3) ?? new THREE.Vector3(1, 1, 1);
+    const k = (pl.scale ?? 1) / Math.max(size.x, size.y, size.z, 1e-9);
+    const pos = pl.pos ?? { x: 0, y: 0, z: 0 };
+    const c = new THREE.Vector3(p.x + pos.x, pos.y + (size.y * k) / 2, -(p.y + pos.z));
+    const r = ((pl.rot ?? 0) * Math.PI) / 180;
+    const along = new THREE.Vector3(Math.cos(r), 0, -Math.sin(r)), up = new THREE.Vector3(0, 1, 0);
+    designAt(pl.designId, c, along, up, new THREE.Vector3().crossVectors(along, up), size.x * k, size.y * k, size.z * k,
+      sel.elements.has(pl.id) ? mats.selected : pl.color ? mats.color(pl.color) : null, { floorId: pl.floorId, floorIndex: fl, placementId: pl.id });
+  }
   return { group: g, stats };
+
+  /** Cornices, pilasters and balconies on a wall. */
+  function decorate(wall: WallSolid, seg: PlanSegment, plan: StructurePlan, borders: number[], lenM: number, wallH: number, i: number, floor: Floor, list: Placement[]) {
+    const t = plan.wallThickness;
+    for (const pl of list) {
+      const pick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, placementId: pl.id };
+      const k = Math.min(Math.max(0, pl.div ?? 0), borders.length - (pl.type === 'pilaster' ? 1 : 2));
+      if (pl.type === 'cornice') {
+        // runs along the top of the division, hanging from the top of the floor
+        const u0 = borders[k], u1 = borders[k + 1];
+        const fr = wall.frame((u0 + u1) / 2, 1);
+        const mat = placeMat(pl, mats.deco);
+        const ext = t / 2 / lenM; // reach the outer corners at the wall ends
+        const ua = k === 0 ? u0 - ext : u0, ub = k === borders.length - 2 ? u1 + ext : u1;
+        if (designAt(pl.designId, fr.face.clone().addScaledVector(fr.out, CORNICE[1][0] / 2).addScaledVector(fr.up, -0.16), fr.along, fr.up, fr.out, (ub - ua) * lenM, 0.32, 0.32, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) continue;
+        add(sweepProfile(wall, ua, ub, CORNICE), mat, pick);
+      } else if (pl.type === 'pilaster') {
+        const pw = 0.5, pd = 0.12;
+        let s0 = borders[k] * lenM + pl.dx;
+        if (k === 0) s0 = -t / 2 + pw / 2 + pl.dx; // flush with the outer corner
+        if (k === borders.length - 1) s0 = lenM + t / 2 - pw / 2 + pl.dx;
+        const u = s0 / lenM;
+        const fr = wall.frame(Math.min(1, Math.max(0, u)), 0.5);
+        const base = fr.face.clone().addScaledVector(fr.along, (u - Math.min(1, Math.max(0, u))) * lenM);
+        const mat = placeMat(pl, mats.deco);
+        const box = (w: number, h: number, d: number, yMid: number) => {
+          const geo = new THREE.BoxGeometry(w, h, d);
+          const up = new THREE.Vector3(0, 1, 0), flat = new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize();
+          const m = new THREE.Matrix4().makeBasis(new THREE.Vector3().crossVectors(up, flat), up, flat);
+          geo.applyMatrix4(m);
+          const c = base.clone().addScaledVector(fr.out, d / 2);
+          geo.translate(c.x, wall.y0 + yMid, c.z);
+          add(geo, mat, pick);
+        };
+        const shaftC = base.clone().addScaledVector(fr.out, pd / 2); shaftC.y = wall.y0 + wallH / 2;
+        if (!designAt(pl.designId, shaftC, fr.along, new THREE.Vector3(0, 1, 0), fr.out, pw, wallH, pd, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) {
+          box(pw, wallH, pd, wallH / 2);
+          box(pw + 0.14, 0.3, pd + 0.08, 0.15); // base
+          box(pw + 0.14, 0.24, pd + 0.08, wallH - 0.12); // capital
+        }
+      } else if (pl.type === 'balcony') {
+        const shape = p.balconyShapes.find(x => x.id === pl.shapeId) ?? p.balconyShapes[0];
+        if (!shape) continue;
+        const uc = (borders[k] + borders[k + 1]) / 2 + pl.dx / lenM;
+        const fr = wall.frame(Math.min(1, Math.max(0, uc)), 0);
+        // platform top: lower than the middle of the division
+        const yTopB = wall.y0 + wallH * BALCONY_HEIGHT + pl.dy;
+        const mat = placeMat(pl, mats.deco);
+        const flat = new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize();
+        const along = new THREE.Vector3(fr.along.x, 0, fr.along.z).normalize();
+        const origin = new THREE.Vector3(fr.face.x, yTopB, fr.face.z);
+        const P = (q: V2) => origin.clone().addScaledVector(along, (q.x - 0.5) * shape.w).addScaledVector(flat, q.y * shape.d);
+        const outline = smoothClosed(shape.outline, shape.smooth, 10);
+        const c = origin.clone().addScaledVector(flat, shape.d / 2); c.y -= shape.thickness / 2;
+        if (!designAt(pl.designId, c, along, new THREE.Vector3(0, 1, 0), flat, shape.w, shape.thickness, shape.d, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) {
+          // local (x along, y out, z down) -> world, kept a proper rotation (mirror x if needed)
+          const sg = new THREE.Vector3().crossVectors(along, flat).y < 0 ? 1 : -1;
+          const sh = new THREE.Shape(outline.map(q => new THREE.Vector2(sg * (q.x - 0.5) * shape.w, q.y * shape.d)));
+          const geo = new THREE.ExtrudeGeometry(sh, { depth: shape.thickness, bevelEnabled: false, curveSegments: 1 });
+          const m = new THREE.Matrix4().makeBasis(along.clone().multiplyScalar(sg), flat, new THREE.Vector3(0, -1, 0));
+          geo.applyMatrix4(m);
+          geo.translate(origin.x, origin.y, origin.z);
+          add(geo, mat, pick);
+        }
+        if (shape.railing) {
+          // balusters along the edges away from the wall
+          const runs: THREE.Vector3[][] = [];
+          let cur: THREE.Vector3[] = [];
+          for (let j = 0; j <= outline.length; j++) {
+            const q = outline[j % outline.length], prev = outline[(j - 1 + outline.length) % outline.length];
+            const onWall = q.y < 0.02 && prev.y < 0.02;
+            if (j > 0 && !onWall) { if (!cur.length) cur.push(P(prev)); cur.push(P(q)); } else if (cur.length) { runs.push(cur); cur = []; }
+          }
+          if (cur.length) runs.push(cur);
+          const inset = (v: THREE.Vector3) => v; // railing sits on the platform edge
+          for (const r of runs) balusters(r.map(inset), seg.balusterDesign, placeMat(pl, mats.deco), pick);
+        }
+      }
+    }
+  }
+
+  /** A simple 1 m railing along a polyline: bottom rail, top rail and turned balusters. */
+  function balusters(path: THREE.Vector3[], designId: string | null | undefined, mat: THREE.Material, pick: PickInfo) {
+    for (let j = 0; j + 1 < path.length; j++) {
+      const a = path[j], c = path[j + 1];
+      const len = a.distanceTo(c);
+      if (len < 1e-3) continue;
+      const along = new THREE.Vector3().subVectors(c, a).normalize();
+      const up = new THREE.Vector3(0, 1, 0), out = new THREE.Vector3().crossVectors(along, up).normalize();
+      const rail = (h: number, w: number, y: number) => {
+        const geo = new THREE.BoxGeometry(len, h, w);
+        geo.applyMatrix4(new THREE.Matrix4().makeBasis(along, up, out));
+        const m = new THREE.Vector3().addVectors(a, c).multiplyScalar(0.5);
+        geo.translate(m.x, a.y + y, m.z);
+        add(geo, mat, pick, undefined, false);
+      };
+      rail(0.12, 0.2, 0.06); // plinth
+      rail(0.08, 0.18, 0.96); // handrail
+      const n = Math.max(1, Math.round(len / 0.2));
+      for (let q = 0; q < n; q++) {
+        const pnt = a.clone().lerp(c, (q + 0.5) / n);
+        const center = new THREE.Vector3(pnt.x, a.y + 0.12 + 0.4, pnt.z);
+        if (designAt(designId, center, along, up, out, 0.13, 0.8, 0.13, null, pick)) continue;
+        const geo = new THREE.LatheGeometry(BALUSTER, 8);
+        geo.translate(pnt.x, a.y + 0.12, pnt.z);
+        add(geo, mat, pick, undefined, false);
+      }
+    }
+  }
 }
+
+/** Plain cornice profile (metres): x = out from the wall face, y = down from the top. */
+const CORNICE: [number, number][] = [[0, 0], [0.34, 0], [0.34, 0.06], [0.26, 0.1], [0.2, 0.16], [0.1, 0.2], [0.1, 0.27], [0, 0.32]];
+/** Platform top of a balcony as a fraction of the floor height (lower than the middle). */
+export const BALCONY_HEIGHT = BALCONY_AT;
+/** Baluster silhouette (radius, height) turned on a lathe. */
+const BALUSTER = [[0, 0], [0.055, 0], [0.055, 0.05], [0.035, 0.1], [0.06, 0.32], [0.065, 0.4], [0.03, 0.55], [0.025, 0.7], [0.045, 0.75], [0.045, 0.8], [0, 0.8]].map(([x, y]) => new THREE.Vector2(x, y));
+
+/** Is the outside of the building on the wall's right (−1 side)? True when the wall runs counter-clockwise around an enclosed area. */
+function outsideIsMinus(plan: StructurePlan, seg: PlanSegment): boolean {
+  for (const f of enclosedFacesSegs(plan)) {
+    const k = f.segIds.indexOf(seg.id);
+    if (k < 0) continue;
+    return f.ids[k] === seg.a; // traversed a -> b counter-clockwise: the area (inside) is on the left
+  }
+  return true;
+}
+
+/** Sutherland–Hodgman clip of a polygon to the square [lo, hi]². */
+function clipRect(poly: V2[], lo: number, hi: number): V2[] {
+  const clip = (pts: V2[], inside: (p: V2) => boolean, cut: (a: V2, b: V2) => V2) => {
+    const out: V2[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      if (inside(b)) { if (!inside(a)) out.push(cut(a, b)); out.push(b); } else if (inside(a)) out.push(cut(a, b));
+    }
+    return out;
+  };
+  const atX = (x: number) => (a: V2, b: V2) => ({ x, y: a.y + ((b.y - a.y) * (x - a.x)) / (b.x - a.x) });
+  const atY = (y: number) => (a: V2, b: V2) => ({ x: a.x + ((b.x - a.x) * (y - a.y)) / (b.y - a.y), y });
+  let r = poly;
+  r = clip(r, p => p.x >= lo, atX(lo)); if (!r.length) return r;
+  r = clip(r, p => p.x <= hi, atX(hi)); if (!r.length) return r;
+  r = clip(r, p => p.y >= lo, atY(lo)); if (!r.length) return r;
+  return clip(r, p => p.y <= hi, atY(hi));
+}
+
+/** Niche recess depth (m) at wall u/v: depth × min(side profile at height, bottom profile at width). */
+function nicheDepthFn(shape: OpeningShape, bb: { u0: number; u1: number; v0: number; v1: number }, depth: number) {
+  const prof = (pts: WinPoint[] | undefined, along: 'x' | 'y') => {
+    if (!pts || pts.length < 2) return () => 1;
+    const poly = smoothOpen(pts, shape.smooth).sort((a, b) => (along === 'x' ? a.x - b.x : a.y - b.y));
+    return (t: number) => {
+      // value (the other axis) at position t along `along`
+      for (let i = 1; i < poly.length; i++) {
+        const a = poly[i - 1], b = poly[i];
+        const ta = along === 'x' ? a.x : a.y, tb = along === 'x' ? b.x : b.y;
+        if (t <= tb || i === poly.length - 1) {
+          const k = tb > ta ? Math.max(0, Math.min(1, (t - ta) / (tb - ta))) : 0;
+          const va = along === 'x' ? a.y : a.x, vb = along === 'x' ? b.y : b.x;
+          return va + (vb - va) * k;
+        }
+      }
+      return 1;
+    };
+  };
+  const side = prof(shape.side, 'y'), bottom = prof(shape.bottom, 'x');
+  return (u: number, v: number) => {
+    const x = (u - bb.u0) / Math.max(1e-9, bb.u1 - bb.u0), y = (v - bb.v0) / Math.max(1e-9, bb.v1 - bb.v0);
+    return depth * Math.max(0, Math.min(side(y), bottom(x)));
+  };
+}
+
+/** Smoothed open polyline through the points (ends fixed). */
+function smoothOpen(pts: WinPoint[], def: number, steps = 10): V2[] {
+  const n = pts.length, out: V2[] = [];
+  for (let i = 0; i + 1 < n; i++) {
+    const A = pts[i], B = pts[i + 1], P = pts[Math.max(0, i - 1)], Q = pts[Math.min(n - 1, i + 2)];
+    const sa = i === 0 ? 0 : A.s ?? def, sb = i + 1 === n - 1 ? 0 : B.s ?? def;
+    const ma = { x: ((B.x - P.x) / 2) * sa, y: ((B.y - P.y) / 2) * sa }, mb = { x: ((Q.x - A.x) / 2) * sb, y: ((Q.y - A.y) / 2) * sb };
+    const k = sa > 0 || sb > 0 ? steps : 1;
+    for (let j = 0; j < k; j++) {
+      const t = j / k, t2 = t * t, t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+      out.push({ x: h00 * A.x + h10 * ma.x + h01 * B.x + h11 * mb.x, y: h00 * A.y + h10 * ma.y + h01 * B.y + h11 * mb.y });
+    }
+  }
+  out.push({ x: pts[n - 1].x, y: pts[n - 1].y });
+  return out;
+}
+export { smoothOpen };
+
+/** Sweep a profile (out, down in m) along the top outside edge of a wall between u0 and u1. */
+function sweepProfile(wall: WallSolid, u0: number, u1: number, prof: [number, number][]): THREE.BufferGeometry {
+  const n = Math.max(2, Math.ceil((u1 - u0) * 40) + 1);
+  const rings: THREE.Vector3[][] = [];
+  for (let j = 0; j < n; j++) {
+    const u = u0 + ((u1 - u0) * j) / (n - 1);
+    const fr = wall.frame(Math.min(1, Math.max(0, u)), 1);
+    const base = wall.at(Math.min(1, Math.max(0, u)), 1, 1).addScaledVector(fr.along, (u - Math.min(1, Math.max(0, u))) * wall.lenM);
+    const flat = new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize();
+    rings.push(prof.map(([x, y]) => base.clone().addScaledVector(flat, x).add(new THREE.Vector3(0, -y, 0))));
+  }
+  const pos: number[] = [];
+  const tri = (a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) => pos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+  const m = prof.length;
+  for (let j = 0; j + 1 < n; j++) for (let k = 0; k < m; k++) {
+    const a = rings[j][k], b = rings[j][(k + 1) % m], c = rings[j + 1][(k + 1) % m], d = rings[j + 1][k];
+    tri(a, b, c); tri(a, c, d);
+  }
+  const cap = THREE.ShapeUtils.triangulateShape(prof.map(([x, y]) => new THREE.Vector2(x, y)), []);
+  for (const [a, b, c] of cap) { tri(rings[0][a], rings[0][c], rings[0][b]); tri(rings[n - 1][a], rings[n - 1][b], rings[n - 1][c]); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+type Hole = { poly: V2[]; depth?: (u: number, v: number) => number };
+/** Not drawn, but still hit by clicks. */
+const HIDDEN = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const clamp01 = (v: number) => clamp(v, 0, 1);
@@ -256,21 +571,6 @@ function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStair
     place(new THREE.BoxGeometry(t, h, ob.d - 2 * t), ob.w / 2 - t / 2, y0 + h / 2, 0);
     place(new THREE.BoxGeometry(t, h, ob.d - 2 * t), -ob.w / 2 + t / 2, y0 + h / 2, 0);
   }
-}
-
-/** A fixed-size window fits a division if it is narrower than the division and fits the wall height. */
-export const windowFits = (fx: { w: number; h: number; sill: number }, divLen: number, wallH: number) =>
-  fx.w <= divLen - 0.02 && fx.sill + fx.h <= wallH - 0.02;
-
-/** Can this window shape be built in this wall division? (fixed-size shapes need room) */
-export function slotFits(b: Building, floorId: string, segId: string, shapeId: string): boolean {
-  const shape = b.windowShapes.find(s => s.id === shapeId);
-  if (!shape?.fixed) return true;
-  const fl = b.floors.find(f => f.id === floorId), plan = fl && planForFloor(b, floorId);
-  const seg = plan?.segments.find(s => s.id === segId);
-  if (!fl || !plan || !seg) return false;
-  const d = Math.max(1, seg.divisions ?? 1);
-  return windowFits(shape.fixed, (polyLength(sampleSeg(plan, seg)) * b.baseLength) / d, fl.height);
 }
 
 /** The point of the plan above nearest to v. */
@@ -520,7 +820,7 @@ function offsets(plan: StructurePlan, seg: PlanSegment, poly: V2[], half: number
 class WallSolid {
   R: number; C: number; params: number[]; O: V2[]; lenM: number;
   constructor(public rows: Row[], offs: V2[], offParams: number[], public y0: number, public y1: number,
-    public W: (v: V2, y: number) => THREE.Vector3, L: number, public tileW: number, public tileH: number) {
+    public W: (v: V2, y: number) => THREE.Vector3, L: number, public tileW: number, public tileH: number, public thick = 0.3) {
     this.R = rows.length - 1; this.C = rows[0].poly.length; this.params = rows[0].params;
     this.O = this.params.map((t, c) => (c === 0 ? offs[0] : c === this.C - 1 ? offs[offs.length - 1] : polyAt(offs, offParams, t)));
     this.lenM = polyLength(rows[0].poly) * L;
@@ -541,6 +841,18 @@ class WallSolid {
     }
     return { u: best, v };
   }
+  /** Local frame at (u, v): point on the outside face, mid-wall point, and unit directions. */
+  frame(u: number, v: number) {
+    const e = 1e-3;
+    const face = this.at(u, v, 1), mid = this.at(u, v, 0);
+    const along = this.at(Math.min(1, u + e), v, 0).sub(this.at(Math.max(0, u - e), v, 0)).normalize();
+    const up = this.at(u, Math.min(1, v + e), 0).sub(this.at(u, Math.max(0, v - e), 0));
+    if (up.lengthSq() < 1e-12) up.set(0, 1, 0); else up.normalize();
+    const out = new THREE.Vector3().subVectors(face, this.at(u, v, -1));
+    if (out.lengthSq() < 1e-12) out.crossVectors(along, up);
+    out.normalize();
+    return { face, mid, along, up, out };
+  }
   vline(u: number, side: number) { return Array.from({ length: this.R + 1 }, (_, r) => this.at(u, r / this.R, side * 1.01)); }
   rect(u0: number, u1: number, side: number) {
     const pts: THREE.Vector3[] = [];
@@ -551,7 +863,7 @@ class WallSolid {
     return pts;
   }
 
-  build(holes: V2[][]): THREE.BufferGeometry {
+  build(holes: Hole[]): THREE.BufferGeometry {
     const pos: number[] = [], uv: number[] = [];
     const uvOf = (u: number, v: number) => [(u * this.lenM) / this.tileW, ((this.y1 - this.y0) * v) / this.tileH];
     const tri = (a: [number, number, number], b: [number, number, number], c: [number, number, number]) => {
@@ -561,51 +873,64 @@ class WallSolid {
       pos.push(A.x, A.y, A.z, B.x, B.y, B.z, Cc.x, Cc.y, Cc.z);
       uv.push(...uvOf(a[0], a[1]), ...uvOf(b[0], b[1]), ...uvOf(c[0], c[1]));
     };
-    // boundary edge a -> b (wall material on its left in u/v): quad joining the two faces
-    const edgeQuad = (a: V2, b: V2) => {
-      tri([a.x, a.y, -1], [b.x, b.y, -1], [b.x, b.y, 1]);
-      tri([a.x, a.y, -1], [b.x, b.y, 1], [a.x, a.y, 1]);
+    // boundary edge a -> b (wall material on its left in u/v): quad joining side sa (back) to sb (front)
+    const edgeQuad = (a: V2, b: V2, sa: (q: V2) => number = () => -1) => {
+      tri([a.x, a.y, sa(a)], [b.x, b.y, sa(b)], [b.x, b.y, 1]);
+      tri([a.x, a.y, sa(a)], [b.x, b.y, 1], [a.x, a.y, 1]);
     };
     const P = this.params, R = this.R;
-
-    if (!holes.length) {
-      for (let r = 0; r < R; r++) for (let c = 0; c + 1 < this.C; c++) {
-        const u0 = P[c], u1 = P[c + 1], v0 = r / R, v1 = (r + 1) / R;
-        tri([u0, v0, 1], [u1, v0, 1], [u1, v1, 1]); tri([u0, v0, 1], [u1, v1, 1], [u0, v1, 1]);
-        tri([u0, v0, -1], [u1, v1, -1], [u1, v0, -1]); tri([u0, v0, -1], [u0, v1, -1], [u1, v1, -1]);
-      }
-    } else {
-      // triangulate the face with holes in metric u/v space, then subdivide so curved walls stay curved
-      const sx = Math.max(this.lenM, 1e-6), sy = Math.max(this.y1 - this.y0, 1e-6);
-      const outer: V2[] = [];
-      for (let c = 0; c < this.C; c++) outer.push({ x: P[c], y: 0 });
-      for (let r = 1; r <= R; r++) outer.push({ x: 1, y: r / R });
-      for (let c = this.C - 2; c >= 0; c--) outer.push({ x: P[c], y: 1 });
-      for (let r = R - 1; r >= 1; r--) outer.push({ x: 0, y: r / R });
-      const toV = (q: V2) => new THREE.Vector2(q.x * sx, q.y * sy);
-      const tris = THREE.ShapeUtils.triangulateShape(outer.map(toV), holes.map(h => h.map(toV)));
-      const all = [...outer, ...holes.flat()];
-      const curved = this.C > 2 || R > 1;
-      const du = curved ? Math.max(1 / 64, Math.min(...P.slice(1).map((t, k) => t - P[k]).filter(x => x > 1e-6), 1)) : 2;
-      const dv = curved ? 1 / R : 2;
+    const curved = this.C > 2 || R > 1;
+    const du = curved ? Math.max(1 / 64, Math.min(...P.slice(1).map((t, k) => t - P[k]).filter(x => x > 1e-6), 1)) : 2;
+    const dv = curved ? 1 / R : 2;
+    const sx = Math.max(this.lenM, 1e-6), sy = Math.max(this.y1 - this.y0, 1e-6);
+    const toV = (q: V2) => new THREE.Vector2(q.x * sx, q.y * sy);
+    /** Triangulate a region (outer counter-clockwise, holes clockwise) and emit it, subdividing to du × dv. */
+    const fill = (outer: V2[], hs: V2[][], side: (q: V2) => number, front: boolean, du2 = du, dv2 = dv) => {
+      const tris = THREE.ShapeUtils.triangulateShape(outer.map(toV), hs.map(h => h.map(toV)));
+      const all = [...outer, ...hs.flat()];
       const emit = (a: V2, b: V2, c: V2, depth: number) => {
         const us = [a.x, b.x, c.x], vs = [a.y, b.y, c.y];
-        if (depth < 7 && (Math.max(...us) - Math.min(...us) > du * 1.01 || Math.max(...vs) - Math.min(...vs) > dv * 1.01)) {
+        if (depth < 7 && (Math.max(...us) - Math.min(...us) > du2 * 1.01 || Math.max(...vs) - Math.min(...vs) > dv2 * 1.01)) {
           const m = (p: V2, q: V2) => ({ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 });
           const ab = m(a, b), bc = m(b, c), ca = m(c, a);
           emit(a, ab, ca, depth + 1); emit(ab, b, bc, depth + 1); emit(ca, bc, c, depth + 1); emit(ab, bc, ca, depth + 1);
           return;
         }
-        tri([a.x, a.y, 1], [b.x, b.y, 1], [c.x, c.y, 1]);
-        tri([a.x, a.y, -1], [c.x, c.y, -1], [b.x, b.y, -1]);
+        if (front) tri([a.x, a.y, side(a)], [b.x, b.y, side(b)], [c.x, c.y, side(c)]);
+        else tri([a.x, a.y, side(a)], [c.x, c.y, side(c)], [b.x, b.y, side(b)]);
       };
       for (const [i, j, k] of tris) {
         let a = all[i], b = all[j], c = all[k];
-        if ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) < 0) [b, c] = [c, b]; // counter-clockwise on the + face
+        if ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) < 0) [b, c] = [c, b]; // counter-clockwise in u/v
         emit(a, b, c, 0);
       }
-      // window reveals (holes run clockwise, so the wall is on their left)
-      for (const h of holes) for (let k = 0; k < h.length; k++) edgeQuad(h[k], h[(k + 1) % h.length]);
+    };
+    const grid = (front: boolean) => {
+      for (let r = 0; r < R; r++) for (let c = 0; c + 1 < this.C; c++) {
+        const u0 = P[c], u1 = P[c + 1], v0 = r / R, v1 = (r + 1) / R;
+        if (front) { tri([u0, v0, 1], [u1, v0, 1], [u1, v1, 1]); tri([u0, v0, 1], [u1, v1, 1], [u0, v1, 1]); }
+        else { tri([u0, v0, -1], [u1, v1, -1], [u1, v0, -1]); tri([u0, v0, -1], [u0, v1, -1], [u1, v1, -1]); }
+      }
+    };
+    const outer: V2[] = [];
+    for (let c = 0; c < this.C; c++) outer.push({ x: P[c], y: 0 });
+    for (let r = 1; r <= R; r++) outer.push({ x: 1, y: r / R });
+    for (let c = this.C - 2; c >= 0; c--) outer.push({ x: P[c], y: 1 });
+    for (let r = R - 1; r >= 1; r--) outer.push({ x: 0, y: r / R });
+
+    const through = holes.filter(h => !h.depth), niches = holes.filter(h => h.depth);
+    // outside face (+1): every opening and niche cut out; inside face (−1): only openings
+    if (holes.length) fill(outer, holes.map(h => h.poly), () => 1, true); else grid(true);
+    if (through.length) fill(outer, through.map(h => h.poly), () => -1, false); else grid(false);
+    // window reveals (holes run clockwise, so the wall is on their left)
+    for (const h of through) for (let k = 0; k < h.poly.length; k++) edgeQuad(h.poly[k], h.poly[(k + 1) % h.poly.length]);
+    // niches: the recess surface (a front-facing surface pushed in by the depth) and its sides
+    for (const h of niches) {
+      const sideAt = (q: V2) => 1 - (2 * Math.min(h.depth!(q.x, q.y), this.thick * 0.95)) / this.thick;
+      const ccw = [...h.poly].reverse();
+      const xs = ccw.map(q => q.x), ys = ccw.map(q => q.y);
+      fill(ccw, [], sideAt, true, Math.min(du, (Math.max(...xs) - Math.min(...xs)) / 14), Math.min(dv, (Math.max(...ys) - Math.min(...ys)) / 14));
+      for (let k = 0; k < h.poly.length; k++) edgeQuad(h.poly[k], h.poly[(k + 1) % h.poly.length], sideAt);
     }
     // outer boundary, counter-clockwise: bottom, end, top, start
     for (let c = 0; c + 1 < this.C; c++) edgeQuad({ x: P[c], y: 0 }, { x: P[c + 1], y: 0 });

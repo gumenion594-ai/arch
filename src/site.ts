@@ -38,21 +38,22 @@ export class SiteEditor {
   /** Building projects available to place. */
   private library() { return loadProjects().filter(x => x.kind === 'building'); }
   /** The site's items resolved to buildings at their site positions (id = item id). */
-  private resolved(lib = this.library()): { buildings: Building[]; textures: Project['textures'] } {
-    const buildings: Building[] = [], textures: Project['textures'] = [];
+  private resolved(lib = this.library()): { buildings: Building[]; textures: Project['textures']; designs: Project['designs'] } {
+    const buildings: Building[] = [], textures: Project['textures'] = [], designs: Project['designs'] = [];
     for (const it of this.p.items) {
       const src = lib.find(x => x.id === it.projectId);
       if (!src) continue;
       buildings.push({ ...src.buildings[0], id: it.id, x: it.x, y: it.y });
       textures.push(...src.textures);
+      designs.push(...src.designs);
     }
-    return { buildings, textures };
+    return { buildings, textures, designs };
   }
 
   refresh() {
     const lib = this.library();
-    const { buildings, textures } = this.resolved(lib);
-    this.viewer.update({ id: this.p.id, buildings, textures }, { activeId: this.selItem ?? '*', mode: this.viewMode, showArea: this.showArea });
+    const { buildings, textures, designs } = this.resolved(lib);
+    this.viewer.update({ id: this.p.id, buildings, textures, designs }, { activeId: this.selItem ?? '*', mode: this.viewMode, showArea: this.showArea });
 
     const nameIn = h('input', {
       class: 'title-input', value: this.p.name,
