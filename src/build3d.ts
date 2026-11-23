@@ -216,13 +216,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         colAlong(r.rows, c.a === pt.id ? 0 : 1, segColT(plan, c), r.bottom, { floorId: floor.id, floorIndex: i, segId: c.id, interior }, segMaterial(plan, c), selected);
       }
 
-      // lone points: a pillar of wall thickness
-      const used = new Set(plan.segments.flatMap(s => [s.a, s.b]));
-      for (const pt of plan.points) {
-        if (used.has(pt.id)) continue;
-        add(column(W(pt, y0), W(pt, y1), plan.wallThickness, null), floorSel ? mats.selected : mats.column(plan.material),
-          { floorId: floor.id, floorIndex: i, interior }, { cat: 'col', material: plan.material });
-      }
+      // (single unconnected points build nothing: they only serve as targets for the floor below)
 
       // stairs climb to the top of the next floor's slab (top floor: to its ceiling)
       const yStairs = i + 1 < N ? elevation(p, i + 1) + slabs[i + 1].floor : y1;

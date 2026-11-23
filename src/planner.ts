@@ -463,11 +463,18 @@ export class Planner {
       }
     }
 
+    const connected = new Set(plan.segments.flatMap(sg => [sg.a, sg.b]));
     for (const p of plan.points) {
       const s = this.toScreen(p);
       const sel = this.selPoints.has(p.id);
-      g.fillStyle = sel ? '#ffd400' : '#ffffff';
-      g.beginPath(); g.arc(s.x, s.y, sel ? 5.5 : 4.5, 0, Math.PI * 2); g.fill();
+      if (!connected.has(p.id)) {
+        // unconnected point: hollow orange ring so stray clicks are easy to spot and delete
+        g.strokeStyle = sel ? '#ffd400' : '#ff9b4a'; g.lineWidth = 2;
+        g.beginPath(); g.arc(s.x, s.y, 5.5, 0, Math.PI * 2); g.stroke();
+      } else {
+        g.fillStyle = sel ? '#ffd400' : '#ffffff';
+        g.beginPath(); g.arc(s.x, s.y, sel ? 5.5 : 4.5, 0, Math.PI * 2); g.fill();
+      }
       if (p.id === this.head && this.tool === 'draw') {
         g.strokeStyle = '#4cd964'; g.lineWidth = 2;
         g.beginPath(); g.arc(s.x, s.y, 8, 0, Math.PI * 2); g.stroke();

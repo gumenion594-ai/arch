@@ -672,7 +672,7 @@ export class Editor {
       const topCb = h('input', { type: 'checkbox', checked: p.topPlanId === pl.id, onchange: () => this.mutate(() => (p.topPlanId = topCb.checked ? pl.id : null)) });
       const toolBtn = (t: Tool, label: string) => h('button', { class: pn.tool === t ? 'tab active' : 'tab', onclick: () => this.setTool(t) }, label);
       const help: Record<Tool, string> = {
-        draw: 'Click to add points; each new point connects to the previous one. Click an existing point to connect to it (closing a loop) and continue from there. Enter, Space or Esc ends the chain: the next point starts a new, unconnected one.'
+        draw: 'Click to add points; each new point connects to the previous one. Click an existing point to connect to it (closing a loop) and continue from there. Enter, Space or Esc ends the chain: the next point starts a new, unconnected one. A point with no walls (orange ring) builds nothing; delete stray ones in Select mode.'
           + (interior ? ' Internal walls must stay inside the external walls (orange dashed).' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
         select: 'Click points or walls to select (Shift = add). Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
         move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
