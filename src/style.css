@@ -47,3 +47,12 @@ label.chk { flex-direction: row; align-items: center; gap: 6px; color: var(--tex
 .help { margin-top: 12px; }
 #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #444; padding: 8px 14px; border-radius: 6px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }
 #toast.show { opacity: 1; }
+.fseg { border-left: 4px solid transparent; }
+.ftop { position: absolute; top: -22px; left: 0; right: 0; font-size: 11px; padding-left: 6px; border-left: 4px solid transparent; color: #ffa060; white-space: nowrap; }
+.floorbar-wrap { padding-top: 28px; }
+.plan-row { border-left: 4px solid transparent; }
+details { margin: 8px 0; } summary { cursor: pointer; font-weight: 600; margin-bottom: 4px; }
+.lbl-row { display: flex; gap: 6px; align-items: baseline; } .lbl-row span { color: var(--text); } .lbl-row a { color: var(--accent); font-size: 11px; margin-left: auto; }
+input[type=range] { width: 100%; padding: 0; }
+.right > input:not([type]) , .right input[placeholder] { width: 100%; }
+.tex-field { margin: 8px 0; } .tex-field select { max-width: 130px; }

@@ -1,11 +1,12 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
-import { PlanPoint, StructurePlan, clamp, uid } from './model';
-import { V2, distToSeg, enclosedFaces, planValid } from './geometry';
+import { PlanPoint, PlanSegment, StructurePlan, clamp, segColT, segKind, uid } from './model';
+import { V2, distToSeg, enclosedFaces, planValid, polyAt, polyParams, sampleSeg } from './geometry';
 
 export type Tool = 'draw' | 'select';
 
 export interface PlannerHost {
   getPlan(): StructurePlan | null;
+  getGhost(): StructurePlan | null; // plan below, drawn faintly for reference
   baseLength(): number;
   begin(): void; // snapshot for undo, before a change
   commit(): void; // persist + refresh UI after a change
@@ -68,11 +69,13 @@ export class Planner {
   }
   private hitSeg(plan: StructurePlan, p: V2) {
     const tol = HIT / this.box.s;
-    const pts = new Map(plan.points.map(x => [x.id, x]));
-    let best = null, bd = tol;
+    let best: PlanSegment | null = null, bd = tol;
     for (const s of plan.segments) {
-      const d = distToSeg(p, pts.get(s.a)!, pts.get(s.b)!);
-      if (d <= bd) { bd = d; best = s; }
+      const sp = sampleSeg(plan, s);
+      for (let i = 0; i + 1 < sp.length; i++) {
+        const d = distToSeg(p, sp[i], sp[i + 1]);
+        if (d <= bd) { bd = d; best = s; }
+      }
     }
     return best;
   }
@@ -180,16 +183,26 @@ export class Planner {
   insertPoint(plan: StructurePlan, segId: string, near?: V2) {
     const s = plan.segments.find(x => x.id === segId)!;
     const A = plan.points.find(x => x.id === s.a)!, B = plan.points.find(x => x.id === s.b)!;
+    const sp = sampleSeg(plan, s), pp = polyParams(sp);
     let t = 0.5;
     if (near) {
-      const dx = B.x - A.x, dy = B.y - A.y, L2 = dx * dx + dy * dy;
-      t = L2 ? clamp(((near.x - A.x) * dx + (near.y - A.y) * dy) / L2, 0.02, 0.98) : 0.5;
+      // closest position along the (possibly curved) wall
+      let bd = Infinity;
+      for (let k = 0; k <= 200; k++) {
+        const q = polyAt(sp, pp, k / 200), d = Math.hypot(q.x - near.x, q.y - near.y);
+        if (d < bd) { bd = d; t = k / 200; }
+      }
+      t = clamp(t, 0.02, 0.98);
     }
+    void A; void B;
+    const q = polyAt(sp, pp, t);
     this.h.begin();
-    const np: PlanPoint = { id: uid(), n: plan.nextN++, x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t };
+    const np: PlanPoint = { id: uid(), n: plan.nextN++, x: q.x, y: q.y };
     plan.points.push(np);
     const i = plan.segments.indexOf(s);
-    plan.segments.splice(i, 1, { id: uid(), a: s.a, b: np.id }, { id: uid(), a: np.id, b: s.b });
+    // both halves keep the wall's properties
+    const { id: _id, a: _a, b: _b, ...props } = s;
+    plan.segments.splice(i, 1, { ...props, id: uid(), a: s.a, b: np.id }, { ...props, id: uid(), a: np.id, b: s.b });
     this.selPoints.clear(); this.selSegs.clear(); this.selPoints.add(np.id);
     this.h.commit();
     this.h.selectionChanged();
@@ -237,6 +250,20 @@ export class Planner {
     const plan = this.h.getPlan();
     if (!plan) { g.fillStyle = '#aaa'; g.fillText('No structure plan selected', b.x0 + 10, b.y0 + 20); return; }
     const pts = new Map(plan.points.map(p => [p.id, p]));
+    const path = (poly: V2[]) => {
+      g.beginPath();
+      poly.forEach((v, i) => { const q = this.toScreen(v); i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); });
+    };
+
+    // ghost of the plan below
+    const ghost = this.h.getGhost();
+    if (ghost && ghost !== plan) {
+      g.strokeStyle = 'rgba(255,160,96,0.45)'; g.lineWidth = 1; g.setLineDash([3, 3]);
+      for (const s of ghost.segments) { path(sampleSeg(ghost, s)); g.stroke(); }
+      g.setLineDash([]);
+      g.fillStyle = 'rgba(255,160,96,0.5)';
+      for (const p of ghost.points) { const q = this.toScreen(p); g.fillRect(q.x - 2, q.y - 2, 4, 4); }
+    }
 
     // enclosed areas
     g.fillStyle = 'rgba(58,123,213,0.18)';
@@ -250,17 +277,34 @@ export class Planner {
     const tpx = Math.max(2, (plan.wallThickness / this.h.baseLength()) * b.s);
     g.lineCap = 'round';
     for (const s of plan.segments) {
-      const A = this.toScreen(pts.get(s.a)!), B = this.toScreen(pts.get(s.b)!);
+      const sp = sampleSeg(plan, s);
       const sel = this.selSegs.has(s.id);
-      g.strokeStyle = sel ? 'rgba(255,212,0,0.35)' : 'rgba(255,255,255,0.15)'; g.lineWidth = tpx;
-      g.beginPath(); g.moveTo(A.x, A.y); g.lineTo(B.x, B.y); g.stroke();
-      g.strokeStyle = sel ? '#ffd400' : '#f0f0f0'; g.lineWidth = sel ? 2.5 : 1.5;
-      g.beginPath(); g.moveTo(A.x, A.y); g.lineTo(B.x, B.y); g.stroke();
+      const kind = segKind(s);
+      if (kind === 'wall') {
+        g.strokeStyle = sel ? 'rgba(255,212,0,0.35)' : 'rgba(255,255,255,0.15)'; g.lineWidth = tpx;
+        path(sp); g.stroke();
+      }
+      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : '#f0f0f0';
+      g.lineWidth = sel ? 2.5 : 1.5;
+      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : []);
+      path(sp); g.stroke();
+      g.setLineDash([]);
+      if (kind === 'colonnade') {
+        // column positions at the division points
+        const d = Math.max(1, s.divisions ?? 1), pp = polyParams(sp);
+        const cpx = Math.max(4, (segColT(plan, s) / this.h.baseLength()) * b.s);
+        g.fillStyle = sel ? '#ffd400' : '#f0f0f0';
+        for (let k = 1; k < d; k++) {
+          const q = this.toScreen(polyAt(sp, pp, k / d));
+          g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx);
+        }
+      }
     }
 
     // rubber band from chain head
     if (this.tool === 'draw' && this.head && this.hover && pts.get(this.head)) {
       const A = this.toScreen(pts.get(this.head)!), B = this.toScreen(this.hover);
+      g.lineWidth = 1;
       g.setLineDash([5, 5]); g.strokeStyle = '#7fc8ff'; g.lineWidth = 1;
       g.beginPath(); g.moveTo(A.x, A.y); g.lineTo(B.x, B.y); g.stroke(); g.setLineDash([]);
     }

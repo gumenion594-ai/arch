@@ -1,5 +1,6 @@
 // 2D helpers for plans (coordinates in the 0..1 building square).
-import type { StructurePlan } from './model';
+import type { PlanSegment, StructurePlan } from './model';
+import { segSmooth } from './model';
 
 export type V2 = { x: number; y: number };
 
@@ -114,8 +115,125 @@ export function enclosedFaces(plan: StructurePlan): V2[][] {
         a = b; b = next;
       }
       const poly = face.map(id => pts.get(id)!);
-      if (poly.length >= 3 && signedArea(poly) > 1e-9) faces.push(poly);
+      if (poly.length >= 3 && signedArea(poly) > 1e-9) {
+        // follow curved walls
+        const out: V2[] = [];
+        for (let k = 0; k < face.length; k++) {
+          const u = face[k], w = face[(k + 1) % face.length];
+          const seg = plan.segments.find(x => (x.a === u && x.b === w) || (x.a === w && x.b === u))!;
+          const sp = sampleSeg(plan, seg);
+          if (seg.a !== u) sp.reverse();
+          out.push(...sp.slice(0, -1));
+        }
+        faces.push(out);
+      }
     }
   }
   return faces;
+}
+
+/** The other neighbour of point `at` (excluding `from`) if `at` has exactly two walls. */
+function continuation(plan: StructurePlan, at: string, from: string): V2 | null {
+  const segs = plan.segments.filter(x => x.a === at || x.b === at);
+  if (segs.length !== 2) return null;
+  const o = segs.find(x => !((x.a === at && x.b === from) || (x.b === at && x.a === from)));
+  if (!o) return null;
+  const id = o.a === at ? o.b : o.a;
+  return plan.points.find(p => p.id === id) ?? null;
+}
+
+/**
+ * Points along a wall from a to b. With smoothness > 0 it becomes a
+ * Catmull-Rom style curve through the neighbouring points.
+ */
+export function sampleSeg(plan: StructurePlan, seg: PlanSegment, steps = 20): V2[] {
+  const A = plan.points.find(p => p.id === seg.a)!, B = plan.points.find(p => p.id === seg.b)!;
+  const sm = segSmooth(plan, seg);
+  if (sm <= 0) return [{ x: A.x, y: A.y }, { x: B.x, y: B.y }];
+  const P = continuation(plan, seg.a, seg.b), N = continuation(plan, seg.b, seg.a);
+  const ma = P ? { x: (B.x - P.x) / 2 * sm, y: (B.y - P.y) / 2 * sm } : { x: 0, y: 0 };
+  const mb = N ? { x: (N.x - A.x) / 2 * sm, y: (N.y - A.y) / 2 * sm } : { x: 0, y: 0 };
+  if (!P && !N) return [{ x: A.x, y: A.y }, { x: B.x, y: B.y }];
+  const out: V2[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps, t2 = t * t, t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+    out.push({
+      x: Math.min(1, Math.max(0, h00 * A.x + h10 * ma.x + h01 * B.x + h11 * mb.x)),
+      y: Math.min(1, Math.max(0, h00 * A.y + h10 * ma.y + h01 * B.y + h11 * mb.y)),
+    });
+  }
+  return out;
+}
+
+export function polyLength(poly: V2[]) {
+  let L = 0;
+  for (let i = 1; i < poly.length; i++) L += Math.hypot(poly[i].x - poly[i - 1].x, poly[i].y - poly[i - 1].y);
+  return L;
+}
+
+/** Normalised arc-length parameter (0..1) of every vertex. */
+export function polyParams(poly: V2[]): number[] {
+  const L = polyLength(poly);
+  const out = [0];
+  let acc = 0;
+  for (let i = 1; i < poly.length; i++) {
+    acc += Math.hypot(poly[i].x - poly[i - 1].x, poly[i].y - poly[i - 1].y);
+    out.push(L > 0 ? acc / L : i / (poly.length - 1));
+  }
+  return out;
+}
+
+/** Point at normalised arc-length parameter t. */
+export function polyAt(poly: V2[], params: number[], t: number): V2 {
+  if (poly.length === 1) return poly[0];
+  for (let i = 1; i < poly.length; i++) {
+    if (t <= params[i] + 1e-12 || i === poly.length - 1) {
+      const span = params[i] - params[i - 1];
+      const k = span > 0 ? Math.min(1, Math.max(0, (t - params[i - 1]) / span)) : 0;
+      return { x: poly[i - 1].x + (poly[i].x - poly[i - 1].x) * k, y: poly[i - 1].y + (poly[i].y - poly[i - 1].y) * k };
+    }
+  }
+  return poly[poly.length - 1];
+}
+
+/** Shortest wall path between two points of a plan, as point ids (null if not connected). */
+export function shortestPath(plan: StructurePlan, from: string, to: string): string[] | null {
+  if (from === to) return [from];
+  const pos = new Map(plan.points.map(p => [p.id, p]));
+  const dist = new Map<string, number>([[from, 0]]);
+  const prev = new Map<string, string>();
+  const todo = new Set(plan.points.map(p => p.id));
+  while (todo.size) {
+    let u: string | null = null, best = Infinity;
+    for (const id of todo) { const d = dist.get(id) ?? Infinity; if (d < best) { best = d; u = id; } }
+    if (u === null) break;
+    todo.delete(u);
+    if (u === to) break;
+    for (const sg of plan.segments) {
+      const v = sg.a === u ? sg.b : sg.b === u ? sg.a : null;
+      if (!v || !todo.has(v)) continue;
+      const A = pos.get(u)!, B = pos.get(v)!;
+      const nd = best + Math.hypot(A.x - B.x, A.y - B.y);
+      if (nd < (dist.get(v) ?? Infinity)) { dist.set(v, nd); prev.set(v, u); }
+    }
+  }
+  if (!prev.has(to)) return null;
+  const path = [to];
+  while (path[0] !== from) path.unshift(prev.get(path[0])!);
+  return path;
+}
+
+/** Sampled polyline following the walls along a point-id path. */
+export function samplePath(plan: StructurePlan, path: string[]): V2[] {
+  if (path.length === 1) { const p = plan.points.find(x => x.id === path[0])!; return [{ x: p.x, y: p.y }]; }
+  const out: V2[] = [];
+  for (let k = 0; k + 1 < path.length; k++) {
+    const u = path[k], w = path[k + 1];
+    const seg = plan.segments.find(x => (x.a === u && x.b === w) || (x.a === w && x.b === u))!;
+    const sp = sampleSeg(plan, seg);
+    if (seg.a !== u) sp.reverse();
+    out.push(...(k ? sp.slice(1) : sp));
+  }
+  return out;
 }

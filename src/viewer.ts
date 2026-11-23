@@ -1,8 +1,9 @@
 // Three.js 3D view: ground, building-area wireframe, floor lines, walls and slabs.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Project, floorBase, planForFloor, totalHeight } from './model';
-import { enclosedFaces, V2 } from './geometry';
+import { Project, floorBase, segKind, totalHeight } from './model';
+import { enclosedFaces, sampleSeg, V2 } from './geometry';
+import { buildStructure, planAtLevel } from './build3d';
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
 
@@ -77,7 +78,7 @@ export class Viewer {
   }
 
   /** Rebuild the scene. World: x = plan x * L, z = (1 - plan y) * L, y = up. */
-  update(p: Project, mode: ViewMode, selectedFloor: string | null) {
+  update(p: Project, mode: ViewMode, selected: Set<string>) {
     this.clear();
     const L = p.baseLength, H = totalHeight(p);
     if (this.lastBase !== L) { this.frame(p); this.lastBase = L; }
@@ -102,14 +103,11 @@ export class Viewer {
     };
     let y = 0;
     p.floors.forEach(f => {
-      sq(y, f.id === selectedFloor ? yellow : white);
+      sq(y, selected.has(f.id) ? yellow : white);
       y += f.height;
     });
     sq(H, white);
-    if (selectedFloor) {
-      const i = p.floors.findIndex(f => f.id === selectedFloor);
-      if (i >= 0) sq(floorBase(p, i + 1), yellow);
-    }
+    p.floors.forEach((f, i) => { if (selected.has(f.id)) sq(floorBase(p, i + 1), yellow); });
     const vgeo = new THREE.BufferGeometry().setFromPoints(
       [[0, 0], [L, 0], [L, L], [0, L]].flatMap(([x, z]) => [new THREE.Vector3(x, 0, z), new THREE.Vector3(x, H, z)]),
     );
@@ -118,83 +116,58 @@ export class Viewer {
     const toW = (v: V2, yy: number) => new THREE.Vector3(v.x * L, yy, (1 - v.y) * L);
 
     if (mode === 'plan') {
-      // stacked 2D plans
-      p.floors.forEach((f, i) => {
-        const plan = planForFloor(p, f.id);
-        if (!plan) return;
-        const yy = floorBase(p, i) + 0.002 * L;
-        const pts = new Map(plan.points.map(pt => [pt.id, pt]));
-        const arr: THREE.Vector3[] = [];
-        plan.segments.forEach(s => arr.push(toW(pts.get(s.a)!, yy), toW(pts.get(s.b)!, yy)));
-        const lm = new THREE.LineBasicMaterial({ color: f.id === selectedFloor ? 0xffd400 : 0x7fc8ff });
-        this.content.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(arr), lm));
+      // stacked 2D plans (levels 0..N, N = Top)
+      for (let k = 0; k <= p.floors.length; k++) {
+        const plan = planAtLevel(p, k);
+        if (!plan) continue;
+        const yy = (k < p.floors.length ? floorBase(p, k) : H) + 0.002 * L;
+        const isSel = k < p.floors.length && selected.has(p.floors[k].id);
+        const color = isSel ? 0xffd400 : k === p.floors.length ? 0xffa060 : 0x7fc8ff;
+        for (const s of plan.segments) {
+          const pts = sampleSeg(plan, s).map(v => toW(v, yy));
+          const kind = segKind(s);
+          const mat = kind === 'wall'
+            ? new THREE.LineBasicMaterial({ color })
+            : new THREE.LineDashedMaterial({ color, dashSize: kind === 'colonnade' ? L / 200 : L / 50, gapSize: L / 120 });
+          const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat);
+          if (kind !== 'wall') line.computeLineDistances();
+          this.content.add(line);
+        }
         for (const face of enclosedFaces(plan)) {
           const shape = new THREE.Shape(face.map(v => new THREE.Vector2(v.x * L, v.y * L)));
           const m = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({
             color: 0x3a7bd5, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false,
           }));
-          // shape is in (x, y) -> map to world (x, z = L - y)
           m.rotation.x = -Math.PI / 2;
           m.position.set(0, yy, L);
           this.content.add(m);
         }
-      });
+      }
       return;
     }
 
-    // structural / detailed: walls + slabs
-    const wallMat = new THREE.MeshStandardMaterial({ color: mode === 'detailed' ? 0xd8d2c4 : 0xbdbdbd, roughness: 0.9 });
-    const slabMat = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1 });
-    const edgeMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 });
-    const addEdges = (m: THREE.Mesh) => {
-      const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry, 20), edgeMat);
-      e.position.copy(m.position); e.rotation.copy(m.rotation); e.quaternion.copy(m.quaternion);
-      this.content.add(e);
-    };
-
-    p.floors.forEach((f, i) => {
-      const plan = planForFloor(p, f.id);
-      if (!plan) return;
-      const base = floorBase(p, i);
-      const t = plan.wallThickness;
-      const pts = new Map(plan.points.map(pt => [pt.id, pt]));
-      const slabT = plan.floorEnabled ? Math.min(plan.floorThickness, f.height * 0.9) : 0;
-
-      // slab at the bottom of this floor, under every enclosed area
-      if (slabT > 0) {
-        for (const face of enclosedFaces(plan)) {
-          const shape = new THREE.Shape(face.map(v => new THREE.Vector2(v.x * L, v.y * L)));
-          const geo = new THREE.ExtrudeGeometry(shape, { depth: slabT, bevelEnabled: false });
-          const m = new THREE.Mesh(geo, slabMat);
-          m.rotation.x = -Math.PI / 2; // extrusion (z) -> up
-          m.position.set(0, base, L);
-          this.content.add(m); addEdges(m);
-        }
-      }
-
-      // walls: box per segment, centred on the line, extended by t/2 to close corners
-      for (const s of plan.segments) {
-        const A = pts.get(s.a)!, B = pts.get(s.b)!;
-        const a = toW(A, 0), b = toW(B, 0);
-        const len = a.distanceTo(b);
-        if (len < 1e-6) continue;
-        const h = f.height - slabT;
-        const geo = new THREE.BoxGeometry(len + t, h, t);
-        const m = new THREE.Mesh(geo, wallMat);
-        m.position.set((a.x + b.x) / 2, base + slabT + h / 2, (a.z + b.z) / 2);
-        m.rotation.y = -Math.atan2(b.z - a.z, b.x - a.x);
-        this.content.add(m); addEdges(m);
-      }
-      // a single lone point = a pillar of wall thickness
-      const used = new Set(plan.segments.flatMap(s => [s.a, s.b]));
-      for (const pt of plan.points) {
-        if (used.has(pt.id)) continue;
-        const h = f.height - slabT;
-        const m = new THREE.Mesh(new THREE.BoxGeometry(t, h, t), wallMat);
-        const w = toW(pt, 0);
-        m.position.set(w.x, base + slabT + h / 2, w.z);
-        this.content.add(m); addEdges(m);
-      }
-    });
+    const detailed = mode === 'detailed';
+    this.content.add(buildStructure(p, detailed, {
+      wall: new THREE.MeshStandardMaterial({ color: detailed ? 0xd8d2c4 : 0xbdbdbd, roughness: 0.9 }),
+      column: new THREE.MeshStandardMaterial({ color: detailed ? 0xe6e1d6 : 0xc8c8c8, roughness: 0.8 }),
+      slab: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1 }),
+      edge: new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: detailed ? 0.25 : 0.6 }),
+      tex: id => this.texMat(p, id),
+    }));
   }
+
+  private texCache = new Map<string, THREE.Texture>();
+  private texMat(p: Project, id: string): THREE.Material | null {
+    const t = p.textures.find(x => x.id === id);
+    if (!t) return null;
+    let tex = this.texCache.get(id);
+    if (!tex) {
+      tex = new THREE.TextureLoader().load(t.data, () => this.onTexture?.());
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      this.texCache.set(id, tex);
+    }
+    return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9 });
+  }
+  onTexture?: () => void;
 }
