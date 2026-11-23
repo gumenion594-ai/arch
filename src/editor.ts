@@ -102,8 +102,11 @@ export class Editor {
     this.shapeEds.forEach(e => e.draw());
   }
 
+  /** Last design category (openings / niches / balconies) opened in the Design tab. */
+  designKind: DesignMode = 'openings';
   setMode(m: Mode) {
     this.mode = m;
+    if (isDesign(m)) this.designKind = m;
     this.viewer?.dispose(); this.viewer = null;
     this.planner?.dispose(); this.planner = null;
     this.shapeEds.forEach(e => e.dispose()); this.shapeEds = [];
@@ -114,7 +117,7 @@ export class Editor {
       this.viewer = new Viewer(this.center);
       this.viewer.onTexture = () => this.refresh();
       this.viewer.onPick = (hit, e) => onPick(this, hit, e);
-      this.viewer.onWalkChange = () => this.renderRight();
+      this.viewer.onWalkChange = () => { this.renderHeader(); this.renderRight(); };
     } else if (m === 'floorarea') {
       if (!this.b.floors.some(f => f.id === this.maskFloor)) this.maskFloor = [...this.selFloors][0] ?? this.b.floors[this.b.ground].id;
       setupFloorAreaMode(this);
@@ -207,19 +210,32 @@ export class Editor {
       class: 'title-input', value: this.p.name,
       onchange: () => { const v = nameIn.value.trim(); if (v && v !== this.p.name) this.mutate(() => { this.p.name = v; this.b.name = v; }); else nameIn.value = this.p.name; },
     });
-    const tab = (m: Mode, label: string) => h('button', { class: this.mode === m ? 'tab active' : 'tab', onclick: () => this.setMode(m) }, label);
-    const vm = h('select', { onchange: () => { this.viewMode = vm.value as ViewMode; this.refresh(); } },
+    const tab = (m: Mode, label: string) => h('button', { class: this.mode === m || (isDesign(m) && isDesign(this.mode)) ? 'tab active' : 'tab', onclick: () => this.setMode(m) }, label);
+    const vm = h('select', {
+      onchange: () => {
+        vm.blur(); // keys go to the view (walking), not the list
+        if (vm.value === 'walk') {
+          if (this.viewMode === 'plan') this.viewMode = 'detailed';
+          this.refresh();
+          this.viewer?.enterWalk();
+          return;
+        }
+        this.viewer?.exitWalk();
+        this.viewMode = vm.value as ViewMode; this.refresh();
+      },
+    },
       h('option', { value: 'plan' }, 'Floor plan view'),
       h('option', { value: 'structural' }, 'Structural view'),
       h('option', { value: 'detailed' }, 'Detailed view'),
+      h('option', { value: 'walk' }, 'First person view'),
     );
-    vm.value = this.viewMode;
+    vm.value = this.viewer?.walk ? 'walk' : this.viewMode;
     const area = h('input', { type: 'checkbox', checked: this.showArea, onchange: () => { this.showArea = area.checked; setPref('showArea', area.checked ? '1' : '0'); this.refresh(); } });
     this.header.innerHTML = '';
     put(this.header, 
       h('button', { onclick: () => this.onBack() }, '← Projects'),
       nameIn,
-      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('floorarea', 'Floor areas'), tab('openings', 'Openings'), tab('niches', 'Niches'), tab('balconies', 'Balconies')),
+      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('floorarea', 'Floor areas'), tab(this.designKind, 'Design')),
       this.mode === 'view' ? vm : null,
       this.mode === 'view' ? h('label', { class: 'chk', title: 'Show the building-area outline and floor lines' }, area, 'Area lines') : null,
       h('div', { class: 'spacer' }),
@@ -599,7 +615,7 @@ export class Editor {
       if (interior && !this.refStructure()) body.push(h('div', { class: 'warn' }, 'Assign this floor plan to floors that have external walls (a structure plan) first; internal walls can only go inside them.'));
       body.push(
         h('div', { class: 'box-title' }, 'Tool'),
-        h('div', { class: 'row' }, toolBtn('draw', 'Draw (D)'), toolBtn('select', 'Select (S)'), toolBtn('move', 'Move all (M)'),
+        h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('move', 'Move all (M)'),
           interior ? toolBtn('stairs', 'Stairs') : null, interior ? toolBtn('elevator', 'Elevator') : null,
           pn.tool === 'draw' ? h('button', { onclick: () => pn.endChain() }, 'End chain (Enter)') : null),
         this.selectionBox(pl, interior),

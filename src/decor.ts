@@ -104,11 +104,8 @@ export function renderViewPanel(ed: Editor) {
       pm('floor', 'Floor', 'Everything on a floor')),
     h('div', { class: 'muted small' }, 'Click in the 3D view (Shift = add). Esc clears. Imported designs and textures show in the Detailed view.'),
     ed.viewer?.walk
-      ? h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => ed.viewer?.exitWalk() }, 'Exit walk (Esc)'))
-      : h('div', { class: 'row' }, h('button', {
-        class: 'primary', title: 'Walk around at eye height (1.6 m), climb stairs, fly',
-        onclick: () => { ed.viewer?.enterWalk(); },
-      }, 'Walk'), h('span', { class: 'muted small' }, 'First person, eyes at 1.6 m')),
+      ? h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => ed.viewer?.exitWalk() }, 'Exit first person (Esc)'), h('span', { class: 'muted small' }, 'WASD walk · mouse look · F fly · Space jump'))
+      : h('div', { class: 'muted small' }, 'First person: pick “First person view” in the view list at the top.'),
     h('div', { class: 'row views' }, h('span', { class: 'muted small' }, 'View from'),
       ...(['front', 'back', 'left', 'right', 'top', 'corner'] as const).map(d => h('button', { onclick: () => ed.viewer?.look(d) }, d[0].toUpperCase() + d.slice(1)))),
     cutawayField(ed),
@@ -530,7 +527,10 @@ export function renderDesignPanel(ed: Editor, mode: DesignMode) {
   });
 
   ed.right.innerHTML = '';
+  const kindBtn = (m: DesignMode, label: string) => h('button', { class: mode === m ? 'tab active' : 'tab', onclick: () => mode !== m && ed.setMode(m) }, label);
   put(ed.right,
+    h('div', { class: 'box-title' }, 'Design type'),
+    h('div', { class: 'row' }, kindBtn('openings', 'Openings'), kindBtn('niches', 'Niches'), kindBtn('balconies', 'Balconies')),
     h('div', { class: 'box-title' }, isBal ? 'Balcony shapes' : mode === 'openings' ? 'Opening shapes (windows, doors, arches)' : 'Niche shapes'),
     h('div', { class: 'plans' }, ...list.map(s => h('div', {
       class: 'plan-row' + (s.id === cur?.id ? ' active' : ''), onclick: () => select(s.id),

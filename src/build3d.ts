@@ -5,6 +5,7 @@ import {
   BALCONY_AT, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
 } from './model';
 import { fitDesign, fitDesignSliced } from './assets';
+import polygonClipping, { MultiPolygon } from 'polygon-clipping';
 import { V2, enclosedFacesSegs, pointInPoly, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
 
 export type Mats = {
@@ -86,10 +87,42 @@ export function floorAreas(b: Building, i: number): { areas: V2[][]; carves: V2[
   if (m) return { areas: m.areas.filter(a => a.length >= 3).map(a => smoothClosed(a, 0)), carves: m.carves.filter(a => a.length >= 3).map(a => smoothClosed(a, 0)) };
   return { areas: autoFloorAreas(b, i), carves: [] };
 }
+/** A region of the plan: outer ring (counter-clockwise) and holes. */
+export type Region = { outer: V2[]; holes: V2[][] };
+const regionCache = new Map<string, Region[]>();
+/** Exact union of polygons minus carves: no part of the plan is covered twice. */
+export function unionRegions(areas: V2[][], carves: V2[][] = []): Region[] {
+  const key = JSON.stringify([areas, carves]);
+  const hit = regionCache.get(key);
+  if (hit) return hit;
+  const ring = (a: V2[]) => a.map(q => [q.x, q.y] as [number, number]);
+  let out: Region[] = [];
+  try {
+    const polys = areas.filter(a => a.length >= 3 && Math.abs(signedArea(a)) > 1e-10).map(a => [ring(a)]);
+    let mp: MultiPolygon = polys.length ? polygonClipping.union(polys[0], ...polys.slice(1)) : [];
+    const cs = carves.filter(c => c.length >= 3 && Math.abs(signedArea(c)) > 1e-10).map(c => [ring(c)]);
+    if (mp.length && cs.length) mp = polygonClipping.difference(mp, ...cs);
+    const back = (r: [number, number][]) => { const v = r.map(([x, y]) => ({ x, y })); if (v.length > 1 && Math.hypot(v[0].x - v[v.length - 1].x, v[0].y - v[v.length - 1].y) < 1e-12) v.pop(); return v; };
+    out = mp.map(poly => {
+      const outer = back(poly[0]), holes = poly.slice(1).map(back);
+      if (signedArea(outer) < 0) outer.reverse();
+      for (const h of holes) if (signedArea(h) > 0) h.reverse();
+      return { outer, holes };
+    }).filter(r => r.outer.length >= 3);
+  } catch {
+    out = areas.filter(a => a.length >= 3).map(a => ({ outer: signedArea(a) < 0 ? [...a].reverse() : a, holes: [] })); // degenerate input: fall back
+  }
+  if (regionCache.size > 300) regionCache.clear();
+  regionCache.set(key, out);
+  return out;
+}
+const regionArea = (rs: Region[]) => rs.reduce((s, r) => s + Math.abs(signedArea(r.outer)) - r.holes.reduce((h, q) => h + Math.abs(signedArea(q)), 0), 0);
+const inRegions = (rs: Region[], q: V2) => rs.some(r => pointInPoly(q, r.outer) && !r.holes.some(h => pointInPoly(q, h)));
+/** Floor i's slab as non-overlapping regions. */
+export const floorRegions = (b: Building, i: number) => { const { areas, carves } = floorAreas(b, i); return unionRegions(areas, carves); };
 /** Is plan point q on floor i's slab? */
 export function floorCovers(b: Building, i: number, q: V2): boolean {
-  const { areas, carves } = floorAreas(b, i);
-  return areas.some(a => pointInPoly(q, a)) && !carves.some(c => pointInPoly(q, c));
+  return inRegions(floorRegions(b, i), q);
 }
 /**
  * Roof of the top floor (nothing above it to be its ceiling): areas enclosed by walls going straight
@@ -110,11 +143,12 @@ function roofFaces(b: Building, i: number): V2[][] {
   if (lofted && above && above !== pl) out.push(...enclosedFacesSegs(above).map(f => f.poly));
   return out;
 }
+const roofRegions = (b: Building, i: number) => unionRegions(roofFaces(b, i));
 /** Slab thicknesses of floor i: its floor (each floor's floor is the ceiling of the one below) and, on the top floor only, the roof. */
 export function slabThickness(b: Building, i: number): { floor: number; ceiling: number } {
   const f = b.floors[i], pl = planAtLevel(b, i) ?? (i > 0 ? planAtLevel(b, i - 1) : null);
   if (!pl) return { floor: 0, ceiling: 0 };
-  const fl = hasFloor(f) && floorAreas(b, i).areas.length ? Math.min(pl.floorThickness, f.height * 0.45) : 0;
+  const fl = hasFloor(f) && floorRegions(b, i).length ? Math.min(pl.floorThickness, f.height * 0.45) : 0;
   const top = i === b.floors.length - 1;
   const ce = top && hasCeiling(f) && roofFaces(b, i).length ? Math.min(pl.ceilingThickness, f.height * 0.45) : 0;
   return { floor: fl, ceiling: ce };
@@ -138,16 +172,12 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
   // ---------- each floor's own floor and ceiling slabs ----------
   const slabs = p.floors.map((_, i) => slabThickness(p, i));
-  const slab = (faces: V2[][], y: number, t: number, i: number, carves: V2[][] = []) => faces.forEach((f, k) => {
-    const shape = new THREE.Shape(f.map(v => new THREE.Vector2(v.x * L, v.y * L)));
-    // carved-out parts inside this area become holes
-    for (const c of carves) {
-      const cc = c.reduce((a, q) => ({ x: a.x + q.x / c.length, y: a.y + q.y / c.length }), { x: 0, y: 0 });
-      if (pointInPoly(cc, f)) shape.holes.push(new THREE.Path(c.map(v => new THREE.Vector2(v.x * L, v.y * L))));
-    }
+  const slab = (regions: Region[], y: number, t: number, i: number) => regions.forEach(r => {
+    const shape = new THREE.Shape(r.outer.map(v => new THREE.Vector2(v.x * L, v.y * L)));
+    for (const h of r.holes) shape.holes.push(new THREE.Path(h.map(v => new THREE.Vector2(v.x * L, v.y * L))));
     const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 1 });
     geo.rotateX(-Math.PI / 2);
-    geo.translate(p.x, y + k * 1e-4 * t, -p.y); // tiny offset: overlapping slabs don't flicker
+    geo.translate(p.x, y, -p.y);
     const fl = p.floors[i];
     const tex = o.detailed && fl.texture ? mats.tex(fl.texture) : null;
     const top = sel.floors.has(fl.id) ? mats.selected : tex ?? (fl.color ? mats.color(fl.color) : mats.slab);
@@ -162,8 +192,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   const hidden = (i: number) => cut !== null && i > cut;
   for (let i = 0; i < N; i++) {
     if (hidden(i)) continue;
-    if (slabs[i].floor) { const fa = floorAreas(p, i); slab(fa.areas, elevation(p, i), slabs[i].floor, i, fa.carves); }
-    if (slabs[i].ceiling && i !== cut) slab(roofFaces(p, i), elevation(p, i + 1) - slabs[i].ceiling, slabs[i].ceiling, i); // the roof (top floor)
+    if (slabs[i].floor) slab(floorRegions(p, i), elevation(p, i), slabs[i].floor, i);
+    if (slabs[i].ceiling && i !== cut) slab(roofRegions(p, i), elevation(p, i + 1) - slabs[i].ceiling, slabs[i].ceiling, i); // the roof (top floor)
   }
 
   // ---------- walls / columns per floor ----------
@@ -209,6 +239,17 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const inner = o.interior ? interiorForFloor(p, floor.id) : null;
     if (inner) plans.push({ plan: inner, interior: true });
 
+    // footprints of the external walls (plan), for trimming internal walls
+    const extBands: V2[][] = [];
+    if (ext) for (const sg of ext.segments) {
+      if (segKind(sg) !== 'wall' && segKind(sg) !== 'door') continue;
+      const bt = sampleSeg(ext, sg), fs = faceSide(ext, sg), half = (fs !== 0 ? ext.wallThickness : ext.wallThickness / 2) / L;
+      for (let k = 0; k + 1 < bt.length; k++) {
+        const a = bt[k], c = bt[k + 1], d = norm({ x: c.x - a.x, y: c.y - a.y }), n = { x: -d.y * half, y: d.x * half };
+        const a2 = { x: a.x - d.x * half, y: a.y - d.y * half }, c2 = { x: c.x + d.x * half, y: c.y + d.y * half };
+        extBands.push([{ x: a2.x + n.x, y: a2.y + n.y }, { x: c2.x + n.x, y: c2.y + n.y }, { x: c2.x - n.x, y: c2.y - n.y }, { x: a2.x - n.x, y: a2.y - n.y }]);
+      }
+    }
     for (const { plan, interior } of plans) {
       const y0 = interior ? yBase + slabs[i].floor : yBase;
       const y1 = interior ? yTop - slabs[i].ceiling : yTop;
@@ -247,7 +288,12 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const kind = segKind(seg);
         if (kind === 'open') continue;
         const material = segMaterial(plan, seg);
-        const bottom = sampleSeg(plan, seg);
+        let bottom = sampleSeg(plan, seg);
+        if (interior) { // internal walls stop at the inside face of the external walls (no overlap)
+          const tr = trimOutside(bottom, extBands);
+          if (!tr) continue;
+          bottom = tr;
+        }
         const lenM = polyLength(bottom) * L;
         const borders = divisionBorders(lenM, segDivLen(p, seg)).map(x => (lenM > 0 ? x / lenM : 0));
         const wallKey = `${floor.id}|${seg.id}`;
@@ -277,10 +323,17 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           const texInfo = seg.texture ? o.textures.find(t => t.id === seg.texture) : undefined;
           const tileH = floor.height, tileW = texInfo ? tileH * (texInfo.w / texInfo.h) : 1;
           // a door segment is just the lintel above a 2.1 m opening
-          const yb = kind === 'door' ? y0 + Math.min(2.1, (y1 - y0) * 0.8) : y0;
-          const wall = new WallSolid(rows, offs, polyParams(bottom), yb, y1, W, L, tileW, tileH, plan.wallThickness);
+          const wall = new WallSolid(rows, offs, polyParams(bottom), y0, y1, W, L, tileW, tileH, plan.wallThickness);
           if (fs !== 0 && !loft) wall.shift = -1; // sloped (connected) walls such as roofs stay centred: they overhang a little
-          const wallH = y1 - yb;
+          // no overlaps: an external wall stands on its floor's slab and stops under the roof (the next floor's slab starts where it ends)
+          const toPlan = (v: THREE.Vector3): V2 => ({ x: (v.x - p.x) / L, y: (-v.z - p.y) / L });
+          const onSlab = !interior && slabs[i].floor > 0 && floorCovers(p, i, toPlan(wall.at(0.5, 0, 0)));
+          const underRoof = !interior && slabs[i].ceiling > 0 && inRegions(roofRegions(p, i), toPlan(wall.at(0.5, 1, 0)));
+          const yw0 = onSlab ? y0 + slabs[i].floor : y0, yw1 = underRoof ? y1 - slabs[i].ceiling : y1;
+          // a door segment is just the lintel above a 2.1 m opening
+          const yb = kind === 'door' ? yw0 + Math.min(2.1, (yw1 - yw0) * 0.8) : yw0;
+          wall.y0 = yb; wall.y1 = yw1;
+          const wallH = yw1 - yb;
 
           // openings and niches: holes in u/v; big ones reach into the neighbouring divisions
           const holes: Hole[] = [];
@@ -291,7 +344,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             if (!shape || !shape.outlines.some(ol => ol.length >= 3)) continue;
             const k = Math.min(Math.max(0, pl.div ?? 0), borders.length - 2);
             const sc = ((borders[k] + borders[k + 1]) / 2) * lenM + pl.dx;
-            const yLow = shape.anchor === 'bottom' ? slabs[i].floor + pl.dy : (wallH - shape.h) / 2 + pl.dy;
+            const yLow = shape.anchor === 'bottom' ? (onSlab || interior ? 0 : slabs[i].floor) + pl.dy : (wallH - shape.h) / 2 + pl.dy;
             const polys = shape.outlines.filter(ol => ol.length >= 3).map(ol => smoothClosed(ol, shape.smooth).map(q => ({
               x: (sc + (q.x - 0.5) * shape.w) / lenM,
               y: (yLow + q.y * shape.h) / wallH,
@@ -343,7 +396,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             if (k < borders.length - 1 && sel.divisions.has(`${wallKey}|${k}`)) for (const side of [1.03, -1.03]) line(wall.rect(borders[k], borders[k + 1], side), mats.selLine);
             if (sel.borders.has(`${wallKey}|${k}`)) for (const side of [1.08, -1.08]) line(wall.vline(borders[k], side), mats.selLine);
           }
-          if (!interior) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id));
+          if (!interior) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id), yBase, yTop);
         } else {
           // colonnade: columns on the division borders (+ free-standing ends)
           // columns: on the division borders, unless they have been moved / added / removed by hand
@@ -432,7 +485,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   return { group: g, stats };
 
   /** Cornices, pilasters and balconies on a wall. */
-  function decorate(wall: WallSolid, seg: PlanSegment, plan: StructurePlan, borders: number[], lenM: number, wallH: number, i: number, floor: Floor, list: Placement[]) {
+  function decorate(wall: WallSolid, seg: PlanSegment, plan: StructurePlan, borders: number[], lenM: number, wallH: number, i: number, floor: Floor, list: Placement[], fy0: number, fy1: number) {
+    void wallH;
     const t = plan.wallThickness;
     for (const pl of list) {
       const pick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, placementId: pl.id };
@@ -443,13 +497,29 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const fr = wall.frame((u0 + u1) / 2, 1);
         const mat = placeMat(pl, mats.deco);
         // at a corner, run past it (by the cornice's projection) only where the next wall has a cornice too, so they meet
-        const corniceAt = (pointId: string) => p.placements.some(x => x.type === 'cornice' && x.floorId === floor.id && x.segId !== seg.id &&
-          plan.segments.some(o => o.id === x.segId && (o.a === pointId || o.b === pointId)));
-        const reach = (wall.shift ? 0 : t / 2) / lenM, proj = CORNICE[1][0] / lenM;
-        const ua = k === 0 ? u0 - reach - (corniceAt(seg.a) ? proj : 0) : u0;
-        const ub = k === borders.length - 2 ? u1 + reach + (corniceAt(seg.b) ? proj : 0) : u1;
-        if (designAt(pl.designId, fr.face.clone().addScaledVector(fr.out, CORNICE[1][0] / 2).addScaledVector(fr.up, -0.16), fr.along, fr.up, fr.out, (ub - ua) * lenM, 0.32, 0.32, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) continue;
-        add(sweepProfile(wall, ua, ub, CORNICE), mat, pick);
+        // at a corner where the next wall has a cornice too, the two meet in a mitre (no overlap)
+        const otherAt = (pointId: string) => plan.segments.find(o => o.id !== seg.id && (o.a === pointId || o.b === pointId) && segKind(o) !== 'open' &&
+          p.placements.some(x => x.type === 'cornice' && x.floorId === floor.id && x.segId === o.id));
+        const mitre = (pointId: string, end: 0 | 1) => {
+          const o = otherAt(pointId);
+          if (!o) return 0;
+          const sp = sampleSeg(plan, o);
+          if (o.a !== pointId) sp.reverse();
+          const dB = norm({ x: sp[1].x - sp[0].x, y: sp[1].y - sp[0].y }); // into the other wall (plan)
+          const f = wall.frame(end, 1);
+          const into = end === 0 ? { x: f.along.x, y: -f.along.z } : { x: -f.along.x, y: f.along.z }; // into this wall (plan)
+          const nOut = norm({ x: f.out.x, y: -f.out.z });
+          const cos = Math.max(-1, Math.min(1, into.x * dB.x + into.y * dB.y)), phi = Math.acos(cos);
+          if (phi < 0.2 || phi > Math.PI - 0.02) return 0;
+          const k = 1 / Math.tan(phi / 2);
+          return Math.max(-3, Math.min(3, dB.x * nOut.x + dB.y * nOut.y > 0 ? -k : k)); // inside corner: cut back
+        };
+        const reach = (wall.shift ? 0 : t / 2) / lenM;
+        const ua = k === 0 ? u0 - reach : u0, ub = k === borders.length - 2 ? u1 + reach : u1;
+        const m0 = k === 0 ? mitre(seg.a, 0) : 0, m1 = k === borders.length - 2 ? mitre(seg.b, 1) : 0;
+        const fr2 = { ...fr, face: fr.face.clone().setY(fy1) };
+        if (designAt(pl.designId, fr2.face.clone().addScaledVector(fr.out, CORNICE[1][0] / 2).addScaledVector(fr.up, -0.16), fr.along, fr.up, fr.out, (ub - ua) * lenM, 0.32, 0.32, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) continue;
+        add(sweepProfile(wall, ua, ub, CORNICE, fy1, m0, m1), mat, pick);
       } else if (pl.type === 'pilaster') {
         const pw = 0.5, pd = 0.12;
         let s0 = borders[k] * lenM + pl.dx;
@@ -470,14 +540,14 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           add(geo, mat, pick);
         };
         void box;
-        pilPieces.push({ base, out: new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize(), along: fr.along.clone(), y0: wall.y0, y1: wall.y0 + wallH, pw, pd, pl, mat, pick, floor: i });
+        pilPieces.push({ base, out: new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize(), along: fr.along.clone(), y0: fy0, y1: fy1, pw, pd, pl, mat, pick, floor: i }); // outside the face: the full storey, slab edge included
       } else if (pl.type === 'balcony') {
         const shape = p.balconyShapes.find(x => x.id === pl.shapeId) ?? p.balconyShapes[0];
         if (!shape) continue;
         const uc = (borders[k] + borders[k + 1]) / 2 + pl.dx / lenM;
         const fr = wall.frame(Math.min(1, Math.max(0, uc)), 0);
         // platform top: lower than the middle of the division
-        const yTopB = wall.y0 + wallH * BALCONY_HEIGHT + pl.dy;
+        const yTopB = fy0 + (fy1 - fy0) * BALCONY_HEIGHT + pl.dy;
         const mat = placeMat(pl, mats.deco);
         const flat = new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize();
         const along = new THREE.Vector3(fr.along.x, 0, fr.along.z).normalize();
@@ -671,7 +741,8 @@ function smoothOpen(pts: WinPoint[], def: number, steps = 10): V2[] {
 export { smoothOpen };
 
 /** Sweep a profile (out, down in m) along the top outside edge of a wall between u0 and u1. */
-function sweepProfile(wall: WallSolid, u0: number, u1: number, prof: [number, number][]): THREE.BufferGeometry {
+/** A profile (x out from the face, y down from yTop) swept along the wall; m0 / m1: mitre at the ends (extension per metre of projection). */
+function sweepProfile(wall: WallSolid, u0: number, u1: number, prof: [number, number][], yTop: number, m0 = 0, m1 = 0): THREE.BufferGeometry {
   const n = Math.max(2, Math.ceil((u1 - u0) * 40) + 1);
   const rings: THREE.Vector3[][] = [];
   for (let j = 0; j < n; j++) {
@@ -679,7 +750,10 @@ function sweepProfile(wall: WallSolid, u0: number, u1: number, prof: [number, nu
     const fr = wall.frame(Math.min(1, Math.max(0, u)), 1);
     const base = wall.at(Math.min(1, Math.max(0, u)), 1, 1).addScaledVector(fr.along, (u - Math.min(1, Math.max(0, u))) * wall.lenM);
     const flat = new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize();
-    rings.push(prof.map(([x, y]) => base.clone().addScaledVector(flat, x).add(new THREE.Vector3(0, -y, 0))));
+    base.y = yTop;
+    const ext = j === 0 ? -m0 : j === n - 1 ? m1 : 0;
+    const al = new THREE.Vector3(fr.along.x, 0, fr.along.z).normalize();
+    rings.push(prof.map(([x, y]) => base.clone().addScaledVector(flat, x).addScaledVector(al, x * ext).add(new THREE.Vector3(0, -y, 0))));
   }
   const pos: number[] = [];
   const tri = (a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) => pos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
@@ -1152,7 +1226,21 @@ export function meshVolume(geo: THREE.BufferGeometry): number {
 /** Gross floor area of floor i (m²): area enclosed by its external walls (or the slab under it). */
 export function floorArea(b: Building, i: number): number {
   const L2 = b.baseLength ** 2;
-  const { areas, carves } = floorAreas(b, i);
-  const a = (ps: V2[][]) => ps.reduce((s, f) => s + Math.abs(signedArea(f)), 0);
-  return Math.max(0, a(areas) - a(carves)) * L2;
+  return regionArea(floorRegions(b, i)) * L2;
+}
+
+/** The part of a polyline between the first and the last point outside all the bands (null: all inside). */
+function trimOutside(poly: V2[], bands: V2[][]): V2[] | null {
+  if (!bands.length || poly.length < 2) return poly;
+  const params = polyParams(poly), at = (t: number) => polyAt(poly, params, t);
+  const inside = (t: number) => { const q = at(t); return bands.some(b => pointInPoly(q, b)); };
+  const N = 200;
+  let i0 = -1, i1 = -1;
+  for (let k = 0; k <= N; k++) if (!inside(k / N)) { if (i0 < 0) i0 = k; i1 = k; }
+  if (i0 < 0) return null;
+  const edge = (tin: number, tout: number) => { for (let r = 0; r < 30; r++) { const m = (tin + tout) / 2; if (inside(m)) tin = m; else tout = m; } return tout; };
+  const t0 = i0 === 0 ? 0 : edge((i0 - 1) / N, i0 / N), t1 = i1 === N ? 1 : edge((i1 + 1) / N, i1 / N);
+  if (t1 - t0 < 1e-4) return null;
+  if (t0 === 0 && t1 === 1) return poly;
+  return [at(t0), ...poly.filter((_, k) => params[k] > t0 && params[k] < t1), at(t1)];
 }

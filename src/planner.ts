@@ -25,7 +25,7 @@ const HIT = 9; // px
 export class Planner {
   canvas = document.createElement('canvas');
   ctx = this.canvas.getContext('2d')!;
-  tool: Tool = 'draw';
+  tool: Tool = 'select';
   head: string | null = null; // last point of the chain being drawn
   selPoints = new Set<string>();
   selSegs = new Set<string>();
