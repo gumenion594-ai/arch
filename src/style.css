@@ -93,3 +93,7 @@ label.inline.band { font-size: 11px; gap: 2px; } label.inline.band input { width
 .walk-hud { position: absolute; left: 12px; bottom: 12px; background: rgba(0,0,0,.55); color: #eee; font-size: 12px; line-height: 1.5; padding: 6px 10px; border-radius: 6px; pointer-events: none; max-width: calc(100% - 24px); }
 .walk-hud::before { content: ''; position: fixed; }
 .center:has(.walk-hud)::after { content: '+'; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: rgba(255,255,255,.7); font: 20px/1 system-ui; pointer-events: none; }
+
+/* panels hidden: the view takes the whole window under the header */
+.editor.panels-hidden, .editor.panels-hidden.with-right { grid-template: 44px 1fr / 1fr; grid-template-areas: "h" "c"; }
+.editor.panels-hidden .left, .editor.panels-hidden .right { display: none; }

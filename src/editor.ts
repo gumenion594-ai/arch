@@ -104,6 +104,15 @@ export class Editor {
   /** Last design category (openings / niches / balconies) opened in the Design tab. */
   designKind: DesignMode = 'openings';
   private preWalkMode: ViewMode | null = null;
+  /** Side panels (floors, tools) hidden: the view gets the whole window. Hidden automatically in first person. */
+  panelsHidden = false;
+  private preWalkPanels: boolean | null = null;
+  setPanels(hidden: boolean) {
+    this.panelsHidden = hidden;
+    this.root.classList.toggle('panels-hidden', hidden);
+    this.renderHeader();
+    requestAnimationFrame(() => { this.planner?.draw(); this.shapeEds.forEach(e => e.draw()); });
+  }
   setMode(m: Mode) {
     this.mode = m;
     if (isDesign(m)) this.designKind = m;
@@ -118,6 +127,8 @@ export class Editor {
       this.viewer.onTexture = () => this.refresh();
       this.viewer.onPick = (hit, e) => onPick(this, hit, e);
       this.viewer.onWalkChange = walking => {
+        if (walking && this.preWalkPanels === null) { this.preWalkPanels = this.panelsHidden; this.setPanels(true); }
+        if (!walking && this.preWalkPanels !== null) { const prev = this.preWalkPanels; this.preWalkPanels = null; this.setPanels(prev); }
         if (!walking && this.preWalkMode) { this.viewMode = this.preWalkMode; this.preWalkMode = null; this.refresh(); return; }
         this.renderHeader(); this.renderRight();
       };
@@ -206,6 +217,7 @@ export class Editor {
     const finishKey = e.key === 'Enter' || e.key === ' ';
     if (this.shapeEds.length && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); this.shapeEds.forEach(x => x.selectedPoint() && x.deleteSelected()); return; }
     if (this.shapeEds.length && (finishKey || e.key === 'Escape')) { e.preventDefault(); this.shapeEds.forEach(x => x.finish()); return; }
+    if (e.key === 'Tab') { e.preventDefault(); this.setPanels(!this.panelsHidden); return; }
     if (this.mode === 'view' && e.key === 'Escape') { this.clearSel(); return; }
     if (!this.planner) return;
     if (e.key === 'Escape' || finishKey) { e.preventDefault(); this.planner.endChain(); }
@@ -258,6 +270,7 @@ export class Editor {
       this.mode === 'view' ? vm : null,
       this.mode === 'view' ? h('label', { class: 'chk', title: 'Show the building-area outline and floor lines' }, area, 'Area lines') : null,
       h('div', { class: 'spacer' }),
+      h('button', { title: 'Hide or show the side panels (Tab)', onclick: () => this.setPanels(!this.panelsHidden) }, this.panelsHidden ? 'Show panels' : 'Hide panels'),
       h('button', { onclick: () => toast('Importing 3D models is planned — not implemented yet') }, 'Import 3D model'),
       h('button', { title: 'Ctrl+Z', onclick: () => this.undo() }, 'Undo'),
     );
