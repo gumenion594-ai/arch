@@ -158,7 +158,7 @@ export class Planner {
     for (let k = plan.objects.length - 1; k >= 0; k--) if (pointInPoly(p, this.objCorners(plan.objects[k]))) return plan.objects[k];
     return null;
   }
-  endChain() { this.head = null; this.draw(); }
+  endChain() { this.head = null; this.h.selectionChanged(); this.draw(); }
 
   // ---- mouse ----
   private down(e: MouseEvent) {

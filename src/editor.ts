@@ -679,6 +679,18 @@ export class Editor {
         stairs: 'Click inside the building to place a staircase. Select it to change size and rotation.',
         elevator: 'Click inside the building to place an elevator shaft.',
       };
+      // points with no walls (stray clicks, or left behind when a wall is deleted) build nothing
+      const wired = new Set(pl.segments.flatMap(sg => [sg.a, sg.b]));
+      const lone = pl.points.filter(q => !wired.has(q.id) && q.id !== pn.head);
+      if (lone.length) body.push(h('div', { class: 'warn' },
+        `${lone.length} point${lone.length === 1 ? ' is' : 's are'} not connected to any wall (orange rings). They build nothing, but are kept as targets for the floor below. `,
+        h('button', {
+          onclick: () => this.mutate(() => {
+            const ids = new Set(lone.map(q => q.id));
+            pl.points = pl.points.filter(q => !ids.has(q.id));
+            pn.prune();
+          }),
+        }, 'Delete them')));
       if (interior && !this.refStructure()) body.push(h('div', { class: 'warn' }, 'Assign this floor plan to floors that have external walls (a structure plan) first; internal walls can only go inside them.'));
       body.push(
         h('div', { class: 'box-title' }, 'Tool'),
