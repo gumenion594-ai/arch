@@ -162,6 +162,8 @@ export class Viewer {
     this.last = s;
     this.lastOpts = o;
     if (this.walk) o = { ...o, showArea: false, selection: undefined }; // at eye level the area box is just clutter
+    // first person: green grass and a blue sky (no shadows); the editing views keep the dark background
+    (this.scene.background as THREE.Color).set(this.walk ? 0x8ec5ee : 0x232323);
     const key = s.id + ':' + s.buildings.map(b => b.id + b.x + ',' + b.y).join(';');
     if (key !== this.frameKey) { this.frame(s); this.frameKey = key; }
     const B = this.bounds(s);
@@ -171,7 +173,7 @@ export class Viewer {
     // ground plane (see-through when there are underground floors)
     const g = new THREE.Mesh(
       new THREE.PlaneGeometry(span * 6, span * 6),
-      new THREE.MeshStandardMaterial({ color: 0x6a6a6a, roughness: 1, transparent: underground, opacity: underground ? 0.35 : 1, depthWrite: !underground, side: THREE.DoubleSide }),
+      new THREE.MeshStandardMaterial({ color: this.walk ? 0x5f8f3e : 0x6a6a6a, roughness: 1, transparent: underground, opacity: underground ? 0.35 : 1, depthWrite: !underground, side: THREE.DoubleSide }),
     );
     g.rotation.x = -Math.PI / 2;
     g.position.set((B.x0 + B.x1) / 2, -0.0005 * span, (B.z0 + B.z1) / 2);
