@@ -88,6 +88,7 @@ export function renderViewPanel(ed: Editor) {
   ].filter(Boolean);
   const firstWall = [...ed.selWalls, ...ed.selDivs, ...ed.selBorders][0]?.split('|') ?? (ed.selFloors.size ? [[...ed.selFloors][0]] : null);
   const elems = b.placements.filter(x => ed.selElements.has(x.id));
+  const cols = [...ed.selElements].filter(k => k.startsWith('col:'));
   const T = nSel ? targets(ed) : null;
 
   ed.right.innerHTML = '';
@@ -110,6 +111,7 @@ export function renderViewPanel(ed: Editor) {
       ) : null,
       T && (T.divs.length || T.borders.length) ? addBox(ed, T) : null,
       elems.length ? elementBox(ed, elems) : null,
+      cols.length ? columnBox(ed, cols) : null,
       appearanceBox(ed, T, elems),
       T && T.segs.length ? divisionBox(ed, T.segs) : null,
       h('button', { onclick: () => ed.clearSel() }, 'Clear selection'),
@@ -239,6 +241,63 @@ function elementBox(ed: Editor, elems: Placement[]) {
   }
   box.append(h('button', { class: 'danger', onclick: () => { ed.mutate(() => (b.placements = b.placements.filter(x => !ed.selElements.has(x.id)))); ed.selElements.clear(); ed.refresh(); } }, 'Delete'));
   return box;
+}
+
+/** Selected columns (keys col:segId:index): move along their line, duplicate, delete. */
+function columnBox(ed: Editor, keys: string[]) {
+  const b = ed.b;
+  const found = keys.map(k => {
+    const [, segId, idx] = k.split(':');
+    for (const plan of b.plans) { const seg = plan.segments.find(x => x.id === segId); if (seg) return { key: k, plan, seg, idx: +idx }; }
+    return null;
+  }).filter(Boolean) as { key: string; plan: StructurePlan; seg: PlanSegment; idx: number }[];
+  if (!found.length) return null;
+  const lenOf = (plan: StructurePlan, seg: PlanSegment) => polyLength(sampleSeg(plan, seg)) * b.baseLength;
+  /** First edit: turn the automatic columns (on the division borders) into a list we can change. */
+  const own = (plan: StructurePlan, seg: PlanSegment) => { if (!seg.columns) seg.columns = wallBorders(ed, plan, seg).slice(1, -1); return seg.columns; };
+  const move = (d: number) => ed.mutate(() => found.forEach(f => {
+    const list = own(f.plan, f.seg), L = lenOf(f.plan, f.seg);
+    if (f.idx < list.length) list[f.idx] = Math.round(Math.min(L, Math.max(0, list[f.idx] + d)) * 100) / 100;
+  }));
+  const one = found.length === 1 ? found[0] : null;
+  const pos = one ? (one.seg.columns ?? wallBorders(ed, one.plan, one.seg).slice(1, -1))[one.idx] ?? 0 : 0;
+  return h('div', { class: 'sub' },
+    h('div', { class: 'box-title' }, `Column${found.length > 1 ? 's' : ''}`),
+    h('div', { class: 'row move' },
+      h('span', { class: 'muted small' }, one ? `${fmt(pos)} m from the start of the line` : 'Move along the line'),
+      h('button', { title: 'Back along the line', onclick: () => move(-0.1) }, '◀'),
+      h('button', { title: 'Forward along the line', onclick: () => move(0.1) }, '▶')),
+    one ? h('label', {}, 'Position (m from the start)', ed.numInput(pos, v => { const list = own(one.plan, one.seg); list[one.idx] = Math.min(lenOf(one.plan, one.seg), Math.max(0, v)); }, 0, 10000)) : null,
+    h('div', { class: 'row' },
+      h('button', {
+        title: 'Add a copy halfway to the next column (or 1 m further)',
+        onclick: () => {
+          const added: string[] = [];
+          ed.mutate(() => found.forEach(f => {
+            const list = own(f.plan, f.seg), L = lenOf(f.plan, f.seg), p0 = list[f.idx];
+            const next = list.filter(x => x > p0 + 1e-6).sort((a, c) => a - c)[0];
+            const at = next !== undefined ? (p0 + next) / 2 : Math.min(L, p0 + 1);
+            list.push(Math.round(at * 100) / 100);
+            added.push(`col:${f.seg.id}:${list.length - 1}`);
+          }));
+          ed.selElements.clear(); added.forEach(k => ed.selElements.add(k)); ed.refresh();
+        },
+      }, 'Duplicate'),
+      h('button', {
+        class: 'danger',
+        onclick: () => {
+          ed.mutate(() => {
+            const bySeg = new Map<PlanSegment, { plan: StructurePlan; idx: number[] }>();
+            for (const f of found) { const e = bySeg.get(f.seg) ?? { plan: f.plan, idx: [] }; e.idx.push(f.idx); bySeg.set(f.seg, e); }
+            for (const [seg, e] of bySeg) { const list = own(e.plan, seg); [...new Set(e.idx)].sort((a, c) => c - a).forEach(i => list.splice(i, 1)); }
+          });
+          ed.selElements.clear(); ed.refresh();
+        },
+      }, 'Delete'),
+      h('button', { title: 'Put the columns back on the division borders', onclick: () => { ed.mutate(() => found.forEach(f => (f.seg.columns = null))); ed.selElements.clear(); ed.refresh(); } }, 'Reset line'),
+    ),
+    h('div', { class: 'muted small' }, 'Columns belong to their line in the plan, so a change shows on every floor that uses that plan.'),
+  );
 }
 
 /** Colour and texture for selected walls, floors (their slabs) and elements. */

@@ -31,6 +31,7 @@ export interface PlanSegment {
   kind?: SegKind; // default 'wall'
   divLen?: number | null; // division length in m (null = the building's default)
   divisions?: number; // (older projects: number of divisions)
+  columns?: number[] | null; // colonnade: hand-placed column positions, m from the wall's start (null = on the division borders)
   columnThickness?: number | null; // null = plan wall thickness
   smooth?: number | null; // 0..1, null = plan default
   connect?: ConnectMode | null; // null = plan default

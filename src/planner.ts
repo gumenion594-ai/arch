@@ -1,6 +1,6 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
 import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, divisionBorders, segColT, segKind, uid } from './model';
-import { V2, distToSeg, enclosedFaces, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
+import { V2, distToSeg, enclosedFaces, enclosedFacesSegs, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
 
 export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator';
 
@@ -399,14 +399,24 @@ export class Planner {
 
     // walls: translucent band showing thickness + centre line
     const tpx = Math.max(2, (plan.wallThickness / this.h.baseLength()) * b.s);
+    const sideOf = new Map<string, number>(); // +1: inside on the wall's left, -1: on its right
+    for (const f of enclosedFacesSegs(plan)) f.segIds.forEach((id, k) => { if (!sideOf.has(id)) sideOf.set(id, f.ids[k] === plan.segments.find(x => x.id === id)?.a ? 1 : -1); });
     g.lineCap = 'round';
     for (const s of plan.segments) {
       const sp = sampleSeg(plan, s);
       const sel = this.selSegs.has(s.id);
       const kind = segKind(s);
       if (kind === 'wall') {
-        g.strokeStyle = sel ? 'rgba(255,212,0,0.35)' : 'rgba(255,255,255,0.15)'; g.lineWidth = tpx;
-        path(sp); g.stroke();
+        // wall thickness: inside the line for walls around an enclosed area (as built in 3D), centred otherwise
+        const side = sideOf.get(s.id) ?? 0, t = plan.wallThickness / this.h.baseLength();
+        const d0 = { x: sp[sp.length - 1].x - sp[0].x, y: sp[sp.length - 1].y - sp[0].y }, dl = Math.hypot(d0.x, d0.y) || 1;
+        const n = { x: (-d0.y / dl) * side * t, y: (d0.x / dl) * side * t };
+        g.fillStyle = sel ? 'rgba(255,212,0,0.35)' : 'rgba(255,255,255,0.15)';
+        if (side) {
+          path([...sp, ...[...sp].reverse().map(q => ({ x: q.x + n.x, y: q.y + n.y }))]); g.fill();
+        } else {
+          g.strokeStyle = g.fillStyle; g.lineWidth = tpx; path(sp); g.stroke();
+        }
       }
       g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : kind === 'balustrade' ? '#c9b8ff' : '#f0f0f0';
       g.lineWidth = sel ? 2.5 : 1.5;
@@ -417,9 +427,10 @@ export class Planner {
       const pp = polyParams(sp), lenM = polyLength(sp) * this.h.baseLength();
       const us = divisionBorders(lenM, this.h.divLen(s)).map(x => (lenM ? x / lenM : 0)).slice(1, -1);
       if (kind === 'colonnade') {
+        const cus = s.columns ? s.columns.map(m => (lenM ? m / lenM : 0)) : us;
         const cpx = Math.max(4, (segColT(plan, s) / this.h.baseLength()) * b.s);
         g.fillStyle = sel ? '#ffd400' : '#f0f0f0';
-        for (const u of us) { const q = this.toScreen(polyAt(sp, pp, u)); g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx); }
+        for (const u of cus) { const q = this.toScreen(polyAt(sp, pp, u)); g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx); }
       } else if (kind === 'wall') {
         g.strokeStyle = sel ? '#ffd400' : 'rgba(240,240,240,0.7)'; g.lineWidth = 1;
         for (const u of us) {

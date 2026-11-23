@@ -120,7 +120,13 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     geo.translate(p.x, y + k * 1e-4 * t, -p.y); // tiny offset: overlapping slabs don't flicker
     const fl = p.floors[i];
     const tex = o.detailed && fl.texture ? mats.tex(fl.texture) : null;
-    add(geo, sel.floors.has(fl.id) ? mats.selected : tex ?? (fl.color ? mats.color(fl.color) : mats.slab), { floorId: fl.id, floorIndex: i });
+    const top = sel.floors.has(fl.id) ? mats.selected : tex ?? (fl.color ? mats.color(fl.color) : mats.slab);
+    // the slab's edge is flush with the outside of the walls: give it the wall's look so the facade reads as one surface
+    const pl = planAtLevel(p, i), w = pl?.segments.find(sg => segKind(sg) === 'wall');
+    const edge = sel.floors.has(fl.id) ? mats.selected : !pl || !w ? top
+      : (o.detailed && w.texture ? mats.tex(w.texture) : null) ?? (w.color ? mats.color(w.color) : mats.wall(o.detailed ? segMaterial(pl, w) : 'structural'));
+    const m = add(geo, top, { floorId: fl.id, floorIndex: i });
+    (m as unknown as THREE.Mesh<THREE.BufferGeometry, THREE.Material[]>).material = [top, edge]; // ExtrudeGeometry groups: 0 = top / bottom, 1 = sides
   });
   for (let i = 0; i < N; i++) {
     if (slabs[i].floor) slab(floorFaces(p, i), elevation(p, i), slabs[i].floor, i);
@@ -173,7 +179,11 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       let vert: Vertical | undefined;
       const rowsBySeg = new Map<string, { rows: Row[]; bottom: V2[] }>();
       const colAlong = (rows: Row[], t: number, ct: number, bottom: V2[], pick: PickInfo, seg: PlanSegment, material: string, selected: boolean) => {
-        const pts = rows.map((r, ri) => W(polyAt(r.poly, r.params, t), y0 + (y1 - y0) * (ri / (rows.length - 1))));
+        // columns stand inside the line, their outer face on it (like the walls)
+        const fs = interior ? 0 : faceSide(plan, seg);
+        const d0 = norm({ x: bottom[bottom.length - 1].x - bottom[0].x, y: bottom[bottom.length - 1].y - bottom[0].y });
+        const inward = { x: -d0.y * fs * (ct / 2 / L), y: d0.x * fs * (ct / 2 / L) };
+        const pts = rows.map((r, ri) => { const q = polyAt(r.poly, r.params, t); return W({ x: q.x + inward.x, y: q.y + inward.y }, y0 + (y1 - y0) * (ri / (rows.length - 1))); });
         for (let k = 0; k + 1 < pts.length; k++) {
           const a = pts[k], c = pts[k + 1];
           // imported column design (detailed view), else a plain square column
@@ -200,7 +210,9 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
         if (kind === 'balustrade') {
           const yb = y0 + slabs[i].floor;
-          balusters(bottom.map(q => W(q, yb)), seg.balusterDesign, selected ? mats.selected : seg.color ? mats.color(seg.color) : mats.deco, pick);
+          const fs = faceSide(plan, seg), d0 = norm({ x: bottom[bottom.length - 1].x - bottom[0].x, y: bottom[bottom.length - 1].y - bottom[0].y });
+          const inw = { x: -d0.y * fs * (0.1 / L), y: d0.x * fs * (0.1 / L) }; // the railing stands just inside the line
+          balusters(bottom.map(q => W({ x: q.x + inw.x, y: q.y + inw.y }, yb)), seg.balusterDesign, selected ? mats.selected : seg.color ? mats.color(seg.color) : mats.deco, pick);
           continue;
         }
         let top = bottom;
@@ -211,13 +223,17 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
         if (kind === 'wall' || kind === 'door') {
           // +1 side of the wall = outside of the building
-          const flip = !interior && outsideIsMinus(plan, seg);
+          // external walls stand inside the line (outer face on it, flush with floors and ceilings);
+          // walls not around an enclosed area, and internal walls, stay centred on it
+          const fs = interior ? 0 : faceSide(plan, seg);
+          const flip = !interior && fs !== -1;
           const offs = offsets(plan, seg, bottom, plan.wallThickness / 2 / L).map(v => (flip ? { x: -v.x, y: -v.y } : v));
           const texInfo = seg.texture ? o.textures.find(t => t.id === seg.texture) : undefined;
           const tileH = floor.height, tileW = texInfo ? tileH * (texInfo.w / texInfo.h) : 1;
           // a door segment is just the lintel above a 2.1 m opening
           const yb = kind === 'door' ? y0 + Math.min(2.1, (y1 - y0) * 0.8) : y0;
           const wall = new WallSolid(rows, offs, polyParams(bottom), yb, y1, W, L, tileW, tileH, plan.wallThickness);
+          if (fs !== 0 && !loft) wall.shift = -1; // sloped (connected) walls such as roofs stay centred: they overhang a little
           const wallH = y1 - yb;
 
           // openings and niches: holes in u/v; big ones reach into the neighbouring divisions
@@ -280,7 +296,11 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           if (!interior) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id));
         } else {
           // colonnade: columns on the division borders (+ free-standing ends)
-          for (let k = 1; k < borders.length - 1; k++) colAlong(rows, borders[k], segColT(plan, seg), bottom, pick, seg, material, selected);
+          // columns: on the division borders, unless they have been moved / added / removed by hand
+          columnPositions(seg, borders, lenM).forEach((u, k) => {
+            const id = `col:${seg.id}:${k}`;
+            colAlong(rows, u, segColT(plan, seg), bottom, { ...pick, placementId: id }, seg, material, selected || sel.elements.has(id));
+          });
           rowsBySeg.set(seg.id, { rows, bottom });
         }
       }
@@ -333,15 +353,16 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const u0 = borders[k], u1 = borders[k + 1];
         const fr = wall.frame((u0 + u1) / 2, 1);
         const mat = placeMat(pl, mats.deco);
-        const ext = t / 2 / lenM; // reach the outer corners at the wall ends
+        const ext = ((wall.shift ? 0 : t / 2) + CORNICE[1][0]) / lenM; // run past the corners so neighbouring cornices meet
         const ua = k === 0 ? u0 - ext : u0, ub = k === borders.length - 2 ? u1 + ext : u1;
         if (designAt(pl.designId, fr.face.clone().addScaledVector(fr.out, CORNICE[1][0] / 2).addScaledVector(fr.up, -0.16), fr.along, fr.up, fr.out, (ub - ua) * lenM, 0.32, 0.32, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) continue;
         add(sweepProfile(wall, ua, ub, CORNICE), mat, pick);
       } else if (pl.type === 'pilaster') {
         const pw = 0.5, pd = 0.12;
         let s0 = borders[k] * lenM + pl.dx;
-        if (k === 0) s0 = -t / 2 + pw / 2 + pl.dx; // flush with the outer corner
-        if (k === borders.length - 1) s0 = lenM + t / 2 - pw / 2 + pl.dx;
+        const corner = wall.shift ? 0 : t / 2; // where the outer corner is, relative to the wall's ends
+        if (k === 0) s0 = -corner + pw / 2 + pl.dx; // flush with the outer corner
+        if (k === borders.length - 1) s0 = lenM + corner - pw / 2 + pl.dx;
         const u = s0 / lenM;
         const fr = wall.frame(Math.min(1, Math.max(0, u)), 0.5);
         const base = fr.face.clone().addScaledVector(fr.along, (u - Math.min(1, Math.max(0, u))) * lenM);
@@ -438,6 +459,21 @@ const CORNICE: [number, number][] = [[0, 0], [0.34, 0], [0.34, 0.06], [0.26, 0.1
 export const BALCONY_HEIGHT = BALCONY_AT;
 /** Baluster silhouette (radius, height) turned on a lathe. */
 const BALUSTER = [[0, 0], [0.055, 0], [0.055, 0.05], [0.035, 0.1], [0.06, 0.32], [0.065, 0.4], [0.03, 0.55], [0.025, 0.7], [0.045, 0.75], [0.045, 0.8], [0, 0.8]].map(([x, y]) => new THREE.Vector2(x, y));
+
+/** Column positions along a colonnade (u 0..1): hand-placed ones, else the inner division borders. */
+export function columnPositions(seg: PlanSegment, borders: number[], lenM: number): number[] {
+  if (seg.columns) return seg.columns.map(m => Math.min(1, Math.max(0, lenM ? m / lenM : 0)));
+  return borders.slice(1, -1);
+}
+
+/** +1: the wall runs counter-clockwise around an enclosed area (inside on its left), −1: clockwise, 0: not around one. */
+function faceSide(plan: StructurePlan, seg: PlanSegment): number {
+  for (const f of enclosedFacesSegs(plan)) {
+    const k = f.segIds.indexOf(seg.id);
+    if (k >= 0) return f.ids[k] === seg.a ? 1 : -1;
+  }
+  return 0;
+}
 
 /** Is the outside of the building on the wall's right (−1 side)? True when the wall runs counter-clockwise around an enclosed area. */
 function outsideIsMinus(plan: StructurePlan, seg: PlanSegment): boolean {
@@ -819,6 +855,8 @@ function offsets(plan: StructurePlan, seg: PlanSegment, poly: V2[], half: number
  */
 class WallSolid {
   R: number; C: number; params: number[]; O: V2[]; lenM: number;
+  /** −1: the outside face (+1) lies on the line and the wall extends inwards; 0: centred on the line. */
+  shift = 0;
   constructor(public rows: Row[], offs: V2[], offParams: number[], public y0: number, public y1: number,
     public W: (v: V2, y: number) => THREE.Vector3, L: number, public tileW: number, public tileH: number, public thick = 0.3) {
     this.R = rows.length - 1; this.C = rows[0].poly.length; this.params = rows[0].params;
@@ -830,7 +868,8 @@ class WallSolid {
     const rf = v * this.R, r0 = Math.min(this.R - 1, Math.floor(rf)), f = rf - r0;
     const a = polyAt(this.rows[r0].poly, this.params, u), b = polyAt(this.rows[r0 + 1].poly, this.params, u);
     const o = polyAt(this.O, this.params, u);
-    return this.W({ x: a.x + (b.x - a.x) * f + o.x * side, y: a.y + (b.y - a.y) * f + o.y * side }, this.y0 + (this.y1 - this.y0) * v);
+    const k = side + this.shift;
+    return this.W({ x: a.x + (b.x - a.x) * f + o.x * k, y: a.y + (b.y - a.y) * f + o.y * k }, this.y0 + (this.y1 - this.y0) * v);
   }
   uvOf(q: THREE.Vector3): { u: number; v: number } {
     const v = clamp01((q.y - this.y0) / (this.y1 - this.y0));
