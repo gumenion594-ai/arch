@@ -77,7 +77,7 @@ export const DESIGN_CATEGORIES: Record<DesignCategory, string> = {
   frame: 'Opening frames', surround: 'Opening surrounds', cornice: 'Cornices', column: 'Columns / pilasters',
   baluster: 'Balusters', balcony: 'Balconies', nicheDeco: 'Niche decorations', model: '3D models',
 };
-export interface Design { id: string; name: string; category: DesignCategory; format: 'glb' | 'gltf' | 'obj' | 'stl' }
+export interface Design { id: string; name: string; category: DesignCategory; format: 'glb' | 'gltf' | 'obj' | 'stl' | 'builtin'; builtin?: string }
 
 /** Something added onto the structure. Openings / niches / balconies / cornices sit in a wall division, pilasters on a border between divisions. */
 export type PlacementType = 'opening' | 'niche' | 'balcony' | 'cornice' | 'pilaster' | 'model';
@@ -469,7 +469,10 @@ export function sampleProject(): Project {
     return pl;
   };
   const g = mk('Ground floor', [f0.id], 'colonnade');
-  g.segments.slice(6).forEach(s => { s.divLen = 1.9; s.color = '#efe9dd'; }); // porch columns
+  // porch: Ionic columns (built-in design, detailed view)
+  const ionic: Design = { id: uid(), name: 'Ionic column', category: 'column', format: 'builtin', builtin: 'ionic' };
+  p.designs.push(ionic);
+  g.segments.slice(6).forEach(s => { s.divLen = 1.9; s.color = '#efe9dd'; s.columnDesign = ionic.id; s.columnThickness = 0.62; });
   const up = mk('Upper floor', [f1.id], 'balustrade');
   const roof = mk('Roof storey', [f2.id], null);
   roof.connect = 'loft';

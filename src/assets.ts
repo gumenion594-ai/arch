@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { Design } from './model';
+import { BUILTIN_DESIGNS } from './builtin';
 
 const DB = 'arch-assets', STORE = 'files';
 function db(): Promise<IDBDatabase> {
@@ -36,6 +37,7 @@ export const formatOf = (name: string): Design['format'] | null => {
 /** Parse a design file into one object, normalised to fit a 1 × 1 × 1 box at the origin (x: width, y: height, z: depth). */
 async function parse(format: Design['format'], data: ArrayBuffer): Promise<THREE.Object3D> {
   let obj: THREE.Object3D;
+  if (format === 'builtin') throw new Error('built-in designs are generated');
   if (format === 'stl') {
     const geo = new STLLoader().parse(data);
     obj = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0xdedad2, roughness: 0.7 }));
@@ -46,6 +48,11 @@ async function parse(format: Design['format'], data: ArrayBuffer): Promise<THREE
     const gltf = await new GLTFLoader().parseAsync(data, '');
     obj = gltf.scene;
   }
+  return normalizeObject(obj);
+}
+
+/** Wrap an object so it fills a 1 × 1 × 1 box at the origin; its original size is kept in userData.size. */
+function normalizeObject(obj: THREE.Object3D): THREE.Object3D {
   const wrap = new THREE.Group();
   wrap.add(obj);
   wrap.updateMatrixWorld(true);
@@ -66,6 +73,13 @@ const pending = new Map<string, Promise<void>>();
 export function designObject(d: Design, onLoad: () => void): THREE.Object3D | null {
   const hit = cache.get(d.id);
   if (hit) return hit;
+  if (d.format === 'builtin') {
+    const b = d.builtin ? BUILTIN_DESIGNS[d.builtin] : undefined;
+    if (!b) return null;
+    const o = normalizeObject(b.make());
+    cache.set(d.id, o);
+    return o;
+  }
   if (!pending.has(d.id)) {
     pending.set(d.id, (async () => {
       try {

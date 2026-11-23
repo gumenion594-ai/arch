@@ -256,7 +256,11 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             if (pick.holes.some(hb => hb.u0 < bb.u1 && bb.u0 < hb.u1 && hb.v0 < bb.v1 && bb.v0 < hb.v1)) { stats.windowSkipped++; continue; }
             pick.holes.push({ id: pl.id, ...bb });
             const nicheDepth = shape.kind === 'niche' ? nicheDepthFn(shape, bb, Math.min(shape.depth ?? 0.2, plan.wallThickness * 0.85)) : undefined;
-            for (const poly of polys) holes.push({ poly: signedArea(poly) > 0 ? [...poly].reverse() : poly, depth: nicheDepth });
+            for (const poly0 of polys) {
+              // niches: enough points along every edge for the recess to follow the side / bottom profiles
+              const poly = nicheDepth ? densify(poly0, (bb.u1 - bb.u0 + bb.v1 - bb.v0) / 30) : poly0;
+              holes.push({ poly: signedArea(poly) > 0 ? [...poly].reverse() : poly, depth: nicheDepth });
+            }
             if (shape.kind === 'opening') {
               stats.windowCount++;
               stats.windowArea += polys.reduce((sum, q) => sum + Math.abs(signedArea(q)), 0) * lenM * wallH;
@@ -353,8 +357,12 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const u0 = borders[k], u1 = borders[k + 1];
         const fr = wall.frame((u0 + u1) / 2, 1);
         const mat = placeMat(pl, mats.deco);
-        const ext = ((wall.shift ? 0 : t / 2) + CORNICE[1][0]) / lenM; // run past the corners so neighbouring cornices meet
-        const ua = k === 0 ? u0 - ext : u0, ub = k === borders.length - 2 ? u1 + ext : u1;
+        // at a corner, run past it (by the cornice's projection) only where the next wall has a cornice too, so they meet
+        const corniceAt = (pointId: string) => p.placements.some(x => x.type === 'cornice' && x.floorId === floor.id && x.segId !== seg.id &&
+          plan.segments.some(o => o.id === x.segId && (o.a === pointId || o.b === pointId)));
+        const reach = (wall.shift ? 0 : t / 2) / lenM, proj = CORNICE[1][0] / lenM;
+        const ua = k === 0 ? u0 - reach - (corniceAt(seg.a) ? proj : 0) : u0;
+        const ub = k === borders.length - 2 ? u1 + reach + (corniceAt(seg.b) ? proj : 0) : u1;
         if (designAt(pl.designId, fr.face.clone().addScaledVector(fr.out, CORNICE[1][0] / 2).addScaledVector(fr.up, -0.16), fr.along, fr.up, fr.out, (ub - ua) * lenM, 0.32, 0.32, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) continue;
         add(sweepProfile(wall, ua, ub, CORNICE), mat, pick);
       } else if (pl.type === 'pilaster') {
@@ -483,6 +491,17 @@ function outsideIsMinus(plan: StructurePlan, seg: PlanSegment): boolean {
     return f.ids[k] === seg.a; // traversed a -> b counter-clockwise: the area (inside) is on the left
   }
   return true;
+}
+
+/** Insert points so no edge of the closed polygon is longer than step. */
+function densify(poly: V2[], step: number): V2[] {
+  const out: V2[] = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step));
+    for (let k = 0; k < n; k++) out.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n });
+  }
+  return out;
 }
 
 /** Sutherland–Hodgman clip of a polygon to the square [lo, hi]². */
@@ -968,7 +987,19 @@ class WallSolid {
       const sideAt = (q: V2) => 1 - (2 * Math.min(h.depth!(q.x, q.y), this.thick * 0.95)) / this.thick;
       const ccw = [...h.poly].reverse();
       const xs = ccw.map(q => q.x), ys = ccw.map(q => q.y);
-      fill(ccw, [], sideAt, true, Math.min(du, (Math.max(...xs) - Math.min(...xs)) / 14), Math.min(dv, (Math.max(...ys) - Math.min(...ys)) / 14));
+      // recess surface as rings shrinking from the outline to its centre (niche outlines are convex-ish arches)
+      void xs; void ys;
+      const cx = ccw.reduce((a, q) => a + q.x, 0) / ccw.length, cy = ccw.reduce((a, q) => a + q.y, 0) / ccw.length;
+      const RINGS = 28;
+      const ring = (k: number) => ccw.map(q => ({ x: cx + (q.x - cx) * (1 - k / RINGS), y: cy + (q.y - cy) * (1 - k / RINGS) }));
+      for (let k = 0; k < RINGS; k++) {
+        const o = ring(k), n = ring(k + 1);
+        for (let j = 0; j < ccw.length; j++) {
+          const j2 = (j + 1) % ccw.length;
+          tri([o[j].x, o[j].y, sideAt(o[j])], [o[j2].x, o[j2].y, sideAt(o[j2])], [n[j2].x, n[j2].y, sideAt(n[j2])]);
+          tri([o[j].x, o[j].y, sideAt(o[j])], [n[j2].x, n[j2].y, sideAt(n[j2])], [n[j].x, n[j].y, sideAt(n[j])]);
+        }
+      }
       for (let k = 0; k < h.poly.length; k++) edgeQuad(h.poly[k], h.poly[(k + 1) % h.poly.length], sideAt);
     }
     // outer boundary, counter-clockwise: bottom, end, top, start

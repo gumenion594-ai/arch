@@ -9,6 +9,7 @@ import { polyLength, sampleSeg } from './geometry';
 import { Hit } from './viewer';
 import { ShapeEditor, ShapeHost } from './shapeeditor';
 import { formatOf, importDesignFile, deleteAsset } from './assets';
+import { BUILTIN_DESIGNS } from './builtin';
 import { askConfirm, askText, h, num, put, toast } from './ui';
 import { fmt } from './planner';
 
@@ -382,13 +383,19 @@ function libraryBox(ed: Editor) {
               for (const bl of p.buildings) for (const x of bl.placements) for (const k2 of ['designId', 'frameId', 'surroundId'] as const) if (x[k2] === d.id) x[k2] = null;
               for (const bl of p.buildings) for (const pl of bl.plans) for (const s of pl.segments) { if (s.columnDesign === d.id) s.columnDesign = null; if (s.balusterDesign === d.id) s.balusterDesign = null; }
             });
-            deleteAsset(d.id);
+            if (d.format !== 'builtin') deleteAsset(d.id);
           },
         }, '×'))));
   });
   return h('details', { class: 'box', open: p.designs.length > 0 },
     h('summary', {}, `Imported designs (${p.designs.length})`),
     h('div', { class: 'row' }, cat, h('button', { onclick: () => file.click() }, 'Import 3D file')), file,
+    h('div', { class: 'row' }, h('span', { class: 'muted small' }, 'Built in:'),
+      ...Object.entries(BUILTIN_DESIGNS).map(([key, bd]) => h('button', {
+        disabled: p.designs.some(d => d.builtin === key),
+        title: p.designs.some(d => d.builtin === key) ? 'Already in the library' : `Add the ${bd.name} to ${DESIGN_CATEGORIES[bd.category]}`,
+        onclick: () => ed.mutate(() => p.designs.push({ id: uid(), name: bd.name, category: bd.category, format: 'builtin', builtin: key })),
+      }, `+ ${bd.name}`))),
     h('div', { class: 'muted small' }, '3D files (.glb, .obj, .stl) stretch to fit what you assign them to: frames and surrounds to openings, cornices to divisions, columns to colonnades and pilasters, balusters to railings. They show in the Detailed view and are stored in this browser.'),
     ...groups.filter(Boolean) as HTMLElement[],
   );
