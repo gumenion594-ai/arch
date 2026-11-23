@@ -94,6 +94,8 @@ label.inline.band { font-size: 11px; gap: 2px; } label.inline.band input { width
 .walk-hud::before { content: ''; position: fixed; }
 .center:has(.walk-hud)::after { content: '+'; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: rgba(255,255,255,.7); font: 20px/1 system-ui; pointer-events: none; }
 
-/* panels hidden: the view takes the whole window under the header */
-.editor.panels-hidden, .editor.panels-hidden.with-right { grid-template: 44px 1fr / 1fr; grid-template-areas: "h" "c"; }
-.editor.panels-hidden .left, .editor.panels-hidden .right { display: none; }
+/* side panels can be hidden one by one (small arrow buttons at their top corner) */
+.editor { position: relative; }
+.editor.hide-left .left, .editor.hide-right .right { display: none; }
+.panel-toggle { position: absolute; top: 50px; z-index: 5; width: 22px; height: 26px; padding: 0; font-size: 12px; line-height: 1; opacity: .8; }
+.panel-toggle:hover { opacity: 1; }
