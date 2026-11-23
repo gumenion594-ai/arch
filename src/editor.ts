@@ -1,6 +1,6 @@
 // Building project editor: floors panel, 3D view, structure / floor / window planners.
 import {
-  Building, BalconyShape, ConnectMode, DesignCategory, Floor, History, OpeningShape, PlacementType, segConnect, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan,
+  Building, BalconyShape, PilasterShape, WallShape, ConnectMode, DesignCategory, Floor, History, OpeningShape, PlacementType, segConnect, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan,
   addLoops, clamp, elevation, floorBase, floorLabel, formatRanges, newAreaPlan, newInteriorPlan, newPlan, parseRanges, planForFloor, saveProject,
   segKind, totalHeight, uid,
 } from './model';
@@ -14,7 +14,7 @@ import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
 type Mode = 'view' | 'structure' | 'floorplan' | 'floorarea' | DesignMode;
-const isDesign = (m: Mode): m is DesignMode => m === 'openings' || m === 'niches' || m === 'balconies';
+const isDesign = (m: Mode): m is DesignMode => m === 'openings' || m === 'niches' || m === 'balconies' || m === 'walls' || m === 'pilasters';
 const PLAN_COLORS = ['#4a90d9', '#d97a4a', '#5cb85c', '#b05cd9', '#d9c84a', '#4ad9c8', '#d94a7a', '#8a8a8a'];
 
 const pref = (k: string, d: string) => { try { return localStorage.getItem('arch.pref.' + k) ?? d; } catch { return d; } };
@@ -33,7 +33,7 @@ export class Editor {
   pickMode: PickMode = 'wall';
   private anchor: string | null = null;
   activePlan: Record<'structure' | 'floorplan' | 'floorarea', string | null> = { structure: null, floorplan: null, floorarea: null };
-  activeDesign: Record<DesignMode, string | null> = { openings: null, niches: null, balconies: null };
+  activeDesign: Record<DesignMode, string | null> = { openings: null, niches: null, balconies: null, walls: null, pilasters: null };
   selBorders = new Set<string>(); // floorId|segId|k
   selElements = new Set<string>(); // placement ids
   addType: PlacementType = 'opening';
@@ -135,6 +135,7 @@ export class Editor {
     this.shapeEds.forEach(e => e.dispose()); this.shapeEds = [];
     this.center.innerHTML = '';
     this.center.classList.toggle('niche-grid', m === 'niches');
+    this.center.classList.toggle('pair-grid', m === 'pilasters');
     this.root.classList.add('with-right');
     this.setPanels(this.hideLeft, this.hideRight);
     if (m === 'view') {
@@ -148,7 +149,8 @@ export class Editor {
         this.renderHeader(); this.renderRight();
       };
     } else if (isDesign(m)) {
-      const list = m === 'balconies' ? this.b.balconyShapes : this.b.openingShapes.filter(x => x.kind === (m === 'openings' ? 'opening' : 'niche'));
+      const list: { id: string }[] = m === 'balconies' ? this.b.balconyShapes : m === 'walls' ? this.b.wallShapes : m === 'pilasters' ? this.b.pilasterShapes
+        : this.b.openingShapes.filter(x => x.kind === (m === 'openings' ? 'opening' : 'niche'));
       if (!list.some(x => x.id === this.activeDesign[m])) this.activeDesign[m] = list[0]?.id ?? null;
       setupDesignMode(this, m);
     } else {
@@ -193,6 +195,8 @@ export class Editor {
   /** Opening / niche shape being designed. */
   oshape(): OpeningShape | null { const m = this.mode === 'niches' ? 'niches' : 'openings'; return this.b.openingShapes.find(s => s.id === this.activeDesign[m]) ?? null; }
   balcony(): BalconyShape | null { return this.b.balconyShapes.find(s => s.id === this.activeDesign.balconies) ?? null; }
+  wshape(): WallShape | null { return this.b.wallShapes.find(s => s.id === this.activeDesign.walls) ?? null; }
+  pshape(): PilasterShape | null { return this.b.pilasterShapes.find(s => s.id === this.activeDesign.pilasters) ?? null; }
 
   /** Floor planner: external-wall plan of the first floor this floor plan is used on. */
   private refStructure(): StructurePlan | null {
@@ -947,6 +951,17 @@ export class Editor {
   }
 
   /** Properties of one or more selected walls. */
+  /** Wall design (side profile) of walls; designs are made in Design → Walls. */
+  wallShapeField(segs: PlanSegment[]): HTMLElement {
+    const vals = new Set(segs.map(sg => sg.wallShape ?? ''));
+    const sel = h('select', { onchange: () => { if (sel.value === '__new') { this.designKind = 'walls'; this.setMode('walls'); return; } this.mutate(() => segs.forEach(sg => (sg.wallShape = sel.value || null))); } },
+      vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null,
+      h('option', { value: '' }, 'Flat'), ...this.b.wallShapes.map(x => h('option', { value: x.id }, x.name)),
+      h('option', { value: '__new' }, 'Design one…'));
+    sel.value = vals.size > 1 ? '__m' : [...vals][0];
+    return h('label', { title: 'Side profile of the wall: plinths, string courses, sloping walls (Design → Walls)' }, 'Wall design', sel);
+  }
+
   segmentProps(pl: StructurePlan, segs: PlanSegment[], interior: boolean): HTMLElement {
     const L = this.b.baseLength, pn = this.planner!;
     const common = <T>(get: (s: PlanSegment) => T): T | 'mixed' => {
@@ -1012,6 +1027,7 @@ export class Editor {
       h('button', { onclick: () => setAll(x => (x.color = colIn.value)) }, 'Apply'),
       h('button', { onclick: () => setAll(x => (x.color = null)) }, 'Clear')));
     wrap.append(this.materialField(common(s => s.material ?? null), v => segs.forEach(s => (s.material = v)), true));
+    if (segs.some(sg => segKind(sg) === 'wall' || segKind(sg) === 'door')) wrap.append(this.wallShapeField(segs));
     const sm = common(s => s.smooth ?? null);
     wrap.append(this.slider(`Smoothness${sm === null ? ' (plan default)' : ''}`, sm === 'mixed' ? null : sm, v => segs.forEach(s => (s.smooth = v)), () => segs.forEach(s => (s.smooth = null))));
     if (!interior) {

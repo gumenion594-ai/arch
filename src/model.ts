@@ -46,6 +46,7 @@ export interface PlanSegment {
   texture?: string | null; // texture id
   material?: string | null; // null = plan material
   color?: string | null; // '#rrggbb', shown in structural and detailed views
+  wallShape?: string | null; // wall design (side profile), null = flat
   columnDesign?: string | null; // imported column design for colonnade columns (detailed view)
   balusterDesign?: string | null; // imported baluster design (detailed view)
 }
@@ -76,6 +77,18 @@ export interface OpeningShape {
 
 /** Balcony platform: outline in a w × d box (x across the wall, y outwards from it), thickness in m. */
 export interface BalconyShape { id: string; name: string; outline: WinPoint[]; smooth: number; w: number; d: number; thickness: number; railing: boolean }
+/**
+ * Wall design: the wall's side profile. profile points: y = 0..1 up the wall, x = 0..1 how far the outside face
+ * sticks out (× depth, metres). Two points at the same height make a step (plinth top, string course).
+ */
+export interface WallShape { id: string; name: string; depth: number; profile: WinPoint[] }
+/**
+ * Pilaster design: front outline (x = half width from the centre line, 0..1 × w/2) and side outline
+ * (x = depth from the wall face, 0..1 × d), both along y = 0..1 of the height. The bottom `base` and top `top`
+ * fractions keep their size (base and capital); the part between stretches with the pilaster.
+ */
+export const PILASTER_REF_H = 3; // m: the height a pilaster design is drawn at (its base and capital keep that size)
+export interface PilasterShape { id: string; name: string; w: number; d: number; front: WinPoint[]; side: WinPoint[]; base: number; top: number }
 
 /** Imported 3D designs (stretched to fit what they are assigned to). Files live in IndexedDB (assets.ts). */
 export type DesignCategory = 'frame' | 'surround' | 'cornice' | 'column' | 'baluster' | 'balcony' | 'nicheDeco' | 'model';
@@ -161,6 +174,8 @@ export interface Building {
   divLen: number; // default wall division length, m
   openingShapes: OpeningShape[]; // openings and niches
   balconyShapes: BalconyShape[];
+  wallShapes: WallShape[];
+  pilasterShapes: PilasterShape[];
   placements: Placement[];
 }
 
@@ -246,7 +261,7 @@ export function createBuilding(s: BuildingSpec): Building {
   const plan = newPlan('Plan 1', fl.map(f => f.id));
   return {
     id: uid(), name: s.name, baseLength: s.baseLength, x: s.x, y: s.y, ground: s.ground, floors: fl, plans: [plan], topPlanId: null,
-    interiorPlans: [], areaPlans: [], divLen: 3, openingShapes: defaultOpeningShapes(), balconyShapes: defaultBalconyShapes(), placements: [],
+    interiorPlans: [], areaPlans: [], divLen: 3, openingShapes: defaultOpeningShapes(), balconyShapes: defaultBalconyShapes(), wallShapes: defaultWallShapes(), pilasterShapes: defaultPilasterShapes(), placements: [],
   };
 }
 
@@ -270,6 +285,23 @@ export function defaultOpeningShapes(): OpeningShape[] {
     },
   ];
 }
+export const defaultWallShapes = (): WallShape[] => [
+  { id: uid(), name: 'Plinth', depth: 0.1, profile: [{ x: 1, y: 0 }, { x: 1, y: 0.15 }, { x: 0, y: 0.15 }, { x: 0, y: 1 }] },
+  { id: uid(), name: 'String course', depth: 0.08, profile: [{ x: 0, y: 0 }, { x: 0, y: 0.9 }, { x: 1, y: 0.9 }, { x: 1, y: 0.96 }, { x: 0, y: 0.96 }, { x: 0, y: 1 }] },
+  { id: uid(), name: 'Battered (sloping)', depth: 0.25, profile: [{ x: 1, y: 0 }, { x: 0, y: 1 }] },
+];
+export const defaultPilasterShapes = (): PilasterShape[] => [
+  {
+    id: uid(), name: 'Classic pilaster', w: 0.64, d: 0.16, base: 0.12, top: 0.12,
+    // base (bottom 12 %): plinth block + moulding; shaft; capital (top 12 %): moulding + abacus
+    front: [{ x: 1, y: 0 }, { x: 1, y: 0.05 }, { x: 0.9, y: 0.08 }, { x: 0.78, y: 0.12 }, { x: 0.78, y: 0.88 }, { x: 0.9, y: 0.92 }, { x: 1, y: 0.94 }, { x: 1, y: 1 }],
+    side: [{ x: 1, y: 0 }, { x: 1, y: 0.05 }, { x: 0.85, y: 0.08 }, { x: 0.7, y: 0.12 }, { x: 0.7, y: 0.88 }, { x: 0.85, y: 0.92 }, { x: 1, y: 0.94 }, { x: 1, y: 1 }],
+  },
+  {
+    id: uid(), name: 'Plain strip', w: 0.5, d: 0.1, base: 0.12, top: 0.12,
+    front: [{ x: 1, y: 0 }, { x: 1, y: 1 }], side: [{ x: 1, y: 0 }, { x: 1, y: 1 }],
+  },
+];
 export const defaultBalconyShapes = (): BalconyShape[] => [
   { id: uid(), name: 'Balcony', outline: rect(0, 0, 1, 1), smooth: 0, w: 2.4, d: 1.1, thickness: 0.2, railing: true },
   { id: uid(), name: 'Round balcony', outline: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 0.4, s: 1 }, { x: 0.5, y: 1, s: 1 }, { x: 0, y: 0.4, s: 1 }], smooth: 0, w: 2.4, d: 1.2, thickness: 0.2, railing: true },
@@ -335,6 +367,10 @@ export function normalize(p: Project): Project {
     }
     b.divLen ??= 3;
     b.balconyShapes ??= defaultBalconyShapes();
+    b.wallShapes ??= defaultWallShapes();
+    b.pilasterShapes ??= defaultPilasterShapes();
+    // pilasters made before pilaster designs: the classic one
+    for (const x of b.placements ?? []) if (x.type === 'pilaster' && !x.shapeId && b.pilasterShapes[0]) x.shapeId = b.pilasterShapes[0].id;
     b.placements ??= [];
     if (!b.openingShapes) {
       // windows from the window-planner version become openings (fixed size)
@@ -628,7 +664,7 @@ export function sampleProject(): Project {
   place('niche', f0, front0, divCount(g, front0) - 1, { shapeId: shape('Niche'), dy: 0.6 });
   // pilasters on the house corners, both storeys (border 0 of every outer wall is a corner)
   for (const [pl, fl] of [[g, f0], [up, f1]] as const) {
-    for (const s of [pl.segments[0], pl.segments[3], pl.segments[4], pl.segments[5]]) place('pilaster', fl, s, 0);
+    for (const s of [pl.segments[0], pl.segments[3], pl.segments[4], pl.segments[5]]) place('pilaster', fl, s, 0, { shapeId: b.pilasterShapes[0]?.id });
   }
   // round window in the roof (front slope)
   const roofFront = roof.segments[1];

@@ -2,7 +2,7 @@
 // design modes for openings, niches and balconies.
 import type { Editor } from './editor';
 import {
-  BalconyShape, DESIGN_CATEGORIES, Design, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
+  BalconyShape, PILASTER_REF_H, PilasterShape, WallShape, DESIGN_CATEGORIES, Design, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
   divisionBorders, floorLabel, hasFloor, planForFloor, segColT, segDivLen, segKind, uid,
 } from './model';
 import { enclosedFaces, polyLength, sampleSeg } from './geometry';
@@ -154,10 +154,14 @@ function addBox(ed: Editor, T: ReturnType<typeof targets>) {
     const t = ed.addType;
     if (t === 'opening' || t === 'niche') b.openingShapes.filter(s => s.kind === t).forEach(s => choice.append(h('option', { value: s.id }, `${s.name} (${fmt(s.w)} × ${fmt(s.h)} m)`)));
     else if (t === 'balcony') b.balconyShapes.forEach(s => choice.append(h('option', { value: s.id }, s.name)));
-    else {
-      const cat: DesignCategory = t === 'cornice' ? 'cornice' : 'column';
-      choice.append(h('option', { value: '' }, t === 'cornice' ? 'Plain cornice' : 'Plain pilaster'));
-      p.designs.filter(d => d.category === cat).forEach(d => choice.append(h('option', { value: d.id }, d.name)));
+    else if (t === 'pilaster') {
+      // a pilaster design (drawn in Design → Pilasters) or an imported 3D design
+      b.pilasterShapes.forEach(s => choice.append(h('option', { value: 's:' + s.id }, s.name)));
+      choice.append(h('option', { value: '' }, 'Plain box'));
+      p.designs.filter(d => d.category === 'column').forEach(d => choice.append(h('option', { value: 'd:' + d.id }, `3D: ${d.name}`)));
+    } else {
+      choice.append(h('option', { value: '' }, 'Plain cornice'));
+      p.designs.filter(d => d.category === 'cornice').forEach(d => choice.append(h('option', { value: d.id }, d.name)));
     }
   };
   typeSel.addEventListener('change', fill);
@@ -180,7 +184,9 @@ function addBox(ed: Editor, T: ReturnType<typeof targets>) {
               b.placements = b.placements.filter(x => !(x.type === t && x.floorId === tg.floorId && x.segId === tg.seg.id && x.div === tg.k && (t !== 'opening' && t !== 'niche' || true)));
               b.placements.push({
                 id: uid(), type: t, floorId: tg.floorId, segId: tg.seg.id, div: tg.k, dx: 0, dy: 0,
-                ...(t === 'opening' || t === 'niche' || t === 'balcony' ? { shapeId: id } : { designId: id }),
+                ...(t === 'opening' || t === 'niche' || t === 'balcony' ? { shapeId: id }
+                  : t === 'pilaster' ? { shapeId: id?.startsWith('s:') ? id.slice(2) : null, designId: id?.startsWith('d:') ? id.slice(2) : null }
+                  : { designId: id }),
               });
             }
           });
@@ -215,21 +221,21 @@ function elementBox(ed: Editor, elems: Placement[]) {
     return h('label', {}, label, s);
   };
   const shapeSel = () => {
-    const list: { id: string; name: string }[] = t === 'balcony' ? b.balconyShapes : b.openingShapes.filter(s => s.kind === t);
+    const list: { id: string; name: string }[] = t === 'balcony' ? b.balconyShapes : t === 'pilaster' ? b.pilasterShapes : b.openingShapes.filter(s => s.kind === t);
     const vals = new Set(elems.map(e => e.shapeId ?? ''));
     const s = h('select', { onchange: () => ed.mutate(() => elems.forEach(e => (e.shapeId = s.value))) },
-      vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null, ...list.map(x => h('option', { value: x.id }, x.name)));
+      vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null, t === 'pilaster' ? h('option', { value: '' }, 'Plain box') : null, ...list.map(x => h('option', { value: x.id }, x.name)));
     s.value = vals.size > 1 ? '__m' : [...vals][0];
-    return h('label', {}, 'Shape', s);
+    return h('label', {}, t === 'pilaster' ? 'Pilaster design' : 'Shape', s);
   };
   const nudge = (dx: number, dy: number) => ed.mutate(() => elems.forEach(e => { e.dx = Math.round((e.dx + dx) * 100) / 100; e.dy = Math.round((e.dy + dy) * 100) / 100; }));
   const step = 0.1;
   const box = h('div', { class: 'sub' }, h('div', { class: 'box-title' }, t ? `${TYPE_LABEL[t]}${elems.length > 1 ? 's' : ''}` : 'Elements'));
-  if (t === 'opening' || t === 'niche' || t === 'balcony') box.append(shapeSel());
+  if (t === 'opening' || t === 'niche' || t === 'balcony' || t === 'pilaster') box.append(shapeSel());
   if (t === 'opening') box.append(designSel('frame', 'frameId', 'Frame (detailed view)', 'None'), designSel('surround', 'surroundId', 'Surround (detailed view)', 'None'));
   if (t === 'niche') box.append(designSel('nicheDeco', 'designId', 'Decoration (detailed view)', 'None'));
   if (t === 'cornice') box.append(designSel('cornice', 'designId', 'Cornice design', 'Plain'));
-  if (t === 'pilaster') box.append(designSel('column', 'designId', 'Pilaster design', 'Plain'));
+  if (t === 'pilaster') box.append(designSel('column', 'designId', 'Imported 3D design (detailed view, replaces the drawn one)', 'None'));
   if (t === 'balcony') box.append(designSel('balcony', 'designId', 'Balcony design', 'Plain platform'));
   if (t === 'model' && one) {
     const pos = one.pos ?? { x: 0, y: 0, z: 0 };
@@ -349,6 +355,7 @@ function appearanceBox(ed: Editor, T: ReturnType<typeof targets> | null, elems: 
       h('button', { onclick: () => ed.mutate(() => items.forEach(x => (x.color = null))) }, 'Clear')),
     h('div', { class: 'muted small' }, `${segs.length ? 'Walls: the colour applies to that wall on every floor using the same plan. ' : ''}${floors.length ? 'Floors: colours their floor and ceiling slabs. ' : ''}Visible in Structural and Detailed views; a texture replaces it in Detailed view.`),
     ed.textureField('Texture', null, id => items.forEach(x => (x.texture = id))),
+    segs.some(sg => segKind(sg) === 'wall' || segKind(sg) === 'door') ? ed.wallShapeField(segs) : null,
   );
 }
 
@@ -453,7 +460,7 @@ function bandFields(ed: Editor, d: Design) {
 }
 
 // ---------------------------------------------------------------- design modes
-export type DesignMode = 'openings' | 'niches' | 'balconies';
+export type DesignMode = 'openings' | 'niches' | 'balconies' | 'walls' | 'pilasters';
 
 /** Build the drawing area(s) for a design mode. */
 export function setupDesignMode(ed: Editor, mode: DesignMode) {
@@ -464,6 +471,37 @@ export function setupDesignMode(ed: Editor, mode: DesignMode) {
     ...extra,
   });
   const cell = (cls: string) => { const d = h('div', { class: `edcell ${cls}` }); return d; };
+  if (mode === 'walls') {
+    const c = cell('one'); ed.center.append(c);
+    ed.shapeEds.push(new ShapeEditor(c, { ...common({
+      getOutlines: () => { const s = ed.wshape(); return s ? [s.profile] : null; },
+      setOutlines: o => { const s = ed.wshape(); if (s) s.profile = o[0] ?? []; },
+      aspect: () => 0.5,
+      labels: { bottom: 'side view: wall face on the left ← → how far it sticks out', left: 'height of the wall (bottom = floor, top = ceiling)' },
+      readout: q => { const s = ed.wshape()!; return `${fmt(q.x * s.depth)} m out at ${Math.round(q.y * 100)} % of the height`; },
+    }), smooth: () => 0 }, 'profileY'));
+    return;
+  }
+  if (mode === 'pilasters') {
+    const f = cell('pfront'), sd = cell('pside'); ed.center.append(f, sd);
+    const ps = () => ed.pshape();
+    const bands = (q: { y: number }) => { const s = ps()!; return q.y < s.base ? ' (base)' : q.y > 1 - s.top ? ' (capital)' : ' (shaft: stretches)'; };
+    ed.shapeEds.push(new ShapeEditor(f, { ...common({
+      getOutlines: () => { const s = ps(); return s ? [s.front] : null; },
+      setOutlines: o => { const s = ps(); if (s) s.front = o[0] ?? []; },
+      aspect: () => 0.5,
+      labels: { bottom: 'front view: centre line on the left ← → half the width', left: 'height' },
+      readout: q => { const s = ps()!; return `${fmt(q.x * s.w)} m wide${bands(q)}`; },
+    }), smooth: () => 0 }, 'profileY'));
+    ed.shapeEds.push(new ShapeEditor(sd, { ...common({
+      getOutlines: () => { const s = ps(); return s ? [s.side] : null; },
+      setOutlines: o => { const s = ps(); if (s) s.side = o[0] ?? []; },
+      aspect: () => 0.5,
+      labels: { bottom: 'side view: wall face on the left ← → depth', left: 'height' },
+      readout: q => { const s = ps()!; return `${fmt(q.x * s.d)} m deep${bands(q)}`; },
+    }), smooth: () => 0 }, 'profileY'));
+    return;
+  }
   if (mode === 'balconies') {
     const c = cell('one'); ed.center.append(c);
     ed.shapeEds.push(new ShapeEditor(c, common({
@@ -507,7 +545,72 @@ export function setupDesignMode(ed: Editor, mode: DesignMode) {
   }
 }
 
+/** Design type buttons at the top of the Design panel. */
+function designTypes(ed: Editor, mode: DesignMode) {
+  const kindBtn = (m: DesignMode, label: string) => h('button', { class: mode === m ? 'tab active' : 'tab', onclick: () => mode !== m && ed.setMode(m) }, label);
+  return [
+    h('div', { class: 'box-title' }, 'Design type'),
+    h('div', { class: 'row' }, kindBtn('openings', 'Openings'), kindBtn('niches', 'Niches'), kindBtn('balconies', 'Balconies'), kindBtn('walls', 'Walls'), kindBtn('pilasters', 'Pilasters')),
+  ];
+}
+
+/** Walls (side profile) and pilasters (front + side outline). */
+function renderProfilePanel(ed: Editor, mode: 'walls' | 'pilasters') {
+  const b = ed.b, isWall = mode === 'walls';
+  const list: (WallShape | PilasterShape)[] = isWall ? b.wallShapes : b.pilasterShapes;
+  const cur = isWall ? ed.wshape() : ed.pshape();
+  const used = (id: string) => isWall
+    ? [...b.plans, ...b.interiorPlans].reduce((n, pl) => n + pl.segments.filter(sg => sg.wallShape === id).length, 0)
+    : b.placements.filter(x => x.type === 'pilaster' && x.shapeId === id).length;
+  const select = (id: string | null) => { ed.activeDesign[mode] = id; ed.shapeEds.forEach(e => e.reset()); ed.refresh(); };
+  const field = (label: string, get: () => number, set: (v: number) => void, min = 0.01, max = 100) => h('label', {}, label, ed.numInput(get(), set, min, max));
+  const create = () => ed.mutate(() => {
+    const s = isWall
+      ? { id: uid(), name: `Wall ${list.length + 1}`, depth: 0.1, profile: [{ x: 1, y: 0 }, { x: 1, y: 0.1 }, { x: 0, y: 0.1 }, { x: 0, y: 1 }] }
+      : { id: uid(), name: `Pilaster ${list.length + 1}`, w: 0.5, d: 0.12, base: 0.12, top: 0.12, front: [{ x: 1, y: 0 }, { x: 1, y: 1 }], side: [{ x: 1, y: 0 }, { x: 1, y: 1 }] };
+    (list as any[]).push(s);
+    select(s.id);
+  });
+  const eds = ed.shapeEds, pt = eds.map(e => e.selectedPoint()).find(Boolean) ?? null;
+  ed.right.innerHTML = '';
+  put(ed.right,
+    ...designTypes(ed, mode),
+    h('div', { class: 'box-title' }, isWall ? 'Wall designs (side profiles)' : 'Pilaster designs'),
+    h('div', { class: 'plans' }, ...list.map(s => h('div', { class: 'plan-row' + (s.id === cur?.id ? ' active' : ''), onclick: () => select(s.id) },
+      s.name, h('span', { class: 'muted small' }, ` ${'depth' in s ? `up to ${fmt(s.depth)} m out` : `${fmt(s.w)} × ${fmt(s.d)} m`} · used ${used(s.id)}×`)))),
+    h('div', { class: 'row' },
+      h('button', { onclick: create }, 'New'),
+      h('button', { disabled: !cur, onclick: () => cur && ed.mutate(() => { const c = { ...JSON.parse(JSON.stringify(cur)), id: uid(), name: `${cur.name} copy` }; (list as any[]).push(c); select(c.id); }) }, 'Save as copy'),
+      h('button', { disabled: !cur, onclick: async () => { const n = cur && await askText('Rename', cur.name); if (cur && n?.trim()) ed.mutate(() => (cur.name = n.trim())); } }, 'Rename'),
+      h('button', {
+        class: 'danger', disabled: !cur,
+        onclick: async () => {
+          if (!cur || !(await askConfirm(`Delete ${cur.name}? ${isWall ? 'Walls using it become flat.' : 'Pilasters using it become plain.'}`))) return;
+          ed.mutate(() => {
+            if (isWall) { b.wallShapes = b.wallShapes.filter(x => x !== cur); [...b.plans, ...b.interiorPlans].forEach(pl => pl.segments.forEach(sg => { if (sg.wallShape === cur.id) sg.wallShape = null; })); }
+            else { b.pilasterShapes = b.pilasterShapes.filter(x => x !== cur); b.placements.forEach(x => { if (x.shapeId === cur.id && x.type === 'pilaster') x.shapeId = null; }); }
+          });
+          select(list.find(x => x !== cur)?.id ?? null);
+        },
+      }, 'Delete'),
+    ),
+    cur && 'depth' in cur ? field('Sticks out up to (m)', () => cur.depth, v => (cur.depth = v), 0.01, 5) : null,
+    cur && 'w' in cur ? h('div', { class: 'row' },
+      field('Width (m)', () => cur.w, v => (cur.w = v), 0.05, 10), field('Depth (m)', () => cur.d, v => (cur.d = v), 0.01, 5)) : null,
+    cur && 'w' in cur ? h('div', { class: 'row' },
+      field('Base (% of drawing)', () => Math.round(cur.base * 100), v => (cur.base = Math.min(0.45, v / 100)), 0, 45),
+      field('Capital (% of drawing)', () => Math.round(cur.top * 100), v => (cur.top = Math.min(0.45, v / 100)), 0, 45)) : null,
+    pt ? h('div', { class: 'row' },
+      h('button', { onclick: () => eds.forEach(e => e.selectedPoint() && e.deleteSelected()) }, 'Delete point'),
+      h('button', { title: 'Put this point on the line between its neighbours', onclick: () => eds.forEach(e => e.selectedPoint() && e.align('straight')) }, 'Straighten')) : null,
+    h('div', { class: 'muted small help' }, isWall
+      ? 'Side view of the wall, outside face on the left. Click to add points, drag to move. Points further right make the face stick out more at that height. Two points at the same height make a step (a plinth top, a string course). Use it on walls in the Structure tab (select a wall → Wall design) or in the 3D view (select walls → Wall design). The profile runs from the floor to the ceiling of each storey.'
+      : `Front view (half the width, from the centre line) and side view (depth from the wall). The bottom ${Math.round(((cur as PilasterShape | null)?.base ?? 0.12) * 100)} % (base) and top ${Math.round(((cur as PilasterShape | null)?.top ?? 0.12) * 100)} % (capital) keep their size, drawn as if the pilaster were ${PILASTER_REF_H} m tall; the shaft between them stretches to the storey. Add pilasters in the 3D view (select borders → Add → Pilaster) and pick the design there.`),
+  );
+}
+
 export function renderDesignPanel(ed: Editor, mode: DesignMode) {
+  if (mode === 'walls' || mode === 'pilasters') return renderProfilePanel(ed, mode);
   const b = ed.b;
   const eds = ed.shapeEds, main = eds[0];
   const isBal = mode === 'balconies';
@@ -527,10 +630,8 @@ export function renderDesignPanel(ed: Editor, mode: DesignMode) {
   });
 
   ed.right.innerHTML = '';
-  const kindBtn = (m: DesignMode, label: string) => h('button', { class: mode === m ? 'tab active' : 'tab', onclick: () => mode !== m && ed.setMode(m) }, label);
   put(ed.right,
-    h('div', { class: 'box-title' }, 'Design type'),
-    h('div', { class: 'row' }, kindBtn('openings', 'Openings'), kindBtn('niches', 'Niches'), kindBtn('balconies', 'Balconies')),
+    ...designTypes(ed, mode),
     h('div', { class: 'box-title' }, isBal ? 'Balcony shapes' : mode === 'openings' ? 'Opening shapes (windows, doors, arches)' : 'Niche shapes'),
     h('div', { class: 'plans' }, ...list.map(s => h('div', {
       class: 'plan-row' + (s.id === cur?.id ? ' active' : ''), onclick: () => select(s.id),
