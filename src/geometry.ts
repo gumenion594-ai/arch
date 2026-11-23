@@ -252,3 +252,31 @@ export function pointInPoly(p: V2, poly: V2[]): boolean {
   }
   return inside;
 }
+
+/**
+ * Closed outline through the points; each point's smoothness (s, else def) rounds
+ * the outline there (0 = sharp corner, 1 = fully round). Returns the sampled polygon.
+ */
+export function smoothClosed(pts: { x: number; y: number; s?: number | null }[], def: number, steps = 12): V2[] {
+  const n = pts.length;
+  const sm = pts.map(p => p.s ?? def);
+  if (n < 3 || sm.every(s => s <= 0)) return pts.map(p => ({ x: p.x, y: p.y }));
+  const tan = pts.map((p, i) => {
+    const a = pts[(i - 1 + n) % n], b = pts[(i + 1) % n];
+    return { x: ((b.x - a.x) / 2) * sm[i], y: ((b.y - a.y) / 2) * sm[i] };
+  });
+  const out: V2[] = [];
+  for (let i = 0; i < n; i++) {
+    const A = pts[i], B = pts[(i + 1) % n], ma = tan[i], mb = tan[(i + 1) % n];
+    const k = sm[i] > 0 || sm[(i + 1) % n] > 0 ? steps : 1;
+    for (let j = 0; j < k; j++) {
+      const t = j / k, t2 = t * t, t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+      out.push({
+        x: Math.min(1, Math.max(0, h00 * A.x + h10 * ma.x + h01 * B.x + h11 * mb.x)),
+        y: Math.min(1, Math.max(0, h00 * A.y + h10 * ma.y + h01 * B.y + h11 * mb.y)),
+      });
+    }
+  }
+  return out;
+}

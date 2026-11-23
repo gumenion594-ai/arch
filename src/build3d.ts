@@ -1,10 +1,10 @@
 // Turns a building into 3D geometry (structural / detailed views).
 import * as THREE from 'three';
 import {
-  Building, PlanObject, PlanSegment, StructurePlan, Texture, elevation, planForFloor, segColT, segConnect, segConnectSmooth,
+  Building, PlanObject, PlanSegment, StructurePlan, Texture, elevation, hasCeiling, hasFloor, planForFloor, segColT, segConnect, segConnectSmooth,
   segKind, segMaterial, windowKey,
 } from './model';
-import { V2, enclosedFacesSegs, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
+import { V2, enclosedFacesSegs, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
 
 export type Mats = {
   wall(material: string): THREE.Material;
@@ -51,25 +51,36 @@ export const interiorForFloor = (b: Building, floorId: string) => b.interiorPlan
 /** Plan coordinates (0..1) + elevation -> world. Plan y grows towards -z. */
 export const toWorld = (b: Building, v: V2, y: number) => new THREE.Vector3(b.x + v.x * b.baseLength, y, -(b.y + v.y * b.baseLength));
 
-/** Slab thickness at the bottom of each floor (also used by the editor's floor-area numbers). */
-function slabFaces(b: Building, k: number): { faces: V2[][]; t: number } {
-  const N = b.floors.length;
-  const own = planAtLevel(b, k);
-  const below = k > 0 ? planAtLevel(b, k - 1) : null;
-  const settings = own ?? below;
-  if (!settings || !settings.floorEnabled) return { faces: [], t: 0 };
-  const faces: V2[][] = [];
-  if (own) faces.push(...enclosedFacesSegs(own).map(f => f.poly));
-  // areas enclosed by walls of the floor below that go straight up also close this level
-  // (only when every wall around that area goes straight up: lofted walls close themselves)
-  if (below && below !== own) {
-    for (const f of enclosedFacesSegs(below)) {
-      if (f.segIds.every(id => segConnect(below, below.segments.find(s => s.id === id)!) === 'straight')) faces.push(f.poly);
-    }
+/** Areas a floor's own floor slab covers: everything its external walls enclose. */
+function floorFaces(b: Building, i: number): V2[][] {
+  const pl = planAtLevel(b, i);
+  return pl ? enclosedFacesSegs(pl).map(f => f.poly) : [];
+}
+/**
+ * Areas a floor's ceiling covers: enclosed areas whose walls go straight up; where walls
+ * connect to the plan above, the ceiling takes the shape they end in (the plan above).
+ * A plan above that encloses nothing (a ridge or a point: a roof) needs no ceiling.
+ */
+function ceilingFaces(b: Building, i: number): V2[][] {
+  const pl = planAtLevel(b, i);
+  if (!pl) return [];
+  const out: V2[][] = [];
+  let lofted = false;
+  for (const f of enclosedFacesSegs(pl)) {
+    if (f.segIds.every(id => segConnect(pl, pl.segments.find(s => s.id === id)!) === 'straight')) out.push(f.poly);
+    else lofted = true;
   }
-  if (!faces.length) return { faces, t: 0 };
-  const hFloor = k < N ? b.floors[k].height : b.floors[N - 1].height;
-  return { faces, t: Math.min(settings.floorThickness, hFloor * 0.9) };
+  const above = planAtLevel(b, i + 1);
+  if (lofted && above && above !== pl) out.push(...enclosedFacesSegs(above).map(f => f.poly));
+  return out;
+}
+/** Floor / ceiling slab thickness of floor i (0 when switched off or nothing to cover). */
+export function slabThickness(b: Building, i: number): { floor: number; ceiling: number } {
+  const f = b.floors[i], pl = planAtLevel(b, i);
+  if (!pl) return { floor: 0, ceiling: 0 };
+  const fl = hasFloor(f) && floorFaces(b, i).length ? Math.min(pl.floorThickness, f.height * 0.45) : 0;
+  const ce = hasCeiling(f) && ceilingFaces(b, i).length ? Math.min(pl.ceilingThickness, f.height * 0.45) : 0;
+  return { floor: fl, ceiling: ce };
 }
 
 export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group; stats: BuildStats } {
@@ -88,27 +99,26 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   };
   const line = (pts: THREE.Vector3[], mat: THREE.LineBasicMaterial) => g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
 
-  // ---------- slabs ----------
-  const slabT: number[] = [];
-  for (let k = 0; k <= N; k++) {
-    const { faces, t } = slabFaces(p, k);
-    const y = k === N ? elevation(p, N) - t : elevation(p, k);
-    faces.forEach((f, i) => {
-      const shape = new THREE.Shape(f.map(v => new THREE.Vector2(v.x * L, v.y * L)));
-      const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 1 });
-      geo.rotateX(-Math.PI / 2);
-      geo.translate(p.x, y + i * 1e-4 * t, -p.y); // tiny offset: overlapping slabs don't flicker
-      add(geo, mats.slab, k < N ? { floorId: p.floors[k].id, floorIndex: k } : undefined);
-    });
-    slabT.push(k < N ? t : 0);
+  // ---------- each floor's own floor and ceiling slabs ----------
+  const slabs = p.floors.map((_, i) => slabThickness(p, i));
+  const slab = (faces: V2[][], y: number, t: number, i: number) => faces.forEach((f, k) => {
+    const shape = new THREE.Shape(f.map(v => new THREE.Vector2(v.x * L, v.y * L)));
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 1 });
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(p.x, y + k * 1e-4 * t, -p.y); // tiny offset: overlapping slabs don't flicker
+    add(geo, sel.floors.has(p.floors[i].id) ? mats.selected : mats.slab, { floorId: p.floors[i].id, floorIndex: i });
+  });
+  for (let i = 0; i < N; i++) {
+    if (slabs[i].floor) slab(floorFaces(p, i), elevation(p, i), slabs[i].floor, i);
+    if (slabs[i].ceiling) slab(ceilingFaces(p, i), elevation(p, i + 1) - slabs[i].ceiling, slabs[i].ceiling, i);
   }
 
   // ---------- walls / columns per floor ----------
   for (let i = 0; i < N; i++) {
     const floor = p.floors[i];
-    const y0 = elevation(p, i) + slabT[i];
-    const y1 = elevation(p, i + 1);
-    if (y1 - y0 <= 1e-6) continue;
+    // external walls run the full floor height; internal walls stand between floor and ceiling
+    const yBase = elevation(p, i), yTop = elevation(p, i + 1);
+    if (yTop - yBase <= 1e-6) continue;
     const floorSel = sel.floors.has(floor.id);
 
     const plans: { plan: StructurePlan; interior: boolean }[] = [];
@@ -118,6 +128,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     if (inner) plans.push({ plan: inner, interior: true });
 
     for (const { plan, interior } of plans) {
+      const y0 = interior ? yBase + slabs[i].floor : yBase;
+      const y1 = interior ? yTop - slabs[i].ceiling : yTop;
       const above = interior ? null : planAtLevel(p, i + 1);
       const rowsBySeg = new Map<string, { rows: Row[]; bottom: V2[] }>();
       const colAlong = (rows: Row[], t: number, ct: number, bottom: V2[], pick: PickInfo, material: string, selected: boolean) => {
@@ -153,13 +165,17 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             for (let k = 0; k < d; k++) {
               const shapeId = p.windows[windowKey(floor.id, seg.id, k)];
               const shape = shapeId && p.windowShapes.find(s => s.id === shapeId);
-              if (!shape || shape.points.length < 3) continue;
-              let hole = shape.points.map(q => ({
-                x: clamp01((k + clamp(q.x, 0.004, 0.996)) / d),
-                y: clamp(q.y, 0.004, 0.996),
-              }));
-              if (signedArea(hole) > 0) hole = hole.reverse(); // holes run clockwise
-              holes.push(hole);
+              if (!shape) continue;
+              for (const outline of shape.outlines) {
+                if (outline.length < 3) continue;
+                let hole = smoothClosed(outline, shape.smooth).map(q => ({
+                  x: clamp01((k + clamp(q.x, 0.004, 0.996)) / d),
+                  y: clamp(q.y, 0.004, 0.996),
+                }));
+                if (Math.abs(signedArea(hole)) < 1e-9) continue;
+                if (signedArea(hole) > 0) hole = hole.reverse(); // holes run clockwise
+                holes.push(hole);
+              }
             }
           }
           const wall = new WallSolid(rows, offs, polyParams(bottom), yb, y1, W, L, tileW, tileH);
@@ -202,7 +218,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       }
 
       // stairs climb to the top of the next floor's slab (top floor: to its ceiling)
-      const yStairs = i + 1 < N ? elevation(p, i + 1) + slabT[i + 1] : y1;
+      const yStairs = i + 1 < N ? elevation(p, i + 1) + slabs[i + 1].floor : y1;
       if (interior) for (const ob of plan.objects) buildObject(ob, p, y0, y1, yStairs, mats.object, (geo: THREE.BufferGeometry) => add(geo, mats.object, { floorId: floor.id, floorIndex: i, interior: true }));
     }
   }
@@ -239,11 +255,15 @@ function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStair
   }
 }
 
+/** The point of the plan above that a point connects to when its walls connect upwards. */
+export function nearestPoint(above: StructurePlan, v: V2) {
+  return above.points.reduce((best, q) => (Math.hypot(q.x - v.x, q.y - v.y) < Math.hypot(best.x - v.x, best.y - v.y) ? q : best));
+}
+
 /** Polyline on the plan above that a wall connects to: nearest points + the walls between them. */
 function loftTarget(plan: StructurePlan, above: StructurePlan, seg: PlanSegment): V2[] {
   const A = plan.points.find(p => p.id === seg.a)!, B = plan.points.find(p => p.id === seg.b)!;
-  const near = (v: V2) => above.points.reduce((best, q) => (Math.hypot(q.x - v.x, q.y - v.y) < Math.hypot(best.x - v.x, best.y - v.y) ? q : best));
-  const ma = near(A), mb = near(B);
+  const ma = nearestPoint(above, A), mb = nearestPoint(above, B);
   const path = shortestPath(above, ma.id, mb.id);
   return path ? samplePath(above, path) : [{ x: ma.x, y: ma.y }, { x: mb.x, y: mb.y }];
 }
@@ -444,7 +464,5 @@ export function meshVolume(geo: THREE.BufferGeometry): number {
 export function floorArea(b: Building, i: number): number {
   const L2 = b.baseLength ** 2;
   const pl = planAtLevel(b, i);
-  const own = pl ? enclosedFacesSegs(pl).reduce((s, f) => s + Math.abs(signedArea(f.poly)), 0) : 0;
-  if (own > 0) return own * L2;
-  return slabFaces(b, i).faces.reduce((s, f) => s + Math.abs(signedArea(f)), 0) * L2;
+  return (pl ? enclosedFacesSegs(pl).reduce((s, f) => s + Math.abs(signedArea(f.poly)), 0) : 0) * L2;
 }

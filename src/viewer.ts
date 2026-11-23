@@ -1,9 +1,9 @@
 // Three.js 3D view: ground, building-area wireframe, walls, slabs; click to pick.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Building, MATERIALS, Texture, elevation, segKind } from './model';
+import { Building, MATERIALS, Texture, elevation, segConnect, segKind } from './model';
 import { enclosedFaces, sampleSeg, V2 } from './geometry';
-import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, planAtLevel, toWorld } from './build3d';
+import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, nearestPoint, planAtLevel, toWorld } from './build3d';
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
 
@@ -190,6 +190,22 @@ export class Viewer {
             grp.add(line);
           }
           if (color === 0x8fd88f || color === 0xffe680) continue; // no fill for floor plans
+          // walls that connect to the plan above: join each point to the point it connects to
+          const above = k < N ? planAtLevel(b, k + 1) : null;
+          if (above && above.points.length) {
+            const ends = new Set(plan.segments.filter(sg => segConnect(plan, sg) === 'loft' && segKind(sg) !== 'open').flatMap(sg => [sg.a, sg.b]));
+            const pts: THREE.Vector3[] = [];
+            for (const pt of plan.points) {
+              if (!ends.has(pt.id)) continue;
+              pts.push(toWorld(b, pt, yy), toWorld(b, nearestPoint(above, pt), elevation(b, k + 1) + 0.002 * L));
+            }
+            if (pts.length) {
+              const ln = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),
+                new THREE.LineDashedMaterial({ color: active ? 0xffb070 : 0x887766, dashSize: L / 80, gapSize: L / 160 }));
+              ln.computeLineDistances();
+              grp.add(ln);
+            }
+          }
           for (const face of enclosedFaces(plan)) {
             const shape = new THREE.Shape(face.map(v => new THREE.Vector2(v.x * L, v.y * L)));
             const m = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({

@@ -9,6 +9,8 @@ export interface PlannerHost {
   getGhost(): StructurePlan | null; // plan below (or external walls), drawn faintly for reference
   /** Floor planner: areas enclosed by the external walls; points and walls must stay inside. null = anywhere. */
   allowed?(): V2[][] | null;
+  /** Lines from points of the plan below to the points they connect to here (lofted walls). */
+  links?(): [V2, V2][];
   baseLength(): number;
   begin(): void; // snapshot for undo, before a change
   commit(): void; // persist + refresh UI after a change
@@ -376,6 +378,14 @@ export class Planner {
       g.setLineDash([]);
       g.fillStyle = 'rgba(255,160,96,0.5)';
       for (const p of ghost.points) { const q = this.toScreen(p); g.fillRect(q.x - 2, q.y - 2, 4, 4); }
+    }
+
+    // connections from the plan below (walls that connect up instead of going straight)
+    const links = this.h.links?.() ?? [];
+    if (links.length) {
+      g.strokeStyle = 'rgba(255,176,112,0.7)'; g.lineWidth = 1; g.setLineDash([2, 3]);
+      for (const [a, c] of links) { const A = this.toScreen(a), C = this.toScreen(c); g.beginPath(); g.moveTo(A.x, A.y); g.lineTo(C.x, C.y); g.stroke(); }
+      g.setLineDash([]);
     }
 
     // enclosed areas

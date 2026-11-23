@@ -6,6 +6,8 @@ export const MAX_AREA = MAX_M * MAX_M;
 export interface Floor {
   id: string;
   height: number; // m
+  hasFloor?: boolean; // floor slab at the bottom of this floor (default on)
+  hasCeiling?: boolean; // ceiling slab at the top of this floor (default on)
 }
 
 export interface PlanPoint {
@@ -36,7 +38,16 @@ export interface PlanSegment {
 export interface PlanObject { id: string; type: 'stairs' | 'elevator'; x: number; y: number; w: number; d: number; rot: number }
 
 /** Window outline drawn on a 0..1 grid: x across a wall division, y up the floor height. */
-export interface WindowShape { id: string; name: string; points: { x: number; y: number }[] }
+/** One closed outline of a window; s = this point's smoothness (null = the shape's). */
+export interface WinPoint { x: number; y: number; s?: number | null }
+export interface WindowShape {
+  id: string; name: string;
+  outlines: WinPoint[][]; // several openings may share one wall division
+  smooth: number; // default smoothness 0..1
+  points?: WinPoint[]; // (older projects: single outline)
+}
+export const hasFloor = (f: Floor) => f.hasFloor !== false;
+export const hasCeiling = (f: Floor) => f.hasCeiling !== false;
 
 /** Wall materials with density in kg/m³. */
 export const MATERIALS: Record<string, { name: string; density: number; color: number }> = {
@@ -57,7 +68,8 @@ export interface StructurePlan {
   floorIds: string[]; // floors this plan applies to
   wallThickness: number; // m
   floorThickness: number; // m
-  floorEnabled: boolean;
+  ceilingThickness: number; // m
+  floorEnabled: boolean; // (older projects; floors now have their own floor / ceiling switches)
   smooth: number; // default plan smoothness 0..1
   connect: ConnectMode; // default connection to the plan above
   connectSmooth: number; // 0..1
@@ -108,11 +120,12 @@ export const floorBase = (b: Building, i: number) => b.floors.slice(0, i).reduce
 /** World elevation of the bottom of floor i (0 = ground level). */
 export const elevation = (b: Building, i: number) => floorBase(b, i) - floorBase(b, b.ground);
 /** Floor label: G = ground, 1, 2 … above, B1, B2 … underground. */
-export const floorLabel = (b: Building, i: number) => (i === b.ground ? 'G' : i > b.ground ? `${i - b.ground}` : `B${b.ground - i}`);
+/** Floors are numbered 0 (lowest) to n-1; underground ones are only shaded differently. */
+export const floorLabel = (_b: Building, i: number) => `${i}`;
 
 export function newPlan(name: string, floorIds: string[] = []): StructurePlan {
   return {
-    id: uid(), name, floorIds, wallThickness: 0.3, floorThickness: 0.25, floorEnabled: true,
+    id: uid(), name, floorIds, wallThickness: 0.3, floorThickness: 0.25, ceilingThickness: 0.15, floorEnabled: true,
     smooth: 0, connect: 'straight', connectSmooth: 0,
     nextN: 1, points: [], segments: [], material: 'concrete', objects: [],
   };
@@ -131,8 +144,10 @@ export function createBuilding(s: BuildingSpec): Building {
 
 export function defaultWindowShapes(): WindowShape[] {
   return [
-    { id: uid(), name: 'Window', points: [{ x: 0.25, y: 0.3 }, { x: 0.75, y: 0.3 }, { x: 0.75, y: 0.8 }, { x: 0.25, y: 0.8 }] },
-    { id: uid(), name: 'Door', points: [{ x: 0.3, y: 0 }, { x: 0.7, y: 0 }, { x: 0.7, y: 0.75 }, { x: 0.3, y: 0.75 }] },
+    { id: uid(), name: 'Window', smooth: 0, outlines: [[{ x: 0.25, y: 0.3 }, { x: 0.75, y: 0.3 }, { x: 0.75, y: 0.8 }, { x: 0.25, y: 0.8 }]] },
+    { id: uid(), name: 'Door', smooth: 0, outlines: [[{ x: 0.3, y: 0 }, { x: 0.7, y: 0 }, { x: 0.7, y: 0.75 }, { x: 0.3, y: 0.75 }]] },
+    // round-topped: sharp bottom corners, smooth top
+    { id: uid(), name: 'Arched window', smooth: 0, outlines: [[{ x: 0.3, y: 0.25 }, { x: 0.7, y: 0.25 }, { x: 0.7, y: 0.6, s: 1 }, { x: 0.5, y: 0.82, s: 1 }, { x: 0.3, y: 0.6, s: 1 }]] },
   ];
 }
 
@@ -166,10 +181,21 @@ export function normalize(p: Project): Project {
     b.ground ??= 0;
     b.interiorPlans ??= [];
     if (!b.windowShapes?.length) b.windowShapes = defaultWindowShapes();
+    for (const w of b.windowShapes) {
+      if (!w.outlines) w.outlines = w.points?.length ? [w.points] : [];
+      delete w.points;
+      w.smooth ??= 0;
+    }
     b.windows ??= {};
     for (const pl of [...b.plans, ...b.interiorPlans]) {
       pl.smooth ??= 0; pl.connect ??= 'straight'; pl.connectSmooth ??= 0;
       pl.material ??= 'concrete'; pl.objects ??= [];
+      pl.ceilingThickness ??= Math.min(0.15, pl.floorThickness);
+      if (pl.floorEnabled === false && b.plans.includes(pl)) {
+        // old plan-level "no floor slab" -> per-floor switches
+        for (const f of b.floors) if (pl.floorIds.includes(f.id)) { f.hasFloor = false; f.hasCeiling = false; }
+      }
+      pl.floorEnabled = true;
     }
   }
   return p;
@@ -201,20 +227,16 @@ export const segColT = (pl: StructurePlan, s: PlanSegment) => s.columnThickness 
 export const segMaterial = (pl: StructurePlan, s: PlanSegment) => s.material ?? pl.material;
 
 /** Floor label ("B2", "G", "5") -> floor index, or null. */
-function labelToIndex(b: Building, t: string): number | null {
-  t = t.trim().toUpperCase();
-  if (t === 'G' || t === '0') return b.ground;
-  let m = t.match(/^B(\d+)$/);
-  if (m) return b.ground - +m[1];
-  m = t.match(/^(\d+)$/);
-  return m ? b.ground + +m[1] : null;
+function labelToIndex(_b: Building, t: string): number | null {
+  const m = t.trim().match(/^(\d+)$/);
+  return m ? +m[1] : null;
 }
 
-/** "B2-G, 3, 5-10" -> sorted floor indices (clamped to existing floors). */
+/** "0-3, 5, 7-10" -> sorted floor indices (clamped to existing floors). */
 export function parseRanges(txt: string, b: Building): number[] | null {
   const out = new Set<number>();
   for (const part of txt.split(',').map(x => x.trim()).filter(Boolean)) {
-    const m = part.match(/^(B\d+|G|\d+)\s*(?:-\s*(B\d+|G|\d+))?$/i);
+    const m = part.match(/^(\d+)\s*(?:-\s*(\d+))?$/);
     if (!m) return null;
     let a = labelToIndex(b, m[1])!, c = m[2] ? labelToIndex(b, m[2])! : a;
     if (a > c) [a, c] = [c, a];
@@ -222,7 +244,7 @@ export function parseRanges(txt: string, b: Building): number[] | null {
   }
   return [...out].sort((x, y) => x - y);
 }
-/** floor indices -> "B2-G, 3, 5-10" */
+/** floor indices -> "0-3, 5, 7-10" */
 export function formatRanges(b: Building, idx: number[]): string {
   const r: string[] = [];
   for (let i = 0; i < idx.length; ) {
