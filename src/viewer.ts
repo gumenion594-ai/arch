@@ -172,7 +172,7 @@ export class Viewer {
 
     // ground plane (see-through when there are underground floors)
     const g = new THREE.Mesh(
-      new THREE.PlaneGeometry(span * 6, span * 6),
+      new THREE.PlaneGeometry(this.walk ? Math.max(span * 6, 3000) : span * 6, this.walk ? Math.max(span * 6, 3000) : span * 6), // walking: grass to the horizon
       new THREE.MeshStandardMaterial({ color: this.walk ? 0x5f8f3e : 0x6a6a6a, roughness: 1, transparent: underground, opacity: underground ? 0.35 : 1, depthWrite: !underground, side: THREE.DoubleSide }),
     );
     g.rotation.x = -Math.PI / 2;
@@ -427,13 +427,13 @@ export class Viewer {
     }
     if (w.fly) {
       const v = ((on('Space', 'KeyE') ? 1 : 0) - (on('KeyC', 'KeyQ', 'ControlLeft') ? 1 : 0)) * speed * dt;
-      const g = this.groundBelow(w.x, w.z, w.feet + 0.4, objs);
+      const g = this.groundBelow(w.x, w.z, w.feet + 0.4, objs) ?? (w.feet >= -1e-3 ? 0 : null); // past the grass: still ground at 0
       w.feet = Math.max(g ?? -1e9, w.feet + v);
       w.onGround = false;
     } else {
       // gravity; step up onto anything up to 40 cm higher (stairs), fall otherwise
       w.vy -= 9.8 * dt;
-      const g = this.groundBelow(w.x, w.z, w.feet + 0.4, objs);
+      const g = this.groundBelow(w.x, w.z, w.feet + 0.4, objs) ?? (w.feet >= -1e-3 ? 0 : null); // past the grass: still ground at 0
       const next = w.feet + w.vy * dt;
       if (g !== null && next <= g) { w.feet = g; w.vy = 0; w.onGround = true; }
       else { w.feet = next; w.onGround = false; }
