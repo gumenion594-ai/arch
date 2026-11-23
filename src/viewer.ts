@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Building, MATERIALS, Texture, elevation, segConnect, segKind } from './model';
 import { enclosedFaces, sampleSeg, V2 } from './geometry';
-import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, nearestPoint, planAtLevel, toWorld } from './build3d';
+import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, loftPointTarget, planAtLevel, toWorld } from './build3d';
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
 
@@ -197,7 +197,7 @@ export class Viewer {
             const pts: THREE.Vector3[] = [];
             for (const pt of plan.points) {
               if (!ends.has(pt.id)) continue;
-              pts.push(toWorld(b, pt, yy), toWorld(b, nearestPoint(above, pt), elevation(b, k + 1) + 0.002 * L));
+              pts.push(toWorld(b, pt, yy), toWorld(b, loftPointTarget(plan, above, pt), elevation(b, k + 1) + 0.002 * L));
             }
             if (pts.length) {
               const ln = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),

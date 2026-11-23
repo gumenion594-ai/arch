@@ -88,7 +88,9 @@ export function enclosedFaces(plan: StructurePlan): V2[][] {
 }
 
 /** Enclosed faces with the ids of the walls bounding each one. */
-export function enclosedFacesSegs(plan: StructurePlan): { poly: V2[]; segIds: string[] }[] {
+export interface Face { poly: V2[]; segIds: string[]; ids: string[]; starts: number[] }
+/** ids = corner point ids (counter-clockwise), starts[k] = index in poly where corner k sits. */
+export function enclosedFacesSegs(plan: StructurePlan): Face[] {
   const pts = new Map(plan.points.map(p => [p.id, p as V2]));
   const adj = new Map<string, string[]>();
   for (const s of plan.segments) {
@@ -105,7 +107,7 @@ export function enclosedFacesSegs(plan: StructurePlan): { poly: V2[]; segIds: st
     });
   }
   const visited = new Set<string>();
-  const faces: { poly: V2[]; segIds: string[] }[] = [];
+  const faces: Face[] = [];
   for (const [u, ns] of adj) {
     for (const v of ns) {
       if (visited.has(u + '>' + v)) continue;
@@ -122,16 +124,17 @@ export function enclosedFacesSegs(plan: StructurePlan): { poly: V2[]; segIds: st
       const poly = face.map(id => pts.get(id)!);
       if (poly.length >= 3 && signedArea(poly) > 1e-9) {
         // follow curved walls
-        const out: V2[] = [], segIds: string[] = [];
+        const out: V2[] = [], segIds: string[] = [], starts: number[] = [];
         for (let k = 0; k < face.length; k++) {
           const u = face[k], w = face[(k + 1) % face.length];
+          starts.push(out.length);
           const seg = plan.segments.find(x => (x.a === u && x.b === w) || (x.a === w && x.b === u))!;
           segIds.push(seg.id);
           const sp = sampleSeg(plan, seg);
           if (seg.a !== u) sp.reverse();
           out.push(...sp.slice(0, -1));
         }
-        faces.push({ poly: out, segIds });
+        faces.push({ poly: out, segIds, ids: face, starts });
       }
     }
   }

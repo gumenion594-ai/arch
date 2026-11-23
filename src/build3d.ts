@@ -255,13 +255,86 @@ function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStair
   }
 }
 
-/** The point of the plan above that a point connects to when its walls connect upwards. */
+/** The point of the plan above nearest to v. */
 export function nearestPoint(above: StructurePlan, v: V2) {
   return above.points.reduce((best, q) => (Math.hypot(q.x - v.x, q.y - v.y) < Math.hypot(best.x - v.x, best.y - v.y) ? q : best));
 }
 
-/** Polyline on the plan above that a wall connects to: nearest points + the walls between them. */
+/** A closed outline with arc-length parameters (0..1) for its vertices and corners. */
+interface Loop { poly: V2[]; params: number[]; corner: Map<string, number>; next: Map<string, string>; segIds: Set<string>; c: V2 }
+function loopsOf(plan: StructurePlan): Loop[] {
+  return enclosedFacesSegs(plan).map(f => {
+    const poly = [...f.poly, f.poly[0]];
+    const params = polyParams(poly);
+    const corner = new Map(f.ids.map((id, k) => [id, params[f.starts[k]]]));
+    const c = f.poly.reduce((s, p) => ({ x: s.x + p.x / f.poly.length, y: s.y + p.y / f.poly.length }), { x: 0, y: 0 });
+    const next = new Map(f.ids.map((id, k) => [id, f.ids[(k + 1) % f.ids.length]]));
+    return { poly, params, corner, next, segIds: new Set(f.segIds), c };
+  });
+}
+const loopAt = (l: Loop, t: number) => polyAt(l.poly, l.params, ((t % 1) + 1) % 1);
+
+/**
+ * How a closed outline morphs into the outline above: both are walked counter-clockwise by
+ * arc length; `off` is the rotation that lines them up best (least total distance).
+ */
+interface Morph { lb: Loop; la: Loop; off: number }
+const morphCache = new Map<string, Morph[]>();
+const planKey = (pl: StructurePlan) => JSON.stringify([pl.points, pl.segments, pl.smooth]);
+function morphs(plan: StructurePlan, above: StructurePlan): Morph[] {
+  const key = planKey(plan) + '|' + planKey(above);
+  let m = morphCache.get(key);
+  if (m) return m;
+  const below = loopsOf(plan), up = loopsOf(above);
+  m = [];
+  if (up.length) {
+    for (const lb of below) {
+      const la = up.reduce((best, l) => (Math.hypot(l.c.x - lb.c.x, l.c.y - lb.c.y) < Math.hypot(best.c.x - lb.c.x, best.c.y - lb.c.y) ? l : best));
+      const K = 96, B = Array.from({ length: K }, (_, k) => loopAt(lb, k / K));
+      const cost = (off: number) => B.reduce((s, p, k) => { const q = loopAt(la, k / K + off); return s + (p.x - q.x) ** 2 + (p.y - q.y) ** 2; }, 0);
+      let off = 0, best = Infinity;
+      for (let k = 0; k < 240; k++) { const c = cost(k / 240); if (c < best) { best = c; off = k / 240; } }
+      for (let k = -10; k <= 10; k++) { const o = off + k / 2400, c = cost(o); if (c < best) { best = c; off = o; } } // refine
+      m.push({ lb, la, off });
+    }
+  }
+  if (morphCache.size > 200) morphCache.clear();
+  morphCache.set(key, m);
+  return m;
+}
+
+/** Where a point of this plan connects to on the plan above (shown as connection lines). */
+export function loftPointTarget(plan: StructurePlan, above: StructurePlan, pt: { id: string; x: number; y: number }): V2 {
+  for (const { lb, la, off } of morphs(plan, above)) {
+    const t = lb.corner.get(pt.id);
+    if (t !== undefined) return loopAt(la, t + off);
+  }
+  return nearestPoint(above, pt);
+}
+
+/**
+ * The line on the plan above that a wall connects to. Walls around an enclosed area morph
+ * into the matching outline above; other walls (or a ridge / point above) go to the nearest
+ * points and the walls between them.
+ */
 function loftTarget(plan: StructurePlan, above: StructurePlan, seg: PlanSegment): V2[] {
+  for (const { lb, la, off } of morphs(plan, above)) {
+    if (!lb.segIds.has(seg.id)) continue;
+    const ta = lb.corner.get(seg.a)!, tb = lb.corner.get(seg.b)!;
+    // walk the outline the way this wall runs (a -> b): forward if b follows a counter-clockwise
+    const span = lb.next.get(seg.a) === seg.b ? (((tb - ta) % 1) + 1) % 1 || 1 : -((((ta - tb) % 1) + 1) % 1 || 1);
+    if (Math.abs(span) < 1e-9) break;
+    const from = ta + off, to = ta + off + span;
+    const out: V2[] = [loopAt(la, from)];
+    // include the corners of the outline above that fall inside this stretch
+    const inner = la.params.slice(0, -1).map(p => {
+      const rel = span > 0 ? (((p - from) % 1) + 1) % 1 : (((from - p) % 1) + 1) % 1;
+      return { p, rel };
+    }).filter(x => x.rel > 1e-6 && x.rel < Math.abs(span) - 1e-6).sort((x, y) => x.rel - y.rel);
+    for (const x of inner) out.push(loopAt(la, x.p));
+    out.push(loopAt(la, to));
+    return out;
+  }
   const A = plan.points.find(p => p.id === seg.a)!, B = plan.points.find(p => p.id === seg.b)!;
   const ma = nearestPoint(above, A), mb = nearestPoint(above, B);
   const path = shortestPath(above, ma.id, mb.id);

@@ -8,7 +8,7 @@ import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
 import { WindowPlanner } from './windowplanner';
 import { V2, enclosedFaces, planValid } from './geometry';
-import { Selection, interiorForFloor, nearestPoint } from './build3d';
+import { Selection, interiorForFloor, loftPointTarget } from './build3d';
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
@@ -231,6 +231,14 @@ export class Editor {
       this.anchor = id;
     }
     this.selWalls.clear(); this.selDivs.clear();
+    // in a planner, show the plan the clicked floor uses
+    if ((this.mode === 'structure' || this.mode === 'floorplan') && this.selFloors.has(id)) {
+      const pl = this.mode === 'structure' ? planForFloor(this.b, id) : interiorForFloor(this.b, id);
+      if (pl && pl.id !== this.plan()?.id) {
+        this.setActivePlan(pl.id);
+        if (this.planner) { this.planner.head = null; this.planner.selPoints.clear(); this.planner.selSegs.clear(); this.planner.selObj = null; }
+      } else if (!pl) toast(`Floor ${floorLabel(this.b, this.b.floors.findIndex(f => f.id === id))} has no ${this.mode === 'structure' ? 'structure' : 'floor'} plan yet: pick one in the floor panel or press Edit`);
+    }
     this.refresh();
   }
 
@@ -393,7 +401,7 @@ export class Editor {
     const pl = this.plan(), below = this.ghostPlan();
     if (this.mode !== 'structure' || !pl || !below || below === pl || !pl.points.length) return [];
     const ends = new Set(below.segments.filter(sg => segConnect(below, sg) === 'loft' && segKind(sg) !== 'open').flatMap(sg => [sg.a, sg.b]));
-    return below.points.filter(q => ends.has(q.id)).map(q => [q, nearestPoint(pl, q)] as [V2, V2]);
+    return below.points.filter(q => ends.has(q.id)).map(q => [q, loftPointTarget(below, pl, q)] as [V2, V2]);
   }
 
   splitFloor(id: string, ratio: number) {
