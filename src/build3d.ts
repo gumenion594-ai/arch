@@ -1,7 +1,7 @@
 // Turns a building into 3D geometry (structural / detailed views).
 import * as THREE from 'three';
 import {
-  Building, PlanObject, PlanSegment, StructurePlan, Texture, elevation, hasCeiling, hasFloor, planForFloor, segColT, segConnect, segConnectSmooth,
+  Building, PlanObject, PlanSegment, StructurePlan, Texture, elevation, hasCeiling, hasFloor, planForFloor, segColT, segConnect, segConnectSmooth, segSmoothSpan,
   segKind, segMaterial, windowKey,
 } from './model';
 import { V2, enclosedFacesSegs, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
@@ -131,6 +131,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       const y0 = interior ? yBase + slabs[i].floor : yBase;
       const y1 = interior ? yTop - slabs[i].ceiling : yTop;
       const above = interior ? null : planAtLevel(p, i + 1);
+      let vert: Vertical | undefined;
       const rowsBySeg = new Map<string, { rows: Row[]; bottom: V2[] }>();
       const colAlong = (rows: Row[], t: number, ct: number, bottom: V2[], pick: PickInfo, material: string, selected: boolean) => {
         const pts = rows.map((r, ri) => W(polyAt(r.poly, r.params, t), y0 + (y1 - y0) * (ri / (rows.length - 1))));
@@ -147,7 +148,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         let top = bottom;
         const loft = !interior && segConnect(plan, seg) === 'loft' && above && above.points.length > 0;
         if (loft) top = loftTarget(plan, above!, seg);
-        const rows = buildGrid(bottom, top, loft ? segConnectSmooth(plan, seg) : 0);
+        const rows = buildGrid(bottom, top, loft ? segConnectSmooth(plan, seg) : 0,
+          loft && segSmoothSpan(plan, seg) ? (vert ??= verticalFor(p, i)) : undefined);
         const d = Math.max(1, seg.divisions ?? 1);
         const wallKey = `${floor.id}|${seg.id}`;
         const selected = floorSel || sel.walls.has(wallKey);
@@ -359,24 +361,125 @@ function loftTarget(plan: StructurePlan, above: StructurePlan, seg: PlanSegment)
 
 type Row = { poly: V2[]; params: number[] };
 
+/** Neighbouring floors used to shape a smooth vertical profile across several floors. */
+interface Vertical {
+  pOf(b: V2): V2 | null; // matching point one level below (null: the floor below goes straight up)
+  nOf(t: V2): V2 | null; // matching point one level above the top (null: nothing connects further up)
+  apex: boolean; // the plan above encloses nothing (a point or ridge): close the profile round
+  H: number; hBelow: number; hAbove: number; // floor heights
+}
+
 /**
  * Rows of matching vertices from the bottom polyline to the top one.
  * Both are resampled on the union of their arc-length parameters, so
  * mismatched point counts are triangulated automatically.
- * smooth > 0 bends the vertical profile into a curve (dome-like).
+ * smooth > 0 bends the vertical profile: it becomes a curve through the outlines of
+ * the neighbouring floors too (Catmull-Rom style), so stacked lofted floors form one
+ * smooth surface: vertical where it leaves a straight floor, round where it closes at a point.
  */
-function buildGrid(bottom: V2[], top: V2[], smooth: number): Row[] {
+function buildGrid(bottom: V2[], top: V2[], smooth: number, v?: Vertical): Row[] {
   const pb = polyParams(bottom), pt = top.length > 1 ? polyParams(top) : [0];
   const ts = [...new Set([...pb, ...pt].map(t => Math.round(t * 1e6) / 1e6))].sort((a, b) => a - b);
   const B = ts.map(t => polyAt(bottom, pb, t)), T = ts.map(t => polyAt(top, pt, t));
-  const R = smooth > 0 ? 10 : 1;
+  if (smooth <= 0) return [{ poly: B, params: ts }, { poly: T, params: ts }];
+  const R = 12;
   const rows: Row[] = [];
-  for (let r = 0; r <= R; r++) {
-    const t = r / R;
-    const u = (1 - smooth) * t + smooth * (1 - Math.sqrt(Math.max(0, 1 - t * t)));
-    rows.push({ poly: B.map((b, c) => ({ x: b.x + (T[c].x - b.x) * u, y: b.y + (T[c].y - b.y) * u })), params: ts });
+  if (!v) {
+    // between these two floors only: a quarter-round profile within this floor
+    for (let r = 0; r <= R; r++) {
+      const t = r / R;
+      const u = (1 - smooth) * t + smooth * (1 - Math.sqrt(Math.max(0, 1 - t * t)));
+      rows.push({ poly: B.map((b, c) => ({ x: b.x + (T[c].x - b.x) * u, y: b.y + (T[c].y - b.y) * u })), params: ts });
+    }
+    return rows;
   }
+  const sub = (a: V2, b: V2) => ({ x: a.x - b.x, y: a.y - b.y });
+  const mul = (a: V2, k: number) => ({ x: a.x * k, y: a.y * k });
+  const mix = (a: V2, b: V2, k: number) => ({ x: a.x * (1 - k) + b.x * k, y: a.y * (1 - k) + b.y * k });
+  // per column: a function giving the plan position at height fraction t
+  const cols = B.map((b, c) => {
+    const t = T[c], lin = sub(t, b);
+    const P = v.pOf(b), N = v.nOf(t);
+    const mb = P ? mul(sub(t, P), v.H / (v.H + v.hBelow)) : { x: 0, y: 0 }; // straight floor below: rise vertically
+    const linear = (k: number) => ({ x: b.x + lin.x * k, y: b.y + lin.y * k });
+    const r0 = Math.hypot(lin.x, lin.y);
+    if (!N && v.apex && r0 > 1e-9) {
+      // closing at a point: an elliptical cap that continues the slope coming from below
+      // and meets the top point level (round, like the top of a dome)
+      const dir = { x: -lin.x / r0, y: -lin.y / r0 }; // outward from the top point
+      const k = Math.max(0, -(mb.x * dir.x + mb.y * dir.y) / v.H); // inward slope, plan units per metre
+      const cap = ellipseCap(r0, k, v.H);
+      return (tt: V2 | number) => {
+        const f = tt as number;
+        return mix(linear(f), { x: t.x + dir.x * r0 * cap(f * v.H), y: t.y + dir.y * r0 * cap(f * v.H) }, smooth);
+      };
+    }
+    const mt = N ? mul(sub(N, b), v.H / (v.H + v.hAbove)) : lin;
+    const m0 = mix(lin, mb, smooth), m1 = mix(lin, mt, smooth);
+    return (tt: V2 | number) => {
+      const f = tt as number, f2 = f * f, f3 = f2 * f;
+      const h00 = 2 * f3 - 3 * f2 + 1, h10 = f3 - 2 * f2 + f, h01 = -2 * f3 + 3 * f2, h11 = f3 - f2;
+      return { x: h00 * b.x + h10 * m0.x + h01 * t.x + h11 * m1.x, y: h00 * b.y + h10 * m0.y + h01 * t.y + h11 * m1.y };
+    };
+  });
+  for (let r = 0; r <= R; r++) rows.push({ params: ts, poly: cols.map(fn => fn(r / R)) });
   return rows;
+}
+
+/**
+ * Quarter-ellipse-like cap: radius r0 at height 0 shrinking to 0 at height d, starting with
+ * inward slope k (radius lost per metre) and ending flat. Returns radius fraction at height y.
+ */
+function ellipseCap(r0: number, k: number, d: number): (y: number) => number {
+  // ellipse x = a·√(1 − ((y − yc)/b)²) with its top at d; find b so the slope at y = 0 is k
+  const slope = (b: number) => { const u = 1 - d / b; return (r0 * u) / (b * Math.max(1e-12, 1 - u * u)); };
+  let lo = d, hi = d * 1e4;
+  if (k <= 0) hi = d; // vertical start: quarter ellipse
+  else if (slope(hi) < k) lo = hi; // too steep for an ellipse: as close as it gets
+  else for (let it = 0; it < 60; it++) { const m = Math.sqrt(lo * hi); if (slope(m) < k) lo = m; else hi = m; }
+  const b = (lo + hi) / 2, u0 = 1 - d / b, a = r0 / Math.sqrt(Math.max(1e-12, 1 - u0 * u0));
+  return y => { const u = (y + b - d) / b; return (a * Math.sqrt(Math.max(0, 1 - u * u))) / r0; };
+}
+
+/** Arc-length parameter of the point of a loop nearest to p (and that distance). */
+function paramOnLoop(l: Loop, p: V2): { t: number; d: number } {
+  let best = { t: 0, d: Infinity };
+  for (let k = 0; k + 1 < l.poly.length; k++) {
+    const a = l.poly[k], b = l.poly[k + 1];
+    const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy;
+    const u = L2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L2)) : 0;
+    const d = Math.hypot(p.x - (a.x + dx * u), p.y - (a.y + dy * u));
+    if (d < best.d) best = { t: l.params[k] + (l.params[k + 1] - l.params[k]) * u, d };
+  }
+  return best;
+}
+const loftsUp = (pl: StructurePlan | null) => !!pl && pl.segments.some(sg => segKind(sg) !== 'open' && segConnect(pl, sg) === 'loft');
+
+/** Neighbour lookups for floor i's lofted walls (see Vertical). */
+function verticalFor(b: Building, i: number): Vertical {
+  const below = i > 0 ? planAtLevel(b, i - 1) : null, plan = planAtLevel(b, i)!;
+  const above = planAtLevel(b, i + 1), above2 = planAtLevel(b, i + 2);
+  const downMorphs = below && loftsUp(below) ? morphs(below, plan) : [];
+  const upMorphs = above && above2 && loftsUp(above) ? morphs(above, above2) : [];
+  const apex = !above || !loopsOf(above).length;
+  const nearestMorph = (ms: Morph[], p: V2, side: 'la' | 'lb') => {
+    let best: { m: Morph; t: number } | null = null, bd = Infinity;
+    for (const m of ms) { const r = paramOnLoop(m[side], p); if (r.d < bd) { bd = r.d; best = { m, t: r.t }; } }
+    return best;
+  };
+  return {
+    pOf: p => { const r = nearestMorph(downMorphs, p, 'la'); return r ? loopAt(r.m.lb, r.t - r.m.off) : null; },
+    nOf: p => {
+      if (!above || !above2 || !loftsUp(above)) return null;
+      const r = nearestMorph(upMorphs, p, 'lb');
+      if (r) return loopAt(r.m.la, r.t + r.m.off);
+      return above2.points.length ? nearestPoint(above2, p) : null; // the level above that is a point / ridge
+    },
+    apex,
+    H: b.floors[i].height,
+    hBelow: i > 0 ? b.floors[i - 1].height : b.floors[i].height,
+    hAbove: i + 1 < b.floors.length ? b.floors[i + 1].height : b.floors[i].height,
+  };
 }
 
 const perp = (d: V2): V2 => ({ x: -d.y, y: d.x });

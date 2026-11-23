@@ -30,6 +30,7 @@ export interface PlanSegment {
   smooth?: number | null; // 0..1, null = plan default
   connect?: ConnectMode | null; // null = plan default
   connectSmooth?: number | null; // 0..1, null = plan default
+  smoothSpan?: boolean | null; // connection smoothness across all connected floors (true) or per pair of floors (false); null = plan default
   texture?: string | null; // texture id
   material?: string | null; // null = plan material
 }
@@ -75,6 +76,7 @@ export interface StructurePlan {
   smooth: number; // default plan smoothness 0..1
   connect: ConnectMode; // default connection to the plan above
   connectSmooth: number; // 0..1
+  smoothSpan: boolean; // connection smoothness flows across all connected floors (else only between this floor and the next)
   nextN: number;
   points: PlanPoint[];
   segments: PlanSegment[];
@@ -128,7 +130,7 @@ export const floorLabel = (_b: Building, i: number) => `${i}`;
 export function newPlan(name: string, floorIds: string[] = []): StructurePlan {
   return {
     id: uid(), name, floorIds, wallThickness: 0.3, floorThickness: 0.25, ceilingThickness: 0.15, floorEnabled: true,
-    smooth: 0, connect: 'straight', connectSmooth: 0,
+    smooth: 0, connect: 'straight', connectSmooth: 0, smoothSpan: true,
     nextN: 1, points: [], segments: [], material: 'concrete', objects: [],
   };
 }
@@ -190,7 +192,7 @@ export function normalize(p: Project): Project {
     }
     b.windows ??= {};
     for (const pl of [...b.plans, ...b.interiorPlans]) {
-      pl.smooth ??= 0; pl.connect ??= 'straight'; pl.connectSmooth ??= 0;
+      pl.smooth ??= 0; pl.connect ??= 'straight'; pl.connectSmooth ??= 0; pl.smoothSpan ??= false;
       pl.material ??= 'concrete'; pl.objects ??= [];
       pl.ceilingThickness ??= Math.min(0.15, pl.floorThickness);
       if (pl.floorEnabled === false && b.plans.includes(pl)) {
@@ -225,6 +227,7 @@ export const segKind = (s: PlanSegment): SegKind => s.kind ?? 'wall';
 export const segSmooth = (pl: StructurePlan, s: PlanSegment) => s.smooth ?? pl.smooth;
 export const segConnect = (pl: StructurePlan, s: PlanSegment): ConnectMode => s.connect ?? pl.connect;
 export const segConnectSmooth = (pl: StructurePlan, s: PlanSegment) => s.connectSmooth ?? pl.connectSmooth;
+export const segSmoothSpan = (pl: StructurePlan, s: PlanSegment) => s.smoothSpan ?? pl.smoothSpan;
 export const segColT = (pl: StructurePlan, s: PlanSegment) => s.columnThickness ?? pl.wallThickness;
 export const segMaterial = (pl: StructurePlan, s: PlanSegment) => s.material ?? pl.material;
 

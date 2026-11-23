@@ -7,7 +7,7 @@ import {
 import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
 import { WindowPlanner } from './windowplanner';
-import { V2, enclosedFaces, planValid } from './geometry';
+import { V2, enclosedFaces, planValid, signedArea } from './geometry';
 import { Selection, interiorForFloor, loftPointTarget, slotFits } from './build3d';
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
@@ -367,6 +367,7 @@ export class Editor {
         h('button', { onclick: () => this.editFloorIn('floorplan', sel[0].id) }, 'Edit floor plan'),
       ),
       h('div', { class: 'row' },
+        h('button', { title: 'Shape the selected floors into a dome, starting from the outline of the lowest one', onclick: () => this.makeDome(idx) }, 'Make dome'),
         one ? h('button', { onclick: () => this.splitFloor(one.id, 0.5) }, 'Split') : null,
         one && idx[0] !== p.ground ? h('button', { title: 'Floors below this one become underground', onclick: () => this.mutate(() => (p.ground = idx[0])) }, 'Make ground floor') : null,
         h('button', {
@@ -403,6 +404,47 @@ export class Editor {
     if (this.mode !== 'structure' || !pl || !below || below === pl || !pl.points.length) return [];
     const ends = new Set(below.segments.filter(sg => segConnect(below, sg) === 'loft' && segKind(sg) !== 'open').flatMap(sg => [sg.a, sg.b]));
     return below.points.filter(q => ends.has(q.id)).map(q => [q, loftPointTarget(below, pl, q)] as [V2, V2]);
+  }
+
+  /**
+   * Dome over the selected floors: each floor gets a copy of the lowest floor's outline,
+   * shrunk like a sphere (radius × √(1 − (h/H)²) at height h of total H), all connecting up
+   * with full smoothness. If the top floor is included, the Top level becomes the apex point.
+   */
+  makeDome(idx: number[]) {
+    const b = this.b;
+    const first = b.floors[idx[0]];
+    const base = planForFloor(b, first.id);
+    const faces = base ? enclosedFaces(base) : [];
+    if (!base || !faces.length) return toast('The lowest selected floor needs a closed outline (external walls around an area) to build a dome on');
+    const run = b.floors.slice(idx[0], idx[idx.length - 1] + 1);
+    const H = run.reduce((s2, f) => s2 + f.height, 0);
+    const poly = faces.reduce((a, f) => (Math.abs(signedArea(f)) > Math.abs(signedArea(a)) ? f : a));
+    const c = poly.reduce((acc, q) => ({ x: acc.x + q.x / poly.length, y: acc.y + q.y / poly.length }), { x: 0, y: 0 });
+    const top = idx[idx.length - 1] === b.floors.length - 1;
+    this.mutate(() => {
+      const ids = new Set(run.map(f => f.id));
+      b.plans.forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.has(id))));
+      let y = 0;
+      run.forEach((f, j) => {
+        const k = Math.sqrt(Math.max(0, 1 - (y / H) ** 2));
+        const pl: StructurePlan = JSON.parse(JSON.stringify(base));
+        pl.id = uid(); pl.name = `Dome ${j + 1}`; pl.floorIds = [f.id];
+        pl.connect = 'loft'; pl.connectSmooth = 1; pl.smoothSpan = true;
+        pl.segments.forEach(sg => { sg.connect = null; sg.connectSmooth = null; sg.smoothSpan = null; });
+        pl.points.forEach(q => { q.x = c.x + (q.x - c.x) * k; q.y = c.y + (q.y - c.y) * k; });
+        b.plans.push(pl);
+        y += f.height;
+      });
+      if (top) {
+        const apex = newPlan('Dome apex');
+        apex.points = [{ id: uid(), n: 1, x: c.x, y: c.y }];
+        apex.nextN = 2;
+        b.plans.push(apex);
+        b.topPlanId = apex.id;
+      }
+    });
+    toast(top ? `Dome over ${run.length} floor(s), closing at the top point` : `Dome over ${run.length} floor(s); it connects into the plan of the floor above`);
   }
 
   splitFloor(id: string, ratio: number) {
@@ -717,6 +759,7 @@ export class Editor {
           this.slider('Smoothness', pl.smooth, v => (pl.smooth = v)),
           interior ? null : this.connectField(pl.connect, v => (pl.connect = v!), false),
           interior ? null : this.slider('Connection smoothness', pl.connectSmooth, v => (pl.connectSmooth = v)),
+          interior ? null : this.spanField(pl.smoothSpan, v => (pl.smoothSpan = v ?? true), false),
           interior ? null : this.textureField('Texture for all walls', null, id => pl.segments.forEach(s => (s.texture = id))),
         ),
       );
@@ -835,6 +878,18 @@ export class Editor {
     s.value = val ?? '';
     return h('label', {}, 'Connection to floor above', s);
   }
+  /** Connection smoothness: within each pair of floors, or flowing across all connected floors. */
+  spanField(val: boolean | null | 'mixed', set: (v: boolean | null) => void, allowDefault: boolean) {
+    const sel = h('select', { onchange: () => this.mutate(() => set(sel.value === '' ? null : sel.value === 'span')) },
+      val === 'mixed' ? h('option', { value: 'mixed', disabled: true }, 'mixed') : null,
+      allowDefault ? h('option', { value: '' }, 'Plan default') : null,
+      h('option', { value: 'span' }, 'Across all connected floors (domes)'),
+      h('option', { value: 'pair' }, 'Between these 2 floors only'),
+    );
+    sel.value = val === 'mixed' ? 'mixed' : val === null ? '' : val ? 'span' : 'pair';
+    return h('label', { title: 'Across: the curve flows through the outlines of the floors below and above (one smooth surface over many floors). Between 2: each floor curves on its own.' }, 'Smoothness applies', sel);
+  }
+
   materialField(val: string | null | 'mixed', set: (v: string | null) => void, allowDefault: boolean) {
     const s = h('select', { onchange: () => this.mutate(() => set(s.value === '' ? null : s.value)) },
       val === 'mixed' ? h('option', { value: 'mixed', disabled: true }, 'mixed') : null,
@@ -973,6 +1028,7 @@ export class Editor {
       wrap.append(
         this.connectField(common(s => s.connect ?? null), v => segs.forEach(s => (s.connect = v)), true),
         this.slider(`Connection smoothness${cs === null ? ' (plan default)' : ''}`, cs === 'mixed' ? null : cs, v => segs.forEach(s => (s.connectSmooth = v)), () => segs.forEach(s => (s.connectSmooth = null))),
+        this.spanField(common(s => s.smoothSpan ?? null), v => segs.forEach(s => (s.smoothSpan = v)), true),
         this.textureField('Texture', common(s => s.texture ?? null), id => segs.forEach(s => (s.texture = id))),
       );
     }
