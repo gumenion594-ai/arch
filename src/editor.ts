@@ -105,6 +105,7 @@ export class Editor {
 
   /** Last design category (openings / niches / balconies) opened in the Design tab. */
   designKind: DesignMode = 'openings';
+  private preWalkMode: ViewMode | null = null;
   setMode(m: Mode) {
     this.mode = m;
     if (isDesign(m)) this.designKind = m;
@@ -118,7 +119,10 @@ export class Editor {
       this.viewer = new Viewer(this.center);
       this.viewer.onTexture = () => this.refresh();
       this.viewer.onPick = (hit, e) => onPick(this, hit, e);
-      this.viewer.onWalkChange = () => { this.renderHeader(); this.renderRight(); };
+      this.viewer.onWalkChange = walking => {
+        if (!walking && this.preWalkMode) { this.viewMode = this.preWalkMode; this.preWalkMode = null; this.refresh(); return; }
+        this.renderHeader(); this.renderRight();
+      };
     } else if (m === 'floorarea') {
       if (!this.b.floors.some(f => f.id === this.maskFloor)) this.maskFloor = [...this.selFloors][0] ?? this.b.floors[this.b.ground].id;
       setupFloorAreaMode(this);
@@ -216,7 +220,8 @@ export class Editor {
       onchange: () => {
         vm.blur(); // keys go to the view (walking), not the list
         if (vm.value === 'walk') {
-          if (this.viewMode === 'plan') this.viewMode = 'detailed';
+          this.preWalkMode = this.viewMode;
+          this.viewMode = 'detailed'; // first person always shows the detailed building
           this.refresh();
           this.viewer?.enterWalk();
           return;

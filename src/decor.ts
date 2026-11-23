@@ -3,7 +3,7 @@
 import type { Editor } from './editor';
 import {
   BalconyShape, DESIGN_CATEGORIES, Design, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
-  divisionBorders, floorLabel, planForFloor, segColT, segDivLen, segKind, uid,
+  divisionBorders, floorLabel, hasFloor, planForFloor, segColT, segDivLen, segKind, uid,
 } from './model';
 import { enclosedFaces, polyLength, sampleSeg } from './geometry';
 import { autoColumns, autoFloorAreas, columnRange, interiorForFloor } from './build3d';
@@ -651,7 +651,7 @@ export function setupFloorAreaMode(ed: Editor) {
     allowOverlap: true,
     getOutlines: () => {
       const { i, f } = maskOf(ed);
-      if (!f) return null;
+      if (!f || !hasFloor(f)) return null; // floor turned off: nothing is built, so nothing is shown
       if (!f.mask) return ed.maskSub === 'areas' ? autoAsPoints(ed, i) : [];
       return f.mask[ed.maskSub];
     },
@@ -698,7 +698,7 @@ export function renderFloorAreaPanel(ed: Editor) {
   const main = ed.shapeEds[0];
   const pt = main?.selectedPoint() ?? null;
   const floorSel = h('select', { onchange: () => { ed.maskFloor = floorSel.value; main?.reset(); ed.refresh(); } },
-    ...b.floors.map((fl, k) => h('option', { value: fl.id }, `Floor ${floorLabel(b, k)}${fl.mask ? ' (edited)' : ''}`)));
+    ...b.floors.map((fl, k) => h('option', { value: fl.id }, `Floor ${floorLabel(b, k)}${!hasFloor(fl) ? ' (no floor)' : fl.mask ? ' (edited)' : ''}`)));
   if (f) floorSel.value = f.id;
   const sub = (k: 'areas' | 'carves', label: string) => h('button', { class: ed.maskSub === k ? 'tab active' : 'tab', onclick: () => { ed.maskSub = k; main?.reset(); ed.refresh(); } }, label);
   const tool = (t: ShapeTool, label: string) => h('button', { class: main?.tool === t ? 'tab active' : 'tab', onclick: () => { if (main) { main.finish(); main.tool = t; ed.maskTool = t; } ed.refresh(); } }, label);
@@ -706,7 +706,11 @@ export function renderFloorAreaPanel(ed: Editor) {
   put(ed.right,
     h('div', { class: 'box-title' }, 'Floor areas'),
     h('label', {}, 'Floor', floorSel),
-    f ? h('div', { class: 'muted small' }, f.mask ? 'Edited by hand.' : 'Automatic: what the walls of this floor enclose (and areas of the floor below whose walls go straight up). Edit it to change it.') : null,
+    f && !hasFloor(f) ? h('div', { class: 'box' },
+      h('div', {}, 'This floor has no floor: its Floor switch is off, so no slab is built here.'),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => { ed.mutate(() => (f.hasFloor = true)); main?.reset(); } }, 'Turn the floor on'))) : null,
+    f && hasFloor(f) ? h('div', { class: 'muted small' }, f.mask ? 'Edited by hand.' : 'Automatic: what the walls of this floor enclose (and areas of the floor below whose walls go straight up). Edit it to change it.') : null,
+    ...(f && !hasFloor(f) ? [] : [
     h('div', { class: 'row' }, sub('areas', 'Floor area'), sub('carves', 'Carve')),
     h('div', { class: 'box-title' }, ed.maskSub === 'areas' ? 'Add floor by' : 'Carve by'),
     h('div', { class: 'row' }, tool('pick', 'Clicking a room'), tool('rect', 'Rectangle'), tool('points', 'Points')),
@@ -714,6 +718,7 @@ export function renderFloorAreaPanel(ed: Editor) {
       : main?.tool === 'rect' ? 'Drag a rectangle. Corners snap to walls.'
       : 'Click points (they snap to wall corners and wall lines; Shift keeps it straight, Alt turns snapping off). Click the first point or press Enter to close.'),
     h('div', { class: 'row' }, h('button', { onclick: () => main?.resetView() }, 'Reset zoom'), h('span', { class: 'muted small' }, 'Wheel zooms · right-drag pans')),
+    ]),
     pt ? h('div', { class: 'box' },
       h('div', { class: 'box-title' }, 'Selected point'),
       h('div', { class: 'row' },

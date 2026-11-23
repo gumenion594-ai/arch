@@ -182,7 +182,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const tex = o.detailed && fl.texture ? mats.tex(fl.texture) : null;
     const top = sel.floors.has(fl.id) ? mats.selected : tex ?? (fl.color ? mats.color(fl.color) : mats.slab);
     // the slab's edge is flush with the outside of the walls: give it the wall's look so the facade reads as one surface
-    const pl = planAtLevel(p, i), w = pl?.segments.find(sg => segKind(sg) === 'wall');
+    // (it reads as the top of the storey below, so it takes that storey's wall look — never the roof's)
+    const pl = (i > 0 ? planAtLevel(p, i - 1) : null) ?? planAtLevel(p, i), w = pl?.segments.find(sg => segKind(sg) === 'wall');
     const edge = sel.floors.has(fl.id) ? mats.selected : !pl || !w ? top
       : (o.detailed && w.texture ? mats.tex(w.texture) : null) ?? (w.color ? mats.color(w.color) : mats.wall(o.detailed ? segMaterial(pl, w) : 'structural'));
     const m = add(geo, top, { floorId: fl.id, floorIndex: i });
@@ -327,8 +328,10 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           if (fs !== 0 && !loft) wall.shift = -1; // sloped (connected) walls such as roofs stay centred: they overhang a little
           // no overlaps: an external wall stands on its floor's slab and stops under the roof (the next floor's slab starts where it ends)
           const toPlan = (v: THREE.Vector3): V2 => ({ x: (v.x - p.x) / L, y: (-v.z - p.y) / L });
-          const onSlab = !interior && slabs[i].floor > 0 && floorCovers(p, i, toPlan(wall.at(0.5, 0, 0)));
-          const underRoof = !interior && slabs[i].ceiling > 0 && inRegions(roofRegions(p, i), toPlan(wall.at(0.5, 1, 0)));
+          // (tested a little to each side of the wall's middle: a wall centred on the slab's edge still counts)
+          const sides = [0, 0.5, -0.5];
+          const onSlab = !interior && slabs[i].floor > 0 && sides.some(k => floorCovers(p, i, toPlan(wall.at(0.5, 0, k))));
+          const underRoof = !interior && slabs[i].ceiling > 0 && sides.some(k => inRegions(roofRegions(p, i), toPlan(wall.at(0.5, 1, k))));
           const yw0 = onSlab ? y0 + slabs[i].floor : y0, yw1 = underRoof ? y1 - slabs[i].ceiling : y1;
           // a door segment is just the lintel above a 2.1 m opening
           const yb = kind === 'door' ? yw0 + Math.min(2.1, (yw1 - yw0) * 0.8) : yw0;
@@ -396,7 +399,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             if (k < borders.length - 1 && sel.divisions.has(`${wallKey}|${k}`)) for (const side of [1.03, -1.03]) line(wall.rect(borders[k], borders[k + 1], side), mats.selLine);
             if (sel.borders.has(`${wallKey}|${k}`)) for (const side of [1.08, -1.08]) line(wall.vline(borders[k], side), mats.selLine);
           }
-          if (!interior) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id), yBase, yTop);
+          if (!interior) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id), yBase, yTop, yTop + (i + 1 < N ? slabs[i + 1].floor : 0));
         } else {
           // colonnade: columns on the division borders (+ free-standing ends)
           // columns: on the division borders, unless they have been moved / added / removed by hand
@@ -485,9 +488,13 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   return { group: g, stats };
 
   /** Cornices, pilasters and balconies on a wall. */
-  function decorate(wall: WallSolid, seg: PlanSegment, plan: StructurePlan, borders: number[], lenM: number, wallH: number, i: number, floor: Floor, list: Placement[], fy0: number, fy1: number) {
+  function decorate(wall: WallSolid, seg: PlanSegment, plan: StructurePlan, borders: number[], lenM: number, wallH: number, i: number, floor: Floor, list: Placement[], fy0: number, fy1: number, cy: number) {
     void wallH;
     const t = plan.wallThickness;
+    // pilasters stop under a cornice on this wall (or on a wall meeting it at a corner)
+    const near = new Set([seg.id, ...plan.segments.filter(o => o.a === seg.a || o.b === seg.a || o.a === seg.b || o.b === seg.b).map(o => o.id)]);
+    const hasCornice = p.placements.some(x => x.type === 'cornice' && x.floorId === floor.id && near.has(x.segId ?? ''));
+    const underCornice = (y: number) => (hasCornice ? Math.min(y, cy - CORNICE_H) : y);
     for (const pl of list) {
       const pick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, placementId: pl.id };
       const k = Math.min(Math.max(0, pl.div ?? 0), borders.length - (pl.type === 'pilaster' ? 1 : 2));
@@ -517,9 +524,9 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const reach = (wall.shift ? 0 : t / 2) / lenM;
         const ua = k === 0 ? u0 - reach : u0, ub = k === borders.length - 2 ? u1 + reach : u1;
         const m0 = k === 0 ? mitre(seg.a, 0) : 0, m1 = k === borders.length - 2 ? mitre(seg.b, 1) : 0;
-        const fr2 = { ...fr, face: fr.face.clone().setY(fy1) };
+        const fr2 = { ...fr, face: fr.face.clone().setY(cy) }; // the cornice crowns the storey, the slab above included
         if (designAt(pl.designId, fr2.face.clone().addScaledVector(fr.out, CORNICE[1][0] / 2).addScaledVector(fr.up, -0.16), fr.along, fr.up, fr.out, (ub - ua) * lenM, 0.32, 0.32, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) continue;
-        add(sweepProfile(wall, ua, ub, CORNICE, fy1, m0, m1), mat, pick);
+        add(sweepProfile(wall, ua, ub, CORNICE, cy, m0, m1), mat, pick);
       } else if (pl.type === 'pilaster') {
         const pw = 0.5, pd = 0.12;
         let s0 = borders[k] * lenM + pl.dx;
@@ -540,7 +547,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           add(geo, mat, pick);
         };
         void box;
-        pilPieces.push({ base, out: new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize(), along: fr.along.clone(), y0: fy0, y1: fy1, pw, pd, pl, mat, pick, floor: i }); // outside the face: the full storey, slab edge included
+        pilPieces.push({ base, out: new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize(), along: fr.along.clone(), y0: fy0, y1: underCornice(fy1), pw, pd, pl, mat, pick, floor: i }); // outside the face: the full storey, slab edge included
       } else if (pl.type === 'balcony') {
         const shape = p.balconyShapes.find(x => x.id === pl.shapeId) ?? p.balconyShapes[0];
         if (!shape) continue;
@@ -613,6 +620,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 }
 
 /** Plain cornice profile (metres): x = out from the wall face, y = down from the top. */
+const CORNICE_H = 0.32;
 const CORNICE: [number, number][] = [[0, 0], [0.34, 0], [0.34, 0.06], [0.26, 0.1], [0.2, 0.16], [0.1, 0.2], [0.1, 0.27], [0, 0.32]];
 /** Platform top of a balcony as a fraction of the floor height (lower than the middle). */
 export const BALCONY_HEIGHT = BALCONY_AT;
