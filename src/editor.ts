@@ -1,26 +1,40 @@
-// Project editor: header, floor panel, 3D view / structure planner and their panels.
-import { buildingDialog } from './dialogs';
+// Building project editor: floors panel, 3D view, structure / floor / window planners.
 import {
-  Building, ConnectMode, createBuilding, elevation, floorLabel, History, MAX_M, PlanSegment, Project, SegKind, StructurePlan, clamp, floorBase, formatRanges,
-  newPlan, parseRanges, planForFloor, saveProject, segKind, totalHeight, uid,
+  Building, ConnectMode, History, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan, WindowShape,
+  clamp, elevation, floorBase, floorLabel, formatRanges, newInteriorPlan, newPlan, parseRanges, planForFloor, saveProject,
+  segKind, totalHeight, uid, windowKey,
 } from './model';
-import { Viewer, ViewMode } from './viewer';
-import { Planner, fmt } from './planner';
-import { planValid } from './geometry';
-import { app, h, num, toast } from './ui';
+import { Hit, Viewer, ViewMode } from './viewer';
+import { Planner, Tool, fmt } from './planner';
+import { WindowPlanner } from './windowplanner';
+import { V2, enclosedFaces, planValid } from './geometry';
+import { Selection, interiorForFloor } from './build3d';
+import { calculate, Report } from './stats';
+import { app, h, num, put, toast } from './ui';
 
-type Mode = 'view' | 'structure';
+type Mode = 'view' | 'structure' | 'floorplan' | 'window';
+type PickMode = 'division' | 'wall' | 'floor';
 const PLAN_COLORS = ['#4a90d9', '#d97a4a', '#5cb85c', '#b05cd9', '#d9c84a', '#4ad9c8', '#d94a7a', '#8a8a8a'];
+
+const pref = (k: string, d: string) => { try { return localStorage.getItem('arch.pref.' + k) ?? d; } catch { return d; } };
+const setPref = (k: string, v: string) => { try { localStorage.setItem('arch.pref.' + k, v); } catch { /* ignore */ } };
 
 export class Editor {
   p: Project;
   hist = new History();
   mode: Mode = 'view';
   viewMode: ViewMode = 'structural';
+  showArea = pref('showArea', '1') === '1';
+  // selection shared by the floor bar and the 3D view
   selFloors = new Set<string>();
-  private anchor: string | null = null; // for shift-click range selection
-  activePlan: string | null;
-  activeB: string;
+  selWalls = new Set<string>(); // floorId|segId
+  selDivs = new Set<string>(); // floorId|segId|k
+  pickMode: PickMode = 'wall';
+  private anchor: string | null = null;
+  activePlan: Record<'structure' | 'floorplan', string | null> = { structure: null, floorplan: null };
+  activeShape: string | null = null;
+  carveShape: string | null = null;
+  report: Report | null = null;
   root = h('div', { class: 'editor' });
   left = h('div', { class: 'left panel' });
   center = h('div', { class: 'center' });
@@ -28,11 +42,14 @@ export class Editor {
   header = h('div', { class: 'header' });
   viewer: Viewer | null = null;
   planner: Planner | null = null;
+  wplanner: WindowPlanner | null = null;
 
   constructor(p: Project, private onBack: () => void) {
     this.p = p;
-    this.activeB = p.buildings[0].id;
-    this.activePlan = this.b.plans[0]?.id ?? null;
+    this.activePlan.structure = this.b.plans[0]?.id ?? null;
+    this.activePlan.floorplan = this.b.interiorPlans[0]?.id ?? null;
+    this.activeShape = this.b.windowShapes[0]?.id ?? null;
+    this.carveShape = this.activeShape;
     this.root.append(this.header, this.left, this.center, this.right);
     app.innerHTML = '';
     app.append(this.root);
@@ -42,45 +59,66 @@ export class Editor {
 
   destroy() {
     window.removeEventListener('keydown', this.onKey);
-    this.viewer?.dispose(); this.planner?.dispose();
+    this.viewer?.dispose(); this.planner?.dispose(); this.wplanner?.dispose();
   }
+
+  /** The building (a building project has exactly one). */
+  get b(): Building { return this.p.buildings[0]; }
 
   // ---- change management ----
   begin() { this.hist.push(this.p); }
-  commit() { saveProject(this.p); this.refresh(); }
+  commit() { this.report = null; saveProject(this.p); this.refresh(); }
   mutate(fn: () => void) { this.begin(); fn(); this.commit(); }
   undo() {
     const prev = this.hist.pop();
     if (!prev) return toast('Nothing to undo');
     this.p = prev;
-    if (!this.p.buildings.some(x => x.id === this.activeB)) this.activeB = this.p.buildings[0].id;
-    for (const id of [...this.selFloors]) if (!this.b.floors.some(f => f.id === id)) this.selFloors.delete(id);
-    if (!this.b.plans.some(pl => pl.id === this.activePlan)) this.activePlan = this.b.plans[0]?.id ?? null;
+    const fids = new Set(this.b.floors.map(f => f.id));
+    for (const id of [...this.selFloors]) if (!fids.has(id)) this.selFloors.delete(id);
+    if (!this.b.plans.some(pl => pl.id === this.activePlan.structure)) this.activePlan.structure = this.b.plans[0]?.id ?? null;
+    if (!this.b.interiorPlans.some(pl => pl.id === this.activePlan.floorplan)) this.activePlan.floorplan = this.b.interiorPlans[0]?.id ?? null;
+    if (!this.b.windowShapes.some(s => s.id === this.activeShape)) this.activeShape = this.b.windowShapes[0]?.id ?? null;
     saveProject(this.p);
+    this.report = null;
     this.planner?.prune();
     this.refresh();
   }
 
+  get selection(): Selection { return { floors: this.selFloors, walls: this.selWalls, divisions: this.selDivs }; }
+
   refresh() {
     this.renderHeader();
     this.renderLeft();
-    if (this.mode === 'structure') { this.renderRight(); this.planner?.draw(); }
-    else this.viewer?.update(this.p, this.b.id, this.viewMode, this.selFloors);
+    this.renderRight();
+    if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea });
+    this.planner?.draw();
+    this.wplanner?.draw();
   }
 
   setMode(m: Mode) {
     this.mode = m;
     this.viewer?.dispose(); this.viewer = null;
     this.planner?.dispose(); this.planner = null;
+    this.wplanner?.dispose(); this.wplanner = null;
     this.center.innerHTML = '';
-    this.root.classList.toggle('with-right', m === 'structure');
+    this.root.classList.add('with-right');
     if (m === 'view') {
       this.viewer = new Viewer(this.center);
       this.viewer.onTexture = () => this.refresh();
+      this.viewer.onPick = (hit, e) => this.onPick(hit, e);
+    } else if (m === 'window') {
+      this.wplanner = new WindowPlanner(this.center, {
+        getShape: () => this.shape(),
+        begin: () => this.begin(),
+        commit: () => this.commit(),
+        toast,
+        floorHeight: () => this.b.floors[this.b.ground]?.height ?? 3,
+      });
     } else {
       this.planner = new Planner(this.center, {
         getPlan: () => this.plan(),
         getGhost: () => this.ghostPlan(),
+        allowed: () => (this.mode === 'floorplan' ? this.allowedArea() : null),
         baseLength: () => this.b.baseLength,
         begin: () => this.begin(),
         commit: () => this.commit(),
@@ -91,34 +129,30 @@ export class Editor {
     this.refresh();
   }
 
-  /** The building being edited. */
-  get b(): Building { return this.p.buildings.find(x => x.id === this.activeB) ?? this.p.buildings[0]; }
+  plans(): StructurePlan[] { return this.mode === 'floorplan' ? this.b.interiorPlans : this.b.plans; }
+  plan(): StructurePlan | null {
+    const key = this.mode === 'floorplan' ? 'floorplan' : 'structure';
+    return this.plans().find(pl => pl.id === this.activePlan[key]) ?? null;
+  }
+  setActivePlan(id: string | null) { this.activePlan[this.mode === 'floorplan' ? 'floorplan' : 'structure'] = id; }
+  shape(): WindowShape | null { return this.b.windowShapes.find(s => s.id === this.activeShape) ?? null; }
 
-  switchBuilding(id: string) {
-    this.activeB = id;
-    this.selFloors.clear();
-    this.activePlan = this.b.plans[0]?.id ?? null;
-    if (this.planner) { this.planner.head = null; this.planner.selPoints.clear(); this.planner.selSegs.clear(); }
-    this.refresh();
+  /** Floor planner: external-wall plan of the first floor this floor plan is used on. */
+  private refStructure(): StructurePlan | null {
+    const pl = this.plan();
+    const fid = pl ? this.b.floors.find(f => pl.floorIds.includes(f.id))?.id : undefined;
+    return fid ? planForFloor(this.b, fid) ?? null : null;
+  }
+  private allowedArea(): V2[][] | null {
+    const ref = this.refStructure();
+    return ref ? enclosedFaces(ref) : [];
   }
 
-  addBuilding() {
-    buildingDialog({
-      title: 'New building', nameLabel: 'Building name', defaultName: `Building ${this.p.buildings.length + 1}`, project: this.p,
-      onCreate: spec => {
-        const nb = createBuilding(spec);
-        this.mutate(() => this.p.buildings.push(nb));
-        this.switchBuilding(nb.id);
-      },
-    });
-  }
-
-  plan(): StructurePlan | null { return this.b.plans.find(pl => pl.id === this.activePlan) ?? null; }
-
-  /** The plan just below where the active plan starts (Top level -> top floor's plan). */
+  /** Reference outline drawn faintly: the plan below (structure) or the external walls (floor plan). */
   ghostPlan(): StructurePlan | null {
     const pl = this.plan();
     if (!pl) return null;
+    if (this.mode === 'floorplan') return this.refStructure();
     const idx = this.b.floors.findIndex(f => pl.floorIds.includes(f.id));
     if (idx > 0) return planForFloor(this.b, this.b.floors[idx - 1].id) ?? null;
     if (idx < 0 && this.b.topPlanId === pl.id) return planForFloor(this.b, this.b.floors[this.b.floors.length - 1].id) ?? null;
@@ -127,25 +161,36 @@ export class Editor {
 
   planColor(pl: StructurePlan | null | undefined) {
     if (!pl) return 'transparent';
-    return PLAN_COLORS[this.b.plans.indexOf(pl) % PLAN_COLORS.length];
+    const list = this.b.plans.includes(pl) ? this.b.plans : this.b.interiorPlans;
+    return PLAN_COLORS[list.indexOf(pl) % PLAN_COLORS.length];
   }
 
   private onKey = (e: KeyboardEvent) => {
     const tgt = e.target as HTMLElement;
     const typing = tgt.tagName === 'INPUT' || tgt.tagName === 'SELECT' || tgt.tagName === 'TEXTAREA';
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) { e.preventDefault(); this.undo(); return; }
-    if (typing || !this.planner) return;
+    if (typing) return;
+    if (this.wplanner && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); this.wplanner.deleteSelected(); return; }
+    if (this.mode === 'view' && e.key === 'Escape') { this.clearSel(); return; }
+    if (!this.planner) return;
     if (e.key === 'Escape') this.planner.endChain();
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); this.planner.deleteSelection(); }
-    if (e.key === 'd') { this.planner.tool = 'draw'; this.refresh(); }
-    if (e.key === 's') { this.planner.tool = 'select'; this.planner.endChain(); this.refresh(); }
+    if (e.key === 'd') this.setTool('draw');
+    if (e.key === 's') this.setTool('select');
+    if (e.key === 'm') this.setTool('move');
   };
+  setTool(t: Tool) {
+    if (!this.planner) return;
+    this.planner.tool = t;
+    if (t !== 'draw') this.planner.head = null;
+    this.refresh();
+  }
 
   // ---- header ----
   renderHeader() {
     const nameIn = h('input', {
       class: 'title-input', value: this.p.name,
-      onchange: () => { const v = nameIn.value.trim(); if (v && v !== this.p.name) this.mutate(() => { this.p.name = v; }); else nameIn.value = this.p.name; },
+      onchange: () => { const v = nameIn.value.trim(); if (v && v !== this.p.name) this.mutate(() => { this.p.name = v; this.b.name = v; }); else nameIn.value = this.p.name; },
     });
     const tab = (m: Mode, label: string) => h('button', { class: this.mode === m ? 'tab active' : 'tab', onclick: () => this.setMode(m) }, label);
     const vm = h('select', { onchange: () => { this.viewMode = vm.value as ViewMode; this.refresh(); } },
@@ -154,33 +199,17 @@ export class Editor {
       h('option', { value: 'detailed' }, 'Detailed view'),
     );
     vm.value = this.viewMode;
+    const area = h('input', { type: 'checkbox', checked: this.showArea, onchange: () => { this.showArea = area.checked; setPref('showArea', area.checked ? '1' : '0'); this.refresh(); } });
     this.header.innerHTML = '';
-    this.header.append(
+    put(this.header, 
       h('button', { onclick: () => this.onBack() }, '← Projects'),
       nameIn,
-      this.buildingSwitcher(),
-      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure planner')),
-      this.mode === 'view' ? vm : h('span'),
+      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure planner'), tab('floorplan', 'Floor planner'), tab('window', 'Window planner')),
+      this.mode === 'view' ? vm : null,
+      this.mode === 'view' ? h('label', { class: 'chk', title: 'Show the building-area outline and floor lines' }, area, 'Area lines') : null,
       h('div', { class: 'spacer' }),
       h('button', { onclick: () => toast('Importing 3D models is planned — not implemented yet') }, 'Import 3D model'),
       h('button', { title: 'Ctrl+Z', onclick: () => this.undo() }, 'Undo'),
-    );
-  }
-
-  private buildingSwitcher() {
-    const sel = h('select', { title: 'Building', onchange: () => (sel.value === '__new' ? (sel.value = this.b.id, this.addBuilding()) : this.switchBuilding(sel.value)) },
-      ...this.p.buildings.map(x => h('option', { value: x.id }, x.name)),
-      h('option', { value: '__new' }, '+ New building…'),
-    );
-    sel.value = this.b.id;
-    const b = this.b;
-    return h('div', { class: 'bswitch' },
-      sel,
-      h('button', { title: 'Rename building', onclick: () => { const n = prompt('Rename building', b.name); if (n?.trim()) this.mutate(() => (b.name = n.trim())); } }, '✎'),
-      h('button', {
-        class: 'danger', title: 'Delete building', disabled: this.p.buildings.length <= 1,
-        onclick: () => { if (confirm(`Delete ${b.name}?`)) { this.mutate(() => (this.p.buildings = this.p.buildings.filter(x => x !== b))); this.switchBuilding(this.p.buildings[0].id); } },
-      }, '🗑'),
     );
   }
 
@@ -197,14 +226,13 @@ export class Editor {
       this.selFloors = this.selFloors.size === 1 && this.selFloors.has(id) ? new Set() : new Set([id]);
       this.anchor = id;
     }
+    this.selWalls.clear(); this.selDivs.clear();
     this.refresh();
   }
 
   renderLeft() {
     const p = this.b, H = totalHeight(p);
     const bar = h('div', { class: 'floorbar' });
-
-    // floor bar: floors stacked bottom-up, sized by height, coloured stripe = plan
     const top = p.plans.find(pl => pl.id === p.topPlanId);
     bar.append(h('div', { class: 'ftop', title: 'Top level (roof)', style: `border-left-color:${this.planColor(top)}` }, `Top · ${top?.name ?? 'no plan'}`));
     p.floors.forEach((f, i) => {
@@ -220,7 +248,6 @@ export class Editor {
           this.splitFloor(f.id, clamp((r.bottom - e.clientY) / r.height, 0.05, 0.95));
         },
       }, h('span', {}, `${floorLabel(p, i)} · ${fmt(f.height)} m`));
-      // drag handle on the top edge changes only this floor's height
       const handle = h('div', { class: 'fhandle', title: 'Drag to change this floor height' });
       handle.addEventListener('mousedown', e => {
         e.stopPropagation(); e.preventDefault();
@@ -239,7 +266,6 @@ export class Editor {
       seg.append(handle);
       bar.append(seg);
     });
-    // "+" at every boundary: insert a floor there (bottom edge, between floors, top edge)
     for (let k = 0; k <= p.floors.length; k++) {
       bar.append(h('button', {
         class: 'fins', style: `bottom:${(floorBase(p, k) / H) * 100}%`,
@@ -247,17 +273,14 @@ export class Editor {
         onclick: (e: Event) => { e.stopPropagation(); this.insertFloor(k); },
       }, '+'));
     }
-    // ground line
     bar.append(h('div', { class: 'gline', style: `bottom:${(floorBase(p, p.ground) / H) * 100}%` }, h('span', {}, 'ground')));
 
     const eqIn = h('input', { type: 'number', step: 0.1, value: fmt(H) });
     this.left.innerHTML = '';
-    this.left.append(
-      h('div', { class: 'box-title' }, `Floors · ${p.name}`),
+    put(this.left, 
+      h('div', { class: 'box-title' }, 'Floors'),
       h('div', { class: 'muted small' }, `${p.floors.length} floors (${p.ground} underground) · ${fmt(H)} m · base ${fmt(p.baseLength)} m (${fmt(p.baseLength ** 2)} m²)`),
-      h('div', { class: 'row' },
-        h('button', { onclick: () => this.insertFloor(p.floors.length) }, '+ Top floor'),
-      ),
+      h('div', { class: 'row' }, h('button', { onclick: () => this.insertFloor(p.floors.length) }, '+ Top floor')),
       h('div', { class: 'row eq' },
         h('label', {}, 'Total height (m)', eqIn),
         h('button', {
@@ -272,11 +295,9 @@ export class Editor {
       h('div', { class: 'floorbar-wrap' }, bar),
       this.floorSelectionBox(),
     );
-    // hide labels of floors too thin to read
     bar.querySelectorAll<HTMLElement>('.fseg').forEach(el => { if (el.clientHeight < 14) el.querySelector('span')?.remove(); });
   }
 
-  /** Insert a new floor at boundary k (0 = bottom, n = top). Copies the height and plan of a neighbour. */
   insertFloor(k: number) {
     const p = this.b;
     const ref = p.floors[Math.min(k, p.floors.length - 1)] ?? p.floors[k - 1];
@@ -286,7 +307,8 @@ export class Editor {
       const nf = { id: uid(), height: below.height };
       p.floors.splice(k, 0, nf);
       planForFloor(p, below.id)?.floorIds.push(nf.id);
-      if (k <= p.ground && k < p.floors.length - 1) p.ground++; // inserting at or below ground shifts it up
+      interiorForFloor(p, below.id)?.floorIds.push(nf.id);
+      if (k <= p.ground && k < p.floors.length - 1) p.ground++;
       this.selFloors = new Set([nf.id]);
     });
   }
@@ -307,23 +329,29 @@ export class Editor {
         this.mutate(() => sel.forEach(f => (f.height = v)));
       },
     });
-    // plan for the selected floors
-    const plans = new Set(sel.map(f => planForFloor(p, f.id)?.id ?? ''));
-    const planSel = h('select', {
-      onchange: () => this.mutate(() => {
-        const ids = sel.map(f => f.id);
-        p.plans.forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.includes(id))));
-        p.plans.find(pl => pl.id === planSel.value)?.floorIds.push(...ids);
-      }),
-    }, ...(plans.size > 1 ? [h('option', { value: '__mixed', disabled: true }, 'mixed')] : []),
-      h('option', { value: '' }, '— none —'), ...p.plans.map(pl => h('option', { value: pl.id }, pl.name)));
-    planSel.value = plans.size > 1 ? '__mixed' : [...plans][0];
-
+    const planPicker = (list: StructurePlan[], label: string) => {
+      const cur = new Set(sel.map(f => list.find(pl => pl.floorIds.includes(f.id))?.id ?? ''));
+      const s = h('select', {
+        onchange: () => this.mutate(() => {
+          const ids = sel.map(f => f.id);
+          list.forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.includes(id))));
+          list.find(pl => pl.id === s.value)?.floorIds.push(...ids);
+        }),
+      }, ...(cur.size > 1 ? [h('option', { value: '__mixed', disabled: true }, 'mixed')] : []),
+        h('option', { value: '' }, '— none —'), ...list.map(pl => h('option', { value: pl.id }, pl.name)));
+      s.value = cur.size > 1 ? '__mixed' : [...cur][0];
+      return h('label', {}, label, s);
+    };
     return h('div', { class: 'box' },
       h('div', { class: 'box-title' }, one ? `Floor ${floorLabel(p, idx[0])}` : `${sel.length} floors: ${formatRanges(p, idx)}`),
       h('label', {}, one ? 'Height (m)' : 'Height of each (m)', hin),
-      h('label', {}, 'Structure plan', planSel),
+      planPicker(p.plans, 'Structure plan'),
+      planPicker(p.interiorPlans, 'Floor plan'),
       one ? h('div', { class: 'muted small' }, `Starts at ${fmt(elevation(p, idx[0]))} m`) : null,
+      h('div', { class: 'row' },
+        h('button', { onclick: () => this.editFloorIn('structure', sel[0].id) }, 'Edit structure'),
+        h('button', { onclick: () => this.editFloorIn('floorplan', sel[0].id) }, 'Edit floor plan'),
+      ),
       h('div', { class: 'row' },
         one ? h('button', { onclick: () => this.splitFloor(one.id, 0.5) }, 'Split') : null,
         one && idx[0] !== p.ground ? h('button', { title: 'Floors below this one become underground', onclick: () => this.mutate(() => (p.ground = idx[0])) }, 'Make ground floor') : null,
@@ -334,8 +362,7 @@ export class Editor {
             const groundId = p.floors[p.ground].id;
             const removedBelow = idx.filter(i => i < p.ground).length;
             p.floors = p.floors.filter(f => !ids.includes(f.id));
-            p.plans.forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.includes(id))));
-            // keep the ground floor where it was (or the floor that took its place)
+            [...p.plans, ...p.interiorPlans].forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.includes(id))));
             const gi = p.floors.findIndex(f => f.id === groundId);
             p.ground = gi >= 0 ? gi : clamp(p.ground - removedBelow, 0, p.floors.length - 1);
             this.selFloors.clear();
@@ -354,24 +381,195 @@ export class Editor {
       f.height = lower;
       this.b.floors.splice(i + 1, 0, nf);
       planForFloor(this.b, f.id)?.floorIds.push(nf.id);
+      interiorForFloor(this.b, f.id)?.floorIds.push(nf.id);
       this.selFloors = new Set([nf.id]);
     });
   }
 
-  // ---- structure planner panel ----
+  /**
+   * Jump to the structure / floor planner for a floor: opens the plan used by that floor
+   * (creating a floor plan for it if it has none) and selects the given wall.
+   */
+  editFloorIn(mode: 'structure' | 'floorplan', floorId: string, segId?: string) {
+    const b = this.b;
+    let pl = mode === 'structure' ? planForFloor(b, floorId) : interiorForFloor(b, floorId);
+    if (!pl) {
+      this.begin();
+      pl = mode === 'structure' ? newPlan(`Plan ${b.plans.length + 1}`, [floorId]) : newInteriorPlan(`Floor plan ${b.interiorPlans.length + 1}`);
+      if (mode === 'floorplan') pl.floorIds = [floorId];
+      (mode === 'structure' ? b.plans : b.interiorPlans).push(pl);
+      saveProject(this.p);
+    }
+    this.activePlan[mode] = pl.id;
+    this.selFloors = new Set([floorId]);
+    this.setMode(mode);
+    if (segId && this.planner) {
+      this.planner.tool = 'select';
+      this.planner.selSegs = new Set([segId]);
+    }
+    this.refresh();
+  }
+
+  // ---- right panel ----
   renderRight() {
-    if (this.mode !== 'structure' || !this.planner) return;
-    const p = this.b, pl = this.plan(), pn = this.planner;
+    if (this.mode === 'view') return this.renderViewPanel();
+    if (this.mode === 'window') return this.renderWindowPanel();
+    this.renderPlanPanel();
+  }
+
+  // ---- 3D view: selection, actions, calculation ----
+  private onPick(hit: Hit | null, e: MouseEvent) {
+    if (!hit) { if (!e.shiftKey) this.clearSel(); return; }
+    const add = e.shiftKey || e.ctrlKey || e.metaKey;
+    const toggle = (set: Set<string>, key: string) => {
+      if (!add) { this.selFloors.clear(); this.selWalls.clear(); this.selDivs.clear(); set.add(key); return; }
+      set.has(key) ? set.delete(key) : set.add(key);
+    };
+    if (this.pickMode === 'floor' || !hit.segId || hit.interior) toggle(this.selFloors, hit.floorId);
+    else if (this.pickMode === 'wall' || !hit.uvOf) toggle(this.selWalls, `${hit.floorId}|${hit.segId}`);
+    else {
+      const d = hit.divisions ?? 1;
+      const k = Math.min(d - 1, Math.floor(hit.uvOf(hit.point).u * d));
+      toggle(this.selDivs, `${hit.floorId}|${hit.segId}|${k}`);
+    }
+    this.refresh();
+  }
+  clearSel() { this.selFloors.clear(); this.selWalls.clear(); this.selDivs.clear(); this.refresh(); }
+
+  /** Window slots (floorId|segId|k) covered by the 3D selection. */
+  private selectedSlots(): string[] {
+    const b = this.b, out: string[] = [];
+    const segSlots = (floorId: string, seg: PlanSegment) => {
+      if (segKind(seg) !== 'wall') return;
+      for (let k = 0; k < Math.max(1, seg.divisions ?? 1); k++) out.push(windowKey(floorId, seg.id, k));
+    };
+    for (const fid of this.selFloors) planForFloor(b, fid)?.segments.forEach(s => segSlots(fid, s));
+    for (const key of this.selWalls) {
+      const [fid, sid] = key.split('|');
+      const seg = planForFloor(b, fid)?.segments.find(s => s.id === sid);
+      if (seg) segSlots(fid, seg);
+    }
+    out.push(...this.selDivs);
+    return [...new Set(out)];
+  }
+
+  private renderViewPanel() {
+    const b = this.b;
+    const nSel = this.selFloors.size + this.selWalls.size + this.selDivs.size;
+    const pm = (m: PickMode, label: string) => h('button', { class: this.pickMode === m ? 'tab active' : 'tab', onclick: () => { this.pickMode = m; this.refresh(); } }, label);
+    const first = [...this.selWalls, ...this.selDivs][0]?.split('|') ?? (this.selFloors.size ? [[...this.selFloors][0]] : null);
+    const shapeSel = h('select', { onchange: () => (this.carveShape = shapeSel.value) },
+      ...b.windowShapes.map(s => h('option', { value: s.id }, s.name)));
+    if (!b.windowShapes.some(s => s.id === this.carveShape)) this.carveShape = b.windowShapes[0]?.id ?? null;
+    if (this.carveShape) shapeSel.value = this.carveShape;
+    const slots = nSel ? this.selectedSlots() : [];
+
+    this.right.innerHTML = '';
+    put(this.right, 
+      h('div', { class: 'box-title' }, 'Select in 3D'),
+      h('div', { class: 'row' }, pm('division', 'Division'), pm('wall', 'Wall'), pm('floor', 'Floor')),
+      h('div', { class: 'muted small' }, 'Click a wall in the 3D view (Shift = add). Selection is yellow. Esc clears. Floors can also be picked in the floor bar.'),
+      nSel ? h('div', { class: 'box' },
+        h('div', { class: 'box-title' }, `Selected: ${[this.selFloors.size && `${this.selFloors.size} floor(s)`, this.selWalls.size && `${this.selWalls.size} wall(s)`, this.selDivs.size && `${this.selDivs.size} division(s)`].filter(Boolean).join(', ')}`),
+        first ? h('div', { class: 'row' },
+          h('button', { onclick: () => this.editFloorIn('structure', first[0], first[1]) }, 'Edit in structure planner'),
+          h('button', { onclick: () => this.editFloorIn('floorplan', first[0]) }, 'Edit floor plan'),
+        ) : null,
+        h('div', { class: 'box-title' }, 'Windows'),
+        b.windowShapes.length ? h('label', {}, 'Window shape', shapeSel) : h('div', { class: 'muted small' }, 'Draw a window shape in the Window planner first.'),
+        h('div', { class: 'row' },
+          h('button', {
+            class: 'primary', disabled: !this.carveShape || !slots.length,
+            onclick: () => this.mutate(() => slots.forEach(k => (b.windows[k] = this.carveShape!))),
+          }, `Carve windows (${slots.length})`),
+          h('button', { disabled: !slots.length, onclick: () => this.mutate(() => slots.forEach(k => delete b.windows[k])) }, 'Remove windows'),
+        ),
+        h('div', { class: 'muted small' }, 'One window per wall division. Give a wall more divisions (structure planner) for more windows.'),
+        h('button', { onclick: () => this.clearSel() }, 'Clear selection'),
+      ) : null,
+      this.reportBox(),
+    );
+  }
+
+  private reportBox() {
+    const r = this.report;
+    const t = (rows: (string | number)[][]) => h('table', { class: 'stats' }, ...rows.map(cells => h('tr', {}, ...cells.map((c, i) => h(i ? 'td' : 'th', {}, String(c))))));
+    const kg = (v: number) => (v >= 1000 ? `${fmt(v / 1000)} t` : `${fmt(v)} kg`);
+    return h('div', { class: 'box' },
+      h('div', { class: 'row' }, h('div', { class: 'box-title', style: 'margin:0;flex:1' }, 'Quantities'),
+        h('button', { class: 'primary', onclick: () => { this.report = calculate(this.b, this.p.textures); this.refresh(); } }, 'Calculate')),
+      r ? h('div', {},
+        t([
+          ['Building height', `${fmt(r.height)} m above ground`],
+          ['Below ground', `${fmt(r.depth)} m`],
+          ['Total floor area', `${fmt(r.floorArea)} m² (${r.floors} floors)`],
+          ['Window openings', `${r.windowCount} · ${fmt(r.windowArea)} m²`],
+        ]),
+        h('div', { class: 'box-title' }, 'Walls & columns'),
+        t([['', 'Volume', 'Weight'],
+          ['External walls', `${fmt(r.ext.volume)} m³`, kg(r.ext.weight)],
+          ['Internal walls', `${fmt(r.int.volume)} m³`, kg(r.int.weight)],
+          ['Walls total', `${fmt(r.ext.volume + r.int.volume)} m³`, kg(r.ext.weight + r.int.weight)],
+          ['Columns', `${fmt(r.col.volume)} m³`, kg(r.col.weight)],
+        ]),
+        h('div', { class: 'box-title' }, 'By material'),
+        t(Object.entries(r.byMaterial).map(([m, v]) => [MATERIALS[m]?.name ?? m, `${fmt(v.volume)} m³`, kg(v.weight)])),
+        h('div', { class: 'muted small' }, 'Window openings are subtracted from wall volume. Slabs are not included.'),
+      ) : h('div', { class: 'muted small' }, 'Press Calculate for height, floor area, wall and column volumes and weights.'),
+    );
+  }
+
+  // ---- window planner panel ----
+  private renderWindowPanel() {
+    const b = this.b, sh = this.shape(), wp = this.wplanner;
+    const used = (id: string) => Object.values(b.windows).filter(x => x === id).length;
+    this.right.innerHTML = '';
+    put(this.right, 
+      h('div', { class: 'box-title' }, 'Window shapes'),
+      h('div', { class: 'plans' }, ...b.windowShapes.map(s => h('div', {
+        class: 'plan-row' + (s.id === this.activeShape ? ' active' : ''),
+        onclick: () => { this.activeShape = s.id; if (wp) wp.sel = null; this.refresh(); },
+      }, s.name, h('span', { class: 'muted small' }, ` ${s.points.length} pts · used ${used(s.id)}×`)))),
+      h('div', { class: 'row' },
+        h('button', { onclick: () => this.mutate(() => { const s = { id: uid(), name: `Window ${b.windowShapes.length + 1}`, points: [] }; b.windowShapes.push(s); this.activeShape = s.id; }) }, 'New'),
+        h('button', { disabled: !sh, onclick: () => sh && this.mutate(() => { const c = { ...JSON.parse(JSON.stringify(sh)), id: uid(), name: `${sh.name} copy` }; b.windowShapes.push(c); this.activeShape = c.id; }) }, 'Duplicate'),
+        h('button', { disabled: !sh, onclick: () => { const n = sh && prompt('Rename window shape', sh.name); if (sh && n?.trim()) this.mutate(() => (sh.name = n.trim())); } }, 'Rename'),
+        h('button', {
+          class: 'danger', disabled: !sh,
+          onclick: () => {
+            if (sh && confirm(`Delete ${sh.name}? Windows using it are removed.`)) this.mutate(() => {
+              b.windowShapes = b.windowShapes.filter(x => x !== sh);
+              for (const [k, v] of Object.entries(b.windows)) if (v === sh.id) delete b.windows[k];
+              this.activeShape = b.windowShapes[0]?.id ?? null;
+            });
+          },
+        }, 'Delete'),
+      ),
+      sh ? h('div', { class: 'row' },
+        h('button', { disabled: wp?.sel == null, onclick: () => wp?.deleteSelected() }, 'Delete point'),
+        h('button', { onclick: () => wp?.clear() }, 'Clear outline'),
+      ) : null,
+      h('div', { class: 'muted small help' },
+        'Click to add points; the outline closes back to the first point. Drag points to move them, double-click an edge to add a point there. Points snap to a 0.05 grid (hold Alt for free placement). ',
+        'x runs across one wall division, y up the floor: put points at y = 0 for a door. ',
+        'Then select walls, divisions or floors in the 3D view and press Carve windows.'),
+    );
+  }
+
+  // ---- structure / floor planner panel ----
+  private renderPlanPanel() {
+    if (!this.planner) return;
+    const p = this.b, pl = this.plan(), pn = this.planner, interior = this.mode === 'floorplan';
+    const list = this.plans();
     const floorIdx = (x: StructurePlan) => p.floors.map((f, i) => (x.floorIds.includes(f.id) ? i : -1)).filter(i => i >= 0);
-    const plans = h('div', { class: 'plans' }, ...p.plans.map(x => h('div', {
-      class: 'plan-row' + (x.id === this.activePlan ? ' active' : ''),
+    const plansEl = h('div', { class: 'plans' }, ...list.map(x => h('div', {
+      class: 'plan-row' + (x.id === pl?.id ? ' active' : ''),
       style: `border-left-color:${this.planColor(x)}`,
-      onclick: () => { this.activePlan = x.id; pn.head = null; pn.selPoints.clear(); pn.selSegs.clear(); this.refresh(); },
+      onclick: () => { this.setActivePlan(x.id); pn.head = null; pn.selPoints.clear(); pn.selSegs.clear(); pn.selObj = null; this.refresh(); },
     }, x.name, h('span', { class: 'muted small' }, ` ${formatRanges(p, floorIdx(x)) || 'no floors'}${p.topPlanId === x.id ? ' + Top' : ''}`))));
 
     const body: (Node | null)[] = [];
     if (pl) {
-      // floor assignment: range text, All / None / Selected floors, Top level
       const ranges = h('input', {
         value: formatRanges(p, floorIdx(pl)), placeholder: 'e.g. B2-G, 1-20, 25',
         onchange: () => {
@@ -381,22 +579,24 @@ export class Editor {
         },
       });
       const topCb = h('input', { type: 'checkbox', checked: p.topPlanId === pl.id, onchange: () => this.mutate(() => (p.topPlanId = topCb.checked ? pl.id : null)) });
-
-      const toolBtn = (t: 'draw' | 'select', label: string) => h('button', {
-        class: pn.tool === t ? 'tab active' : 'tab',
-        onclick: () => { pn.tool = t; if (t === 'select') pn.head = null; this.refresh(); },
-      }, label);
+      const toolBtn = (t: Tool, label: string) => h('button', { class: pn.tool === t ? 'tab active' : 'tab', onclick: () => this.setTool(t) }, label);
+      const help: Record<Tool, string> = {
+        draw: 'Click to add points; each new point connects to the previous one. Click an existing point to connect to it (closing a loop) and continue from there. Esc starts a new, unconnected chain.'
+          + (interior ? ' Internal walls must stay inside the external walls (orange dashed).' : ' The orange dashed outline is the plan of the floor below.'),
+        select: 'Click points or walls to select (Shift = add). Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
+        move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
+        stairs: 'Click inside the building to place a staircase. Select it to change size and rotation.',
+        elevator: 'Click inside the building to place an elevator shaft.',
+      };
+      if (interior && !this.refStructure()) body.push(h('div', { class: 'warn' }, 'Assign this floor plan to floors that have external walls (a structure plan) first; internal walls can only go inside them.'));
       body.push(
         h('div', { class: 'box-title' }, 'Tool'),
-        h('div', { class: 'row' }, toolBtn('draw', 'Draw (D)'), toolBtn('select', 'Select (S)'),
+        h('div', { class: 'row' }, toolBtn('draw', 'Draw (D)'), toolBtn('select', 'Select (S)'), toolBtn('move', 'Move all (M)'),
+          interior ? toolBtn('stairs', 'Stairs') : null, interior ? toolBtn('elevator', 'Elevator') : null,
           pn.tool === 'draw' ? h('button', { onclick: () => pn.endChain() }, 'End chain (Esc)') : null),
-        this.selectionBox(pl),
-        h('div', { class: 'muted small help' },
-          pn.tool === 'draw'
-            ? 'Click to add points; each new point connects to the previous one. Click an existing point to connect to it (closing a loop) and continue from there. Esc starts a new, unconnected chain. The orange dashed outline is the plan of the floor below.'
-            : 'Click points or walls to select (Shift = add). Drag points to move. Double-click a wall to insert a point. Delete removes the selection.'),
-      );
-      body.push(
+        this.selectionBox(pl, interior),
+        h('div', { class: 'muted small help' }, help[pn.tool]),
+        pn.tool === 'move' ? this.transformBox() : null,
         h('div', { class: 'box-title' }, 'Applies to floors'),
         ranges,
         h('div', { class: 'row' },
@@ -404,31 +604,37 @@ export class Editor {
           h('button', { onclick: () => this.assign(pl, []) }, 'None'),
           h('button', { disabled: !this.selFloors.size, title: 'Floors selected in the floor bar', onclick: () => this.assign(pl, [...pl.floorIds, ...this.selFloors]) }, '+ Selected floors'),
         ),
-        h('label', { class: 'chk', title: 'The shape at the very top of the building. The top floor can connect up to it (e.g. a single point = pyramid roof). It has no walls of its own.' }, topCb, 'Top level (roof)'),
-        h('details', { open: !pn.selPoints.size && !pn.selSegs.size }, h('summary', {}, 'Plan defaults'),
-          this.numField('External wall thickness (m)', pl.wallThickness, v => (pl.wallThickness = v!), p.baseLength / 2),
-          this.numField('Floor thickness (m)', pl.floorThickness, v => (pl.floorThickness = v!), MAX_M),
-          this.checkField('Build floor slab', pl.floorEnabled, v => (pl.floorEnabled = v)),
+        interior ? null : h('label', { class: 'chk', title: 'The shape at the very top of the building. The top floor can connect up to it (e.g. a single point = pyramid roof). It has no walls of its own.' }, topCb, 'Top level (roof)'),
+        h('details', { open: !pn.selPoints.size && !pn.selSegs.size && !pn.selObj }, h('summary', {}, 'Plan defaults'),
+          this.numField(interior ? 'Internal wall thickness (m)' : 'External wall thickness (m)', pl.wallThickness, v => (pl.wallThickness = v!), p.baseLength / 2),
+          this.materialField(pl.material, v => (pl.material = v!), false),
+          interior ? null : this.numField('Floor thickness (m)', pl.floorThickness, v => (pl.floorThickness = v!), MAX_M),
+          interior ? null : this.checkField('Build floor slab', pl.floorEnabled, v => (pl.floorEnabled = v)),
           this.slider('Smoothness', pl.smooth, v => (pl.smooth = v)),
-          this.connectField(pl.connect, v => (pl.connect = v!), false),
-          this.slider('Connection smoothness', pl.connectSmooth, v => (pl.connectSmooth = v)),
-          this.textureField('Texture for all walls', null, id => pl.segments.forEach(s => (s.texture = id))),
+          interior ? null : this.connectField(pl.connect, v => (pl.connect = v!), false),
+          interior ? null : this.slider('Connection smoothness', pl.connectSmooth, v => (pl.connectSmooth = v)),
+          interior ? null : this.textureField('Texture for all walls', null, id => pl.segments.forEach(s => (s.texture = id))),
         ),
       );
     }
 
     this.right.innerHTML = '';
-    this.right.append(
-      h('div', { class: 'box-title' }, 'Structure plans'),
-      plans,
+    put(this.right, 
+      h('div', { class: 'box-title' }, interior ? 'Floor plans (internal walls)' : 'Structure plans (external walls)'),
+      plansEl,
       h('div', { class: 'row' },
-        h('button', { onclick: () => this.mutate(() => { const np = newPlan(`Plan ${p.plans.length + 1}`); p.plans.push(np); this.activePlan = np.id; }) }, 'New'),
+        h('button', {
+          onclick: () => this.mutate(() => {
+            const np = interior ? newInteriorPlan(`Floor plan ${list.length + 1}`) : newPlan(`Plan ${list.length + 1}`);
+            list.push(np); this.setActivePlan(np.id);
+          }),
+        }, 'New'),
         h('button', {
           disabled: !pl, title: 'Copy this plan (walls and settings), assigned to no floors',
           onclick: () => pl && this.mutate(() => {
             const c: StructurePlan = JSON.parse(JSON.stringify(pl));
             c.id = uid(); c.name = `${pl.name} copy`; c.floorIds = [];
-            p.plans.push(c); this.activePlan = c.id;
+            list.push(c); this.setActivePlan(c.id);
           }),
         }, 'Duplicate'),
         h('button', { disabled: !pl, onclick: () => { const n = pl && prompt('Rename plan', pl.name); if (pl && n?.trim()) this.mutate(() => (pl.name = n.trim())); } }, 'Rename'),
@@ -436,9 +642,9 @@ export class Editor {
           class: 'danger', disabled: !pl,
           onclick: () => {
             if (pl && confirm(`Delete ${pl.name}?`)) this.mutate(() => {
-              p.plans = p.plans.filter(x => x !== pl);
+              list.splice(list.indexOf(pl), 1);
               if (p.topPlanId === pl.id) p.topPlanId = null;
-              this.activePlan = p.plans[0]?.id ?? null;
+              this.setActivePlan(list[0]?.id ?? null);
             });
           },
         }, 'Delete'),
@@ -447,11 +653,43 @@ export class Editor {
     );
   }
 
-  /** Assign floors to a plan (taking them away from any other plan). */
+  /** Move by an exact distance or scale everything about the centre of the drawing. */
+  private transformBox() {
+    const pl = this.plan(), pn = this.planner!, L = this.b.baseLength;
+    if (!pl) return null;
+    const dx = h('input', { type: 'number', step: 0.1, value: 0 }), dy = h('input', { type: 'number', step: 0.1, value: 0 });
+    const sc = h('input', { type: 'number', step: 1, value: 100 });
+    const pts = [...pl.points, ...pl.objects];
+    const cx = pts.length ? (Math.min(...pts.map(q => q.x)) + Math.max(...pts.map(q => q.x))) / 2 : 0.5;
+    const cy = pts.length ? (Math.min(...pts.map(q => q.y)) + Math.max(...pts.map(q => q.y))) / 2 : 0.5;
+    return h('div', { class: 'box' },
+      h('div', { class: 'box-title' }, 'Move / resize everything'),
+      h('div', { class: 'row' }, h('label', {}, 'Move x (m)', dx), h('label', {}, 'Move y (m)', dy)),
+      h('button', {
+        onclick: () => {
+          const ox = num(dx.value) / L, oy = num(dy.value) / L;
+          if (!isFinite(ox) || !isFinite(oy)) return;
+          if (!pn.transformAll(q => ({ x: q.x + ox, y: q.y + oy }))) toast('That would move something outside the allowed area');
+        },
+      }, 'Move'),
+      h('label', {}, 'Resize (%) around the centre of the drawing', sc),
+      h('button', {
+        onclick: () => {
+          const k = num(sc.value) / 100;
+          if (!(k > 0)) return toast('Use a percentage above 0');
+          if (!pn.transformAll(q => ({ x: cx + (q.x - cx) * k, y: cy + (q.y - cy) * k }), () => pl.objects.forEach(o => { o.w *= k; o.d *= k; }))) {
+            toast('That would put something outside the allowed area');
+          }
+        },
+      }, 'Resize'),
+    );
+  }
+
   assign(pl: StructurePlan, ids: string[]) {
+    const list = this.plans();
     this.mutate(() => {
       const set = new Set(ids);
-      this.b.plans.forEach(o => (o.floorIds = o.floorIds.filter(id => !set.has(id))));
+      list.forEach(o => (o.floorIds = o.floorIds.filter(id => !set.has(id))));
       pl.floorIds = this.b.floors.map(f => f.id).filter(id => set.has(id));
     });
   }
@@ -473,7 +711,6 @@ export class Editor {
     const cb = h('input', { type: 'checkbox', checked: val, onchange: () => this.mutate(() => set(cb.checked)) });
     return h('label', { class: 'chk' }, cb, label);
   }
-  /** 0..100% slider. val null = "default" (only when a reset callback is given). */
   slider(label: string, val: number | null, set: (v: number) => void, reset?: () => void) {
     const out = h('span', {}, val === null ? 'default' : `${Math.round(val * 100)}%`);
     const r = h('input', {
@@ -493,6 +730,15 @@ export class Editor {
     );
     s.value = val ?? '';
     return h('label', {}, 'Connection to floor above', s);
+  }
+  materialField(val: string | null | 'mixed', set: (v: string | null) => void, allowDefault: boolean) {
+    const s = h('select', { onchange: () => this.mutate(() => set(s.value === '' ? null : s.value)) },
+      val === 'mixed' ? h('option', { value: 'mixed', disabled: true }, 'mixed') : null,
+      allowDefault ? h('option', { value: '' }, 'Plan default') : null,
+      ...Object.entries(MATERIALS).map(([k, m]) => h('option', { value: k }, `${m.name} (${m.density} kg/m³)`)),
+    );
+    s.value = val ?? '';
+    return h('label', {}, 'Material', s);
   }
   textureField(label: string, current: string | null | 'mixed', set: (id: string | null) => void) {
     const file = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
@@ -520,9 +766,11 @@ export class Editor {
     );
   }
 
-  selectionBox(pl: StructurePlan): HTMLElement | null {
+  selectionBox(pl: StructurePlan, interior: boolean): HTMLElement | null {
     const pn = this.planner!, L = this.b.baseLength;
     const nP = pn.selPoints.size, nS = pn.selSegs.size;
+    const ob = pl.objects.find(o => o.id === pn.selObj);
+    if (ob) return this.objectBox(ob);
     if (!nP && !nS) return null;
     const box = h('div', { class: 'box' }, h('div', { class: 'box-title' }, `Selected: ${nP} point(s), ${nS} wall(s)`));
     if (nP === 1 && !nS) {
@@ -543,13 +791,32 @@ export class Editor {
       box.append(h('div', { class: 'muted small' }, `Point #${pt.n} · ${fmt(pt.x * L)} m, ${fmt(pt.y * L)} m`), h('div', { class: 'row' }, coord('x'), coord('y')));
     }
     const segs = pl.segments.filter(s => pn.selSegs.has(s.id));
-    if (segs.length) box.append(this.segmentProps(pl, segs));
+    if (segs.length) box.append(this.segmentProps(pl, segs, interior));
     box.append(h('button', { class: 'danger', onclick: () => pn.deleteSelection() }, nP ? 'Delete selected' : 'Delete wall(s)'));
     return box;
   }
 
+  private objectBox(ob: PlanObject) {
+    const f = (label: string, get: () => number, set: (v: number) => void, min: number, max: number) => {
+      const inp = h('input', {
+        type: 'number', step: 0.1, value: fmt(get()),
+        onchange: () => { const v = num(inp.value); if (!(v >= min && v <= max)) { toast(`${label}: ${min} to ${max}`); return this.refresh(); } this.mutate(() => set(v)); },
+      });
+      return h('label', {}, label, inp);
+    };
+    return h('div', { class: 'box' },
+      h('div', { class: 'box-title' }, ob.type === 'stairs' ? 'Staircase' : 'Elevator'),
+      h('div', { class: 'row' }, f('Width (m)', () => ob.w, v => (ob.w = v), 0.3, 50), f('Length (m)', () => ob.d, v => (ob.d = v), 0.3, 50)),
+      f('Rotation (°)', () => ob.rot, v => (ob.rot = v), -360, 360),
+      h('div', { class: 'row' },
+        h('button', { onclick: () => this.mutate(() => (ob.rot = (ob.rot + 90) % 360)) }, 'Rotate 90°'),
+        h('button', { class: 'danger', onclick: () => this.planner!.deleteSelection() }, 'Delete'),
+      ),
+    );
+  }
+
   /** Properties of one or more selected walls. */
-  segmentProps(pl: StructurePlan, segs: PlanSegment[]): HTMLElement {
+  segmentProps(pl: StructurePlan, segs: PlanSegment[], interior: boolean): HTMLElement {
     const L = this.b.baseLength, pn = this.planner!;
     const common = <T>(get: (s: PlanSegment) => T): T | 'mixed' => {
       const v = get(segs[0]);
@@ -565,7 +832,7 @@ export class Editor {
         onchange: () => {
           const v = num(inp.value);
           if (!(v > 0)) { toast('Length must be > 0'); return this.refresh(); }
-          const k = v / len; // keep A, move B along the wall direction
+          const k = v / len;
           const nb = { x: A.x + (B.x - A.x) * k, y: A.y + (B.y - A.y) * k };
           if (nb.x < -1e-9 || nb.x > 1 + 1e-9 || nb.y < -1e-9 || nb.y > 1 + 1e-9) { toast('That length would leave the building area'); return this.refresh(); }
           if (!validMove(pl, B.id, nb)) { toast('That length would make walls cross'); return this.refresh(); }
@@ -580,27 +847,31 @@ export class Editor {
     const setAll = (fn: (s: PlanSegment) => void) => this.mutate(() => segs.forEach(fn));
     const kind = common(segKind);
     const kindBtn = (k: SegKind, label: string) => h('button', { class: kind === k ? 'tab active' : 'tab', onclick: () => setAll(s => (s.kind = k)) }, label);
-    wrap.append(h('div', { class: 'box-title' }, 'Type'), h('div', { class: 'row' }, kindBtn('wall', 'Wall'), kindBtn('colonnade', 'Colonnade'), kindBtn('open', 'Open')));
-    if (kind === 'colonnade') {
+    wrap.append(h('div', { class: 'box-title' }, 'Type'), h('div', { class: 'row' },
+      kindBtn('wall', 'Wall'), interior ? kindBtn('door', 'Door') : null, kindBtn('colonnade', 'Colonnade'), kindBtn('open', 'Open')));
+    if (kind === 'wall' || kind === 'colonnade') {
       const div = common(s => s.divisions ?? 1);
       const dIn = h('input', {
         type: 'number', min: 1, step: 1, value: div === 'mixed' ? '' : div, placeholder: 'mixed',
         onchange: () => { const v = Math.round(num(dIn.value)); if (!(v >= 1 && v <= 500)) { toast('Divisions: 1 to 500'); return this.refresh(); } setAll(s => (s.divisions = v)); },
       });
+      wrap.append(h('label', {}, kind === 'colonnade' ? 'Divisions (columns sit between them)' : 'Divisions (one window slot each)', dIn));
+    }
+    if (kind === 'colonnade') {
       const ct = common(s => s.columnThickness ?? null);
+      wrap.append(this.numField('Column thickness (m), empty = wall thickness', ct === 'mixed' ? null : ct, v => segs.forEach(s => (s.columnThickness = v)), L / 2, true));
+    }
+    wrap.append(this.materialField(common(s => s.material ?? null), v => segs.forEach(s => (s.material = v)), true));
+    const sm = common(s => s.smooth ?? null);
+    wrap.append(this.slider(`Smoothness${sm === null ? ' (plan default)' : ''}`, sm === 'mixed' ? null : sm, v => segs.forEach(s => (s.smooth = v)), () => segs.forEach(s => (s.smooth = null))));
+    if (!interior) {
+      const cs = common(s => s.connectSmooth ?? null);
       wrap.append(
-        h('label', {}, 'Divisions (columns sit between them)', dIn),
-        this.numField('Column thickness (m), empty = wall thickness', ct === 'mixed' ? null : ct, v => segs.forEach(s => (s.columnThickness = v)), L / 2, true),
+        this.connectField(common(s => s.connect ?? null), v => segs.forEach(s => (s.connect = v)), true),
+        this.slider(`Connection smoothness${cs === null ? ' (plan default)' : ''}`, cs === 'mixed' ? null : cs, v => segs.forEach(s => (s.connectSmooth = v)), () => segs.forEach(s => (s.connectSmooth = null))),
+        this.textureField('Texture', common(s => s.texture ?? null), id => segs.forEach(s => (s.texture = id))),
       );
     }
-    const sm = common(s => s.smooth ?? null);
-    const cs = common(s => s.connectSmooth ?? null);
-    wrap.append(
-      this.slider(`Smoothness${sm === null ? ' (plan default)' : ''}`, sm === 'mixed' ? null : sm, v => segs.forEach(s => (s.smooth = v)), () => segs.forEach(s => (s.smooth = null))),
-      this.connectField(common(s => s.connect ?? null), v => segs.forEach(s => (s.connect = v)), true),
-      this.slider(`Connection smoothness${cs === null ? ' (plan default)' : ''}`, cs === 'mixed' ? null : cs, v => segs.forEach(s => (s.connectSmooth = v)), () => segs.forEach(s => (s.connectSmooth = null))),
-      this.textureField('Texture', common(s => s.texture ?? null), id => segs.forEach(s => (s.texture = id))),
-    );
     return wrap;
   }
 }

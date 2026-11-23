@@ -1,12 +1,14 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
-import { PlanPoint, PlanSegment, StructurePlan, clamp, segColT, segKind, uid } from './model';
-import { V2, distToSeg, enclosedFaces, planValid, polyAt, polyParams, sampleSeg } from './geometry';
+import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, segColT, segKind, uid } from './model';
+import { V2, distToSeg, enclosedFaces, planValid, pointInPoly, polyAt, polyParams, sampleSeg } from './geometry';
 
-export type Tool = 'draw' | 'select';
+export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator';
 
 export interface PlannerHost {
   getPlan(): StructurePlan | null;
-  getGhost(): StructurePlan | null; // plan below, drawn faintly for reference
+  getGhost(): StructurePlan | null; // plan below (or external walls), drawn faintly for reference
+  /** Floor planner: areas enclosed by the external walls; points and walls must stay inside. null = anywhere. */
+  allowed?(): V2[][] | null;
   baseLength(): number;
   begin(): void; // snapshot for undo, before a change
   commit(): void; // persist + refresh UI after a change
@@ -23,6 +25,9 @@ export class Planner {
   head: string | null = null; // last point of the chain being drawn
   selPoints = new Set<string>();
   selSegs = new Set<string>();
+  selObj: string | null = null;
+  private objDrag: { id: string; dx: number; dy: number; began: boolean } | null = null;
+  private moveAll: { x: number; y: number; began: boolean; orig: Map<string, V2> } | null = null;
   private hover: V2 | null = null;
   private drag: { id: string; moved: boolean; began: boolean } | null = null;
   private ro: ResizeObserver;
@@ -34,6 +39,7 @@ export class Planner {
     this.canvas.addEventListener('mousedown', e => this.down(e));
     this.canvas.addEventListener('dblclick', e => this.dbl(e));
     window.addEventListener('mousemove', this.move);
+    this.canvas.addEventListener('mouseenter', () => (this.canvas.style.cursor = this.tool === 'move' ? 'move' : 'crosshair'));
     window.addEventListener('mouseup', this.up);
     this.canvas.addEventListener('mouseleave', () => { this.hover = null; this.draw(); });
   }
@@ -88,9 +94,68 @@ export class Planner {
     for (const id of [...this.selPoints]) if (!pids.has(id)) this.selPoints.delete(id);
     for (const id of [...this.selSegs]) if (!sids.has(id)) this.selSegs.delete(id);
     if (this.head && !pids.has(this.head)) this.head = null;
+    if (this.selObj && !plan?.objects.some(o => o.id === this.selObj)) this.selObj = null;
   }
 
-  clearSelection() { this.selPoints.clear(); this.selSegs.clear(); this.h.selectionChanged(); this.draw(); }
+  clearSelection() { this.selPoints.clear(); this.selSegs.clear(); this.selObj = null; this.h.selectionChanged(); this.draw(); }
+
+  // ---- constraints (floor planner: stay inside the external walls) ----
+  private okPoint(p: V2): boolean {
+    if (!this.inside(p)) return false;
+    const faces = this.h.allowed?.();
+    return !faces || faces.some(f => pointInPoly(p, f));
+  }
+  private okSeg(a: V2, b: V2): boolean {
+    const faces = this.h.allowed?.();
+    if (!faces) return true;
+    return faces.some(f => {
+      for (let k = 1; k < 10; k++) if (!pointInPoly({ x: a.x + ((b.x - a.x) * k) / 10, y: a.y + ((b.y - a.y) * k) / 10 }, f)) return false;
+      return true;
+    });
+  }
+  private okPointWithWalls(plan: StructurePlan, id: string, np: V2): boolean {
+    if (!this.okPoint(np)) return false;
+    for (const sg of plan.segments) {
+      if (sg.a !== id && sg.b !== id) continue;
+      const other = plan.points.find(q => q.id === (sg.a === id ? sg.b : sg.a))!;
+      if (!this.okSeg(np, other)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Move / scale everything at once. fn maps a point to its new position.
+   * Rejected (returns false) if anything would leave the allowed area.
+   */
+  transformAll(fn: (p: V2) => V2, extra?: () => void): boolean {
+    const plan = this.h.getPlan();
+    if (!plan) return false;
+    const pts = plan.points.map(p => fn(p)), objs = plan.objects.map(o => fn(o));
+    if (![...pts, ...objs].every(p => p.x >= -1e-9 && p.x <= 1 + 1e-9 && p.y >= -1e-9 && p.y <= 1 + 1e-9)) return false;
+    if (this.h.allowed?.() && !pts.every(p => this.okPoint(p))) return false;
+    this.h.begin();
+    plan.points.forEach((p, i) => { p.x = clamp(pts[i].x, 0, 1); p.y = clamp(pts[i].y, 0, 1); });
+    plan.objects.forEach((o, i) => { o.x = objs[i].x; o.y = objs[i].y; });
+    extra?.();
+    this.h.commit();
+    this.draw();
+    return true;
+  }
+
+  // ---- stairs / elevators ----
+  private objCorners(o: PlanObject): V2[] {
+    const L = this.h.baseLength(), r = (o.rot * Math.PI) / 180;
+    const hw = o.w / 2 / L, hd = o.d / 2 / L;
+    // rotation in plan space: world rotY(rot) maps local (x, z) -> plan (x, -z)
+    return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map(([x, z]) => ({
+      x: o.x + x * Math.cos(r) + z * Math.sin(r),
+      y: o.y - (-x * Math.sin(r) + z * Math.cos(r)),
+    }));
+  }
+  private hitObj(plan: StructurePlan, p: V2): PlanObject | null {
+    for (let k = plan.objects.length - 1; k >= 0; k--) if (pointInPoly(p, this.objCorners(plan.objects[k]))) return plan.objects[k];
+    return null;
+  }
   endChain() { this.head = null; this.draw(); }
 
   // ---- mouse ----
@@ -104,6 +169,7 @@ export class Planner {
       if (pt) {
         if (this.head && this.head !== pt.id && !plan.segments.some(s => (s.a === this.head && s.b === pt.id) || (s.b === this.head && s.a === pt.id))) {
           if (!planValid(plan, undefined, [[this.head, pt.id]])) return this.h.toast('That wall would cross an existing wall');
+          if (!this.okSeg(plan.points.find(q => q.id === this.head)!, pt)) return this.h.toast('Internal walls must stay inside the external walls');
           this.h.begin();
           plan.segments.push({ id: uid(), a: this.head, b: pt.id });
           this.h.commit();
@@ -113,6 +179,8 @@ export class Planner {
         return;
       }
       if (!this.inside(p)) return this.h.toast('Points must be inside the building area');
+      if (!this.okPoint(p)) return this.h.toast('Internal walls can only be drawn inside areas enclosed by external walls');
+      if (this.head && !this.okSeg(plan.points.find(q => q.id === this.head)!, p)) return this.h.toast('Internal walls must stay inside the external walls');
       const np: PlanPoint = { id: uid(), n: plan.nextN, x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
       const test: StructurePlan = { ...plan, points: [...plan.points, np] };
       if (!planValid(test, undefined, this.head ? [[this.head, np.id]] : [])) return this.h.toast('That wall would cross an existing wall');
@@ -126,8 +194,29 @@ export class Planner {
       return;
     }
 
+    if (this.tool === 'move') {
+      this.moveAll = { x: p.x, y: p.y, began: false, orig: new Map([...plan.points, ...plan.objects].map(q => [q.id, { x: q.x, y: q.y }])) };
+      return;
+    }
+    if (this.tool === 'stairs' || this.tool === 'elevator') {
+      if (!this.okPoint(p)) return this.h.toast('Place it inside the building (inside the external walls)');
+      this.h.begin();
+      const o: PlanObject = this.tool === 'stairs'
+        ? { id: uid(), type: 'stairs', x: p.x, y: p.y, w: 1.2, d: 3.6, rot: 0 }
+        : { id: uid(), type: 'elevator', x: p.x, y: p.y, w: 2, d: 2, rot: 0 };
+      plan.objects.push(o);
+      this.selPoints.clear(); this.selSegs.clear(); this.selObj = o.id;
+      this.h.commit(); this.h.selectionChanged(); this.draw();
+      return;
+    }
+
     // select tool
-    if (pt) {
+    const ob = !pt ? this.hitObj(plan, p) : null;
+    this.selObj = null;
+    if (ob) {
+      this.selPoints.clear(); this.selSegs.clear(); this.selObj = ob.id;
+      this.objDrag = { id: ob.id, dx: ob.x - p.x, dy: ob.y - p.y, began: false };
+    } else if (pt) {
       if (e.shiftKey) {
         this.selPoints.has(pt.id) ? this.selPoints.delete(pt.id) : this.selPoints.add(pt.id);
       } else if (!this.selPoints.has(pt.id)) {
@@ -150,11 +239,33 @@ export class Planner {
     if (!plan) return;
     const p = this.toPlan(e);
     if (e.target === this.canvas) this.hover = p;
+    if (this.moveAll) {
+      const m = this.moveAll;
+      let dx = p.x - m.x, dy = p.y - m.y;
+      // keep everything inside the square
+      const all = [...m.orig.values()];
+      dx = clamp(dx, -Math.min(...all.map(q => q.x)), 1 - Math.max(...all.map(q => q.x)));
+      dy = clamp(dy, -Math.min(...all.map(q => q.y)), 1 - Math.max(...all.map(q => q.y)));
+      if (!m.began) { this.h.begin(); m.began = true; }
+      for (const q of [...plan.points, ...plan.objects]) { const o = m.orig.get(q.id); if (o) { q.x = o.x + dx; q.y = o.y + dy; } }
+      this.draw();
+      return;
+    }
+    if (this.objDrag) {
+      const o = plan.objects.find(x => x.id === this.objDrag!.id);
+      const np = { x: p.x + this.objDrag.dx, y: p.y + this.objDrag.dy };
+      if (o && this.okPoint(np)) {
+        if (!this.objDrag.began) { this.h.begin(); this.objDrag.began = true; }
+        o.x = np.x; o.y = np.y;
+        this.draw();
+      }
+      return;
+    }
     if (this.drag) {
       const pt = plan.points.find(x => x.id === this.drag!.id);
       if (!pt) return;
       const np = { x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
-      if (planValid(plan, new Map([[pt.id, np]]))) {
+      if (planValid(plan, new Map([[pt.id, np]])) && this.okPointWithWalls(plan, pt.id, np)) {
         if (!this.drag.began) { this.h.begin(); this.drag.began = true; }
         pt.x = np.x; pt.y = np.y;
         this.drag.moved = true;
@@ -165,8 +276,8 @@ export class Planner {
   };
 
   private up = () => {
-    if (this.drag?.moved) this.h.commit();
-    this.drag = null;
+    if (this.drag?.moved || this.objDrag?.began || this.moveAll?.began) this.h.commit();
+    this.drag = null; this.objDrag = null; this.moveAll = null;
   };
 
   private dbl(e: MouseEvent) {
@@ -211,8 +322,10 @@ export class Planner {
 
   deleteSelection() {
     const plan = this.h.getPlan();
-    if (!plan || (!this.selPoints.size && !this.selSegs.size)) return;
+    if (!plan || (!this.selPoints.size && !this.selSegs.size && !this.selObj)) return;
     this.h.begin();
+    plan.objects = plan.objects.filter(o => o.id !== this.selObj);
+    this.selObj = null;
     plan.points = plan.points.filter(p => !this.selPoints.has(p.id));
     plan.segments = plan.segments.filter(s => !this.selSegs.has(s.id) && !this.selPoints.has(s.a) && !this.selPoints.has(s.b));
     this.selPoints.clear(); this.selSegs.clear();
@@ -284,9 +397,9 @@ export class Planner {
         g.strokeStyle = sel ? 'rgba(255,212,0,0.35)' : 'rgba(255,255,255,0.15)'; g.lineWidth = tpx;
         path(sp); g.stroke();
       }
-      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : '#f0f0f0';
+      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : '#f0f0f0';
       g.lineWidth = sel ? 2.5 : 1.5;
-      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : []);
+      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : kind === 'door' ? [8, 4] : []);
       path(sp); g.stroke();
       g.setLineDash([]);
       if (kind === 'colonnade') {
@@ -298,6 +411,16 @@ export class Planner {
           const q = this.toScreen(polyAt(sp, pp, k / d));
           g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx);
         }
+      } else if (kind === 'wall' && (s.divisions ?? 1) > 1) {
+        // division ticks across the wall
+        const d = s.divisions!, pp = polyParams(sp);
+        g.strokeStyle = sel ? '#ffd400' : '#f0f0f0'; g.lineWidth = 1.5;
+        for (let k = 1; k < d; k++) {
+          const a = polyAt(sp, pp, (k - 0.01) / d), c = polyAt(sp, pp, (k + 0.01) / d), q = this.toScreen(polyAt(sp, pp, k / d));
+          const A = this.toScreen(a), C = this.toScreen(c);
+          const nx = -(C.y - A.y), ny = C.x - A.x, nl = Math.hypot(nx, ny) || 1, len = tpx / 2 + 4;
+          g.beginPath(); g.moveTo(q.x + (nx / nl) * len, q.y + (ny / nl) * len); g.lineTo(q.x - (nx / nl) * len, q.y - (ny / nl) * len); g.stroke();
+        }
       }
     }
 
@@ -307,6 +430,27 @@ export class Planner {
       g.lineWidth = 1;
       g.setLineDash([5, 5]); g.strokeStyle = '#7fc8ff'; g.lineWidth = 1;
       g.beginPath(); g.moveTo(A.x, A.y); g.lineTo(B.x, B.y); g.stroke(); g.setLineDash([]);
+    }
+
+    // stairs / elevators
+    for (const o of plan.objects) {
+      const cs = this.objCorners(o).map(c => this.toScreen(c));
+      const sel = o.id === this.selObj;
+      g.fillStyle = sel ? 'rgba(255,212,0,0.25)' : 'rgba(160,190,220,0.18)';
+      g.strokeStyle = sel ? '#ffd400' : '#a8c0d8'; g.lineWidth = 1.5;
+      g.beginPath(); cs.forEach((c, i) => (i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y))); g.closePath(); g.fill(); g.stroke();
+      g.lineWidth = 1;
+      if (o.type === 'stairs') {
+        const n = 12;
+        for (let k = 1; k < n; k++) {
+          const t = k / n;
+          const a = { x: cs[0].x + (cs[3].x - cs[0].x) * t, y: cs[0].y + (cs[3].y - cs[0].y) * t };
+          const b2 = { x: cs[1].x + (cs[2].x - cs[1].x) * t, y: cs[1].y + (cs[2].y - cs[1].y) * t };
+          g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b2.x, b2.y); g.stroke();
+        }
+      } else {
+        g.beginPath(); g.moveTo(cs[0].x, cs[0].y); g.lineTo(cs[2].x, cs[2].y); g.moveTo(cs[1].x, cs[1].y); g.lineTo(cs[3].x, cs[3].y); g.stroke();
+      }
     }
 
     for (const p of plan.points) {

@@ -1,11 +1,20 @@
-// Three.js 3D view: ground, building-area wireframe, floor lines, walls and slabs.
+// Three.js 3D view: ground, building-area wireframe, walls, slabs; click to pick.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Building, Project, elevation, segKind } from './model';
+import { Building, MATERIALS, Texture, elevation, segKind } from './model';
 import { enclosedFaces, sampleSeg, V2 } from './geometry';
-import { buildStructure, planAtLevel, toWorld } from './build3d';
+import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, planAtLevel, toWorld } from './build3d';
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
+
+export interface Scene3D { id: string; buildings: Building[]; textures: Texture[] }
+export interface ViewOpts {
+  activeId: string | null; // building drawn bright ('*' or null = all)
+  mode: ViewMode;
+  selection?: Selection;
+  showArea: boolean;
+}
+export type Hit = PickInfo & { buildingId: string; point: THREE.Vector3 };
 
 export class Viewer {
   renderer: THREE.WebGLRenderer;
@@ -15,9 +24,12 @@ export class Viewer {
   private content = new THREE.Group();
   private ro: ResizeObserver;
   private disposed = false;
+  private frameKey = '';
+  stats: BuildStats = { windowCount: 0, windowArea: 0 };
+  onPick?: (hit: Hit | null, e: MouseEvent) => void;
 
   constructor(private host: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     host.appendChild(this.renderer.domElement);
     this.scene.background = new THREE.Color(0x232323);
@@ -32,6 +44,14 @@ export class Viewer {
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(host);
     this.resize();
+    // a click (not a drag) picks
+    let down: { x: number; y: number } | null = null;
+    const el = this.renderer.domElement;
+    el.addEventListener('pointerdown', e => (down = { x: e.clientX, y: e.clientY }));
+    el.addEventListener('pointerup', e => {
+      if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) this.onPick?.(this.pick(e), e);
+      down = null;
+    });
     const loop = () => {
       if (this.disposed) return;
       this.controls.update();
@@ -57,28 +77,46 @@ export class Viewer {
   }
 
   private clear() {
+    const shared = new Set(this.sharedMats);
     this.content.traverse(o => {
       const m = o as THREE.Mesh;
       m.geometry?.dispose();
       const mat = m.material as THREE.Material | THREE.Material[] | undefined;
-      if (Array.isArray(mat)) mat.forEach(x => x.dispose()); else mat?.dispose();
+      const one = (x: THREE.Material) => { if (!shared.has(x)) x.dispose(); };
+      if (Array.isArray(mat)) mat.forEach(one); else if (mat) one(mat);
     });
     this.content.clear();
   }
+  private sharedMats: THREE.Material[] = [];
 
-  /** Bounds of all buildings: [minX, maxX, minZ, maxZ, minY, maxY]. */
-  private bounds(p: Project) {
+  pick(e: MouseEvent): Hit | null {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
+    for (const hit of ray.intersectObjects(this.content.children, true)) {
+      const info = hit.object.userData?.pick as PickInfo | undefined;
+      if (info && hit.object instanceof THREE.Mesh) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o && !o.userData.buildingId) o = o.parent;
+        return { ...info, buildingId: o?.userData.buildingId, point: hit.point };
+      }
+    }
+    return null;
+  }
+
+  private bounds(s: Scene3D) {
     let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, y0 = 0, y1 = 0;
-    for (const b of p.buildings) {
+    for (const b of s.buildings) {
       x0 = Math.min(x0, b.x); x1 = Math.max(x1, b.x + b.baseLength);
       z0 = Math.min(z0, -(b.y + b.baseLength)); z1 = Math.max(z1, -b.y);
       y0 = Math.min(y0, elevation(b, 0)); y1 = Math.max(y1, elevation(b, b.floors.length));
     }
+    if (!s.buildings.length) return { x0: -10, x1: 10, z0: -10, z1: 10, y0: 0, y1: 10 };
     return { x0, x1, z0, z1, y0, y1 };
   }
 
-  frame(p: Project) {
-    const B = this.bounds(p);
+  frame(s: Scene3D) {
+    const B = this.bounds(s);
     const L = Math.max(B.x1 - B.x0, B.z1 - B.z0), H = B.y1 - B.y0;
     const r = Math.max(L, H) * 1.4;
     const cx = (B.x0 + B.x1) / 2, cz = (B.z0 + B.z1) / 2;
@@ -89,15 +127,14 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
   }
 
-  private frameKey = '';
-  /** Rebuild the scene. All buildings are drawn; the active one is highlighted. */
-  update(p: Project, activeId: string, mode: ViewMode, selected: Set<string>) {
+  /** Rebuild the scene. */
+  update(s: Scene3D, o: ViewOpts) {
     this.clear();
-    const key = p.id + ':' + p.buildings.map(b => b.id).join(',');
-    if (key !== this.frameKey) { this.frame(p); this.frameKey = key; }
-    const B = this.bounds(p);
+    const key = s.id + ':' + s.buildings.map(b => b.id + b.x + ',' + b.y).join(';');
+    if (key !== this.frameKey) { this.frame(s); this.frameKey = key; }
+    const B = this.bounds(s);
     const span = Math.max(B.x1 - B.x0, B.z1 - B.z0, 1);
-    const underground = p.buildings.some(b => b.ground > 0);
+    const underground = s.buildings.some(b => b.ground > 0);
 
     // ground plane (see-through when there are underground floors)
     const g = new THREE.Mesh(
@@ -108,71 +145,90 @@ export class Viewer {
     g.position.set((B.x0 + B.x1) / 2, -0.0005 * span, (B.z0 + B.z1) / 2);
     this.content.add(g);
 
-    for (const b of p.buildings) this.addBuilding(p, b, b.id === activeId, mode, selected);
+    this.stats = { windowCount: 0, windowArea: 0 };
+    for (const b of s.buildings) this.addBuilding(s, b, !o.activeId || o.activeId === '*' || b.id === o.activeId, o);
   }
 
-  private addBuilding(p: Project, b: Building, active: boolean, mode: ViewMode, selected: Set<string>) {
+  private addBuilding(s: Scene3D, b: Building, active: boolean, o: ViewOpts) {
     const L = b.baseLength, N = b.floors.length;
-    const yTop = elevation(b, N), yBot = elevation(b, 0);
-    const white = new THREE.LineBasicMaterial({ color: active ? 0xffffff : 0x9a9a9a, transparent: true, opacity: active ? 0.55 : 0.3 });
-    const under = new THREE.LineBasicMaterial({ color: 0x8fb0ff, transparent: true, opacity: active ? 0.5 : 0.25 });
-    const yellow = new THREE.LineBasicMaterial({ color: 0xffd400 });
-    const corners: V2[] = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
-    const sq = (y: number, mat: THREE.LineBasicMaterial) => {
-      this.content.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners.map(c => toWorld(b, c, y))), mat));
-    };
-    // building area: square at every floor level and at the top, plus vertical edges
-    for (let i = 0; i <= N; i++) {
-      const sel = (i < N && active && selected.has(b.floors[i].id)) || (i > 0 && active && selected.has(b.floors[i - 1].id));
-      sq(elevation(b, i), sel ? yellow : i < b.ground ? under : white);
-    }
-    this.content.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(
-      corners.flatMap(c => [toWorld(b, c, yBot), toWorld(b, c, yTop)])), white));
+    const grp = new THREE.Group();
+    grp.userData.buildingId = b.id;
+    this.content.add(grp);
+    const sel = active ? o.selection ?? emptySelection() : emptySelection();
+    const floorSel = (i: number) => i >= 0 && i < N && sel.floors.has(b.floors[i].id);
 
-    if (mode === 'plan') {
-      // stacked 2D plans (levels 0..N, N = Top)
+    if (o.showArea) {
+      const white = new THREE.LineBasicMaterial({ color: active ? 0xffffff : 0x9a9a9a, transparent: true, opacity: active ? 0.55 : 0.3 });
+      const under = new THREE.LineBasicMaterial({ color: 0x8fb0ff, transparent: true, opacity: active ? 0.5 : 0.25 });
+      const yellow = new THREE.LineBasicMaterial({ color: 0xffd400 });
+      const corners: V2[] = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+      for (let i = 0; i <= N; i++) {
+        grp.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners.map(c => toWorld(b, c, elevation(b, i)))),
+          floorSel(i) || floorSel(i - 1) ? yellow : i < b.ground ? under : white));
+      }
+      grp.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(
+        corners.flatMap(c => [toWorld(b, c, elevation(b, 0)), toWorld(b, c, elevation(b, N))])), white));
+    }
+
+    if (o.mode === 'plan') {
+      // stacked 2D plans (levels 0..N, N = Top), floor plans drawn in green
       for (let k = 0; k <= N; k++) {
-        const plan = planAtLevel(b, k);
-        if (!plan) continue;
         const yy = elevation(b, k) + 0.002 * L;
-        const isSel = active && k < N && selected.has(b.floors[k].id);
-        const color = isSel ? 0xffd400 : !active ? 0x667788 : k === N ? 0xffa060 : 0x7fc8ff;
-        for (const s of plan.segments) {
-          const pts = sampleSeg(plan, s).map(v => toWorld(b, v, yy));
-          const kind = segKind(s);
-          const mat = kind === 'wall'
-            ? new THREE.LineBasicMaterial({ color })
-            : new THREE.LineDashedMaterial({ color, dashSize: kind === 'colonnade' ? L / 200 : L / 50, gapSize: L / 120 });
-          const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat);
-          if (kind !== 'wall') line.computeLineDistances();
-          this.content.add(line);
-        }
-        for (const face of enclosedFaces(plan)) {
-          const shape = new THREE.Shape(face.map(v => new THREE.Vector2(v.x * L, v.y * L)));
-          const m = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({
-            color: 0x3a7bd5, transparent: true, opacity: active ? 0.18 : 0.08, side: THREE.DoubleSide, depthWrite: false,
-          }));
-          m.rotation.x = -Math.PI / 2;
-          m.position.set(b.x, yy, -b.y);
-          this.content.add(m);
+        const isSel = floorSel(k);
+        const layers: [ReturnType<typeof planAtLevel>, number][] = [[planAtLevel(b, k), isSel ? 0xffd400 : !active ? 0x667788 : k === N ? 0xffa060 : 0x7fc8ff]];
+        if (k < N) layers.push([interiorForFloor(b, b.floors[k].id), isSel ? 0xffe680 : 0x8fd88f]);
+        for (const [plan, color] of layers) {
+          if (!plan) continue;
+          for (const sg of plan.segments) {
+            const pts = sampleSeg(plan, sg).map(v => toWorld(b, v, yy));
+            const kind = segKind(sg);
+            const mat = kind === 'wall'
+              ? new THREE.LineBasicMaterial({ color })
+              : new THREE.LineDashedMaterial({ color, dashSize: kind === 'colonnade' ? L / 200 : L / 50, gapSize: L / 120 });
+            const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat);
+            if (kind !== 'wall') line.computeLineDistances();
+            grp.add(line);
+          }
+          if (color === 0x8fd88f || color === 0xffe680) continue; // no fill for floor plans
+          for (const face of enclosedFaces(plan)) {
+            const shape = new THREE.Shape(face.map(v => new THREE.Vector2(v.x * L, v.y * L)));
+            const m = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({
+              color: 0x3a7bd5, transparent: true, opacity: active ? 0.18 : 0.08, side: THREE.DoubleSide, depthWrite: false,
+            }));
+            m.rotation.x = -Math.PI / 2;
+            m.position.set(b.x, yy, -b.y);
+            if (k < N) m.userData.pick = { floorId: b.floors[k].id, floorIndex: k } as PickInfo;
+            grp.add(m);
+          }
         }
       }
       return;
     }
 
-    const detailed = mode === 'detailed';
-    this.content.add(buildStructure(b, p.textures, detailed, {
-      wall: new THREE.MeshStandardMaterial({ color: detailed ? 0xd8d2c4 : 0xbdbdbd, roughness: 0.9 }),
-      column: new THREE.MeshStandardMaterial({ color: detailed ? 0xe6e1d6 : 0xc8c8c8, roughness: 0.8 }),
+    const detailed = o.mode === 'detailed';
+    const matCache = new Map<string, THREE.Material>();
+    const std = (key: string, make: () => THREE.Material) => matCache.get(key) ?? matCache.set(key, make()).get(key)!;
+    const mats: Mats = {
+      wall: m => std('w' + m, () => new THREE.MeshStandardMaterial({
+        color: m === 'structural' ? 0xbdbdbd : MATERIALS[m]?.color ?? 0xd8d2c4, roughness: 0.9, side: THREE.DoubleSide,
+        transparent: m === 'glass', opacity: m === 'glass' ? 0.45 : 1,
+      })),
+      column: m => std('c' + m, () => new THREE.MeshStandardMaterial({ color: detailed ? MATERIALS[m]?.color ?? 0xe6e1d6 : 0xc8c8c8, roughness: 0.8 })),
       slab: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1 }),
+      object: new THREE.MeshStandardMaterial({ color: 0xa8b4c0, roughness: 0.8 }),
       edge: new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: detailed ? 0.25 : active ? 0.6 : 0.3 }),
-      tex: id => this.texMat(p, id),
-    }));
+      selected: new THREE.MeshStandardMaterial({ color: 0xffd400, emissive: 0x6b5800, roughness: 0.8, side: THREE.DoubleSide }),
+      selLine: new THREE.LineBasicMaterial({ color: 0xffd400 }),
+      tex: id => this.texMat(s, id),
+    };
+    const { group, stats } = buildStructure(b, { detailed, interior: detailed, mats, selection: sel, textures: s.textures });
+    this.stats.windowCount += stats.windowCount; this.stats.windowArea += stats.windowArea;
+    grp.add(group);
   }
 
   private texCache = new Map<string, THREE.Texture>();
-  private texMat(p: Project, id: string): THREE.Material | null {
-    const t = p.textures.find(x => x.id === id);
+  private texMat(s: Scene3D, id: string): THREE.Material | null {
+    const t = s.textures.find(x => x.id === id);
     if (!t) return null;
     let tex = this.texCache.get(id);
     if (!tex) {
@@ -181,7 +237,7 @@ export class Viewer {
       tex.colorSpace = THREE.SRGBColorSpace;
       this.texCache.set(id, tex);
     }
-    return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9 });
+    return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, side: THREE.DoubleSide });
   }
   onTexture?: () => void;
 }

@@ -1,5 +1,5 @@
 // "New project" and "New building" dialogs (same parameters; buildings also get placed).
-import { BuildingSpec, MAX_AREA, MAX_M, Project, clamp } from './model';
+import { Building, BuildingSpec, MAX_AREA, MAX_M, Project, clamp } from './model';
 import { fmt } from './planner';
 import { h, num } from './ui';
 
@@ -89,7 +89,7 @@ export function buildingDialog(o: Opts) {
     if (!result) return;
     if (!placing) { close(); o.onCreate(spec(), name.value.trim()); return; }
     form.style.display = 'none';
-    dialog.append(placement(o.project!, result.L, (x, y) => { close(); o.onCreate(spec(x, y), name.value.trim()); }, () => {
+    dialog.append(placement(o.project!.buildings, result.L, (x, y) => { close(); o.onCreate(spec(x, y), name.value.trim()); }, () => {
       dialog.lastChild!.remove(); form.style.display = '';
     }));
   });
@@ -99,12 +99,21 @@ export function buildingDialog(o: Opts) {
 }
 
 /** Drag the new building's square relative to the existing ones (overlap allowed, edges snap). */
-function placement(p: Project, L: number, done: (x: number, y: number) => void, back: () => void) {
-  const others = p.buildings;
+/** Standalone placement dialog (site projects). start = initial position, or null to place next to the others. */
+export function placeDialog(title: string, others: Building[], L: number, start: { x: number; y: number } | null, done: (x: number, y: number) => void) {
+  const overlay = h('div', { class: 'overlay' });
+  const dialog = h('div', { class: 'dialog' });
+  dialog.append(placement(others, L, (x, y) => { overlay.remove(); done(x, y); }, () => overlay.remove(), start, title));
+  overlay.append(dialog);
+  document.body.append(overlay);
+}
+
+function placement(others: Building[], L: number, done: (x: number, y: number) => void, back: () => void,
+  start: { x: number; y: number } | null = null, title = 'Place the building') {
   // default: to the right of everything, aligned with the lowest edge
-  const maxX = Math.max(...others.map(b => b.x + b.baseLength));
-  const minY = Math.min(...others.map(b => b.y));
-  let x = maxX + Math.max(2, L * 0.1), y = minY;
+  const maxX = others.length ? Math.max(...others.map(b => b.x + b.baseLength)) : 0;
+  const minY = others.length ? Math.min(...others.map(b => b.y)) : 0;
+  let x = start ? start.x : others.length ? maxX + Math.max(2, L * 0.1) : 0, y = start ? start.y : minY;
 
   const size = 380;
   const c = h('canvas', { width: size * 2, height: size * 2, style: `width:${size}px;height:${size}px;cursor:move;border-radius:4px;display:block;margin:8px auto` });
@@ -156,13 +165,13 @@ function placement(p: Project, L: number, done: (x: number, y: number) => void, 
   const cleanup = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); };
   fit(); draw();
   return h('div', {},
-    h('h2', {}, 'Place the building'),
+    h('h2', {}, title),
     h('p', { class: 'muted small' }, 'Drag the yellow square. It may overlap other buildings; edges snap to theirs. Position = its lower-left corner, in metres.'),
     c,
     h('div', { class: 'row' }, h('label', {}, 'x (m)', inX), h('label', {}, 'y (m)', inY)),
     h('div', { class: 'row end' },
-      h('button', { onclick: () => { cleanup(); back(); } }, '← Back'),
-      h('button', { class: 'primary', onclick: () => { cleanup(); done(x, y); } }, 'Create building'),
+      h('button', { onclick: () => { cleanup(); back(); } }, start ? 'Cancel' : '← Back'),
+      h('button', { class: 'primary', onclick: () => { cleanup(); done(x, y); } }, start ? 'Place' : 'Add building'),
     ),
   );
 }

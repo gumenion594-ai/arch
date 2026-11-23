@@ -23,3 +23,7 @@ export function toast(msg: string) {
   toastTimer = window.setTimeout(() => t!.classList.remove('show'), 2200);
 }
 export const num = (s: string) => { const v = parseFloat(s.replace(',', '.')); return isFinite(v) ? v : NaN; };
+/** Append children, skipping null / false entries. */
+export function put(el: HTMLElement, ...kids: (Node | string | null | false | undefined)[]) {
+  for (const k of kids) if (k !== null && k !== false && k !== undefined) el.append(k);
+}

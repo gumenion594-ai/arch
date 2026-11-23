@@ -84,6 +84,11 @@ export function signedArea(poly: V2[]) {
  * found by walking half-edges always taking the next edge clockwise.
  */
 export function enclosedFaces(plan: StructurePlan): V2[][] {
+  return enclosedFacesSegs(plan).map(f => f.poly);
+}
+
+/** Enclosed faces with the ids of the walls bounding each one. */
+export function enclosedFacesSegs(plan: StructurePlan): { poly: V2[]; segIds: string[] }[] {
   const pts = new Map(plan.points.map(p => [p.id, p as V2]));
   const adj = new Map<string, string[]>();
   for (const s of plan.segments) {
@@ -100,7 +105,7 @@ export function enclosedFaces(plan: StructurePlan): V2[][] {
     });
   }
   const visited = new Set<string>();
-  const faces: V2[][] = [];
+  const faces: { poly: V2[]; segIds: string[] }[] = [];
   for (const [u, ns] of adj) {
     for (const v of ns) {
       if (visited.has(u + '>' + v)) continue;
@@ -117,15 +122,16 @@ export function enclosedFaces(plan: StructurePlan): V2[][] {
       const poly = face.map(id => pts.get(id)!);
       if (poly.length >= 3 && signedArea(poly) > 1e-9) {
         // follow curved walls
-        const out: V2[] = [];
+        const out: V2[] = [], segIds: string[] = [];
         for (let k = 0; k < face.length; k++) {
           const u = face[k], w = face[(k + 1) % face.length];
           const seg = plan.segments.find(x => (x.a === u && x.b === w) || (x.a === w && x.b === u))!;
+          segIds.push(seg.id);
           const sp = sampleSeg(plan, seg);
           if (seg.a !== u) sp.reverse();
           out.push(...sp.slice(0, -1));
         }
-        faces.push(out);
+        faces.push({ poly: out, segIds });
       }
     }
   }
@@ -236,4 +242,13 @@ export function samplePath(plan: StructurePlan, path: string[]): V2[] {
     out.push(...(k ? sp.slice(1) : sp));
   }
   return out;
+}
+
+export function pointInPoly(p: V2, poly: V2[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
 }

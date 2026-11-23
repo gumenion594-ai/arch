@@ -15,7 +15,7 @@ export interface PlanPoint {
   y: number; // 0..1
 }
 
-export type SegKind = 'wall' | 'colonnade' | 'open';
+export type SegKind = 'wall' | 'colonnade' | 'open' | 'door'; // 'door' only in floor (interior) plans
 export type ConnectMode = 'straight' | 'loft';
 
 export interface PlanSegment {
@@ -29,7 +29,25 @@ export interface PlanSegment {
   connect?: ConnectMode | null; // null = plan default
   connectSmooth?: number | null; // 0..1, null = plan default
   texture?: string | null; // texture id
+  material?: string | null; // null = plan material
 }
+
+/** Stairs / elevator placed in a floor plan. x, y = centre (0..1), w × d in metres, rot in degrees. */
+export interface PlanObject { id: string; type: 'stairs' | 'elevator'; x: number; y: number; w: number; d: number; rot: number }
+
+/** Window outline drawn on a 0..1 grid: x across a wall division, y up the floor height. */
+export interface WindowShape { id: string; name: string; points: { x: number; y: number }[] }
+
+/** Wall materials with density in kg/m³. */
+export const MATERIALS: Record<string, { name: string; density: number; color: number }> = {
+  concrete: { name: 'Reinforced concrete', density: 2400, color: 0xbdbdbd },
+  brick: { name: 'Brick', density: 1800, color: 0xb87a5e },
+  stone: { name: 'Stone', density: 2600, color: 0xcfc6b4 },
+  aerated: { name: 'Aerated concrete block', density: 600, color: 0xe2e2dc },
+  timber: { name: 'Timber (CLT)', density: 480, color: 0xc9a46a },
+  steel: { name: 'Steel', density: 7850, color: 0x8a96a3 },
+  glass: { name: 'Glass', density: 2500, color: 0x9fc7d9 },
+};
 
 export interface Texture { id: string; name: string; data: string; w: number; h: number; }
 
@@ -46,6 +64,8 @@ export interface StructurePlan {
   nextN: number;
   points: PlanPoint[];
   segments: PlanSegment[];
+  material: string; // default wall material (key of MATERIALS)
+  objects: PlanObject[]; // stairs / elevators (floor plans only)
 }
 
 export interface Building {
@@ -58,16 +78,26 @@ export interface Building {
   floors: Floor[]; // index 0 = lowest floor
   plans: StructurePlan[];
   topPlanId: string | null; // plan at the very top of the building (roof level), no walls of its own
+  interiorPlans: StructurePlan[]; // floor plans: internal walls, doors, stairs, elevators
+  windowShapes: WindowShape[];
+  windows: Record<string, string>; // "floorId|segmentId|division" -> window shape id
 }
+
+export type ProjectKind = 'building' | 'site';
+export interface SiteItem { id: string; projectId: string; x: number; y: number }
 
 export interface Project {
   id: string;
   name: string;
+  kind: ProjectKind;
   created: number;
   updated: number;
-  buildings: Building[];
+  buildings: Building[]; // building project: exactly one
+  items: SiteItem[]; // site project: placed building projects
   textures: Texture[];
 }
+
+export const windowKey = (floorId: string, segId: string, div: number) => `${floorId}|${segId}|${div}`;
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -84,7 +114,7 @@ export function newPlan(name: string, floorIds: string[] = []): StructurePlan {
   return {
     id: uid(), name, floorIds, wallThickness: 0.3, floorThickness: 0.25, floorEnabled: true,
     smooth: 0, connect: 'straight', connectSmooth: 0,
-    nextN: 1, points: [], segments: [],
+    nextN: 1, points: [], segments: [], material: 'concrete', objects: [],
   };
 }
 
@@ -93,12 +123,27 @@ export interface BuildingSpec { name: string; baseLength: number; floors: number
 export function createBuilding(s: BuildingSpec): Building {
   const fl: Floor[] = Array.from({ length: s.floors }, () => ({ id: uid(), height: s.floorHeight }));
   const plan = newPlan('Plan 1', fl.map(f => f.id));
-  return { id: uid(), name: s.name, baseLength: s.baseLength, x: s.x, y: s.y, ground: s.ground, floors: fl, plans: [plan], topPlanId: null };
+  return {
+    id: uid(), name: s.name, baseLength: s.baseLength, x: s.x, y: s.y, ground: s.ground, floors: fl, plans: [plan], topPlanId: null,
+    interiorPlans: [], windowShapes: defaultWindowShapes(), windows: {},
+  };
+}
+
+export function defaultWindowShapes(): WindowShape[] {
+  return [
+    { id: uid(), name: 'Window', points: [{ x: 0.25, y: 0.3 }, { x: 0.75, y: 0.3 }, { x: 0.75, y: 0.8 }, { x: 0.25, y: 0.8 }] },
+    { id: uid(), name: 'Door', points: [{ x: 0.3, y: 0 }, { x: 0.7, y: 0 }, { x: 0.7, y: 0.75 }, { x: 0.3, y: 0.75 }] },
+  ];
 }
 
 export function createProject(name: string, first: BuildingSpec): Project {
-  return { id: uid(), name, created: Date.now(), updated: Date.now(), buildings: [createBuilding(first)], textures: [] };
+  return { id: uid(), name, kind: 'building', created: Date.now(), updated: Date.now(), buildings: [createBuilding(first)], items: [], textures: [] };
 }
+export function createSite(name: string): Project {
+  return { id: uid(), name, kind: 'site', created: Date.now(), updated: Date.now(), buildings: [], items: [], textures: [] };
+}
+
+export const newInteriorPlan = (name: string): StructurePlan => ({ ...newPlan(name), wallThickness: 0.15, material: 'brick', floorEnabled: false });
 
 /** Plan that applies to a floor (a floor belongs to at most one plan). */
 export const planForFloor = (b: Building, floorId: string) => b.plans.find(pl => pl.floorIds.includes(floorId));
@@ -110,16 +155,41 @@ export function normalize(p: Project): Project {
     // v1/v2 projects had a single building stored directly on the project
     p.buildings = [{
       id: uid(), name: 'Building 1', baseLength: old.baseLength, x: 0, y: 0, ground: 0,
-      floors: old.floors, plans: old.plans, topPlanId: old.topPlanId ?? null,
+      floors: old.floors, plans: old.plans, topPlanId: old.topPlanId ?? null, interiorPlans: [], windowShapes: [], windows: {},
     }];
     delete old.baseLength; delete old.floors; delete old.plans; delete old.topPlanId;
   }
   p.textures ??= [];
+  p.items ??= [];
+  p.kind ??= 'building';
   for (const b of p.buildings) {
     b.ground ??= 0;
-    for (const pl of b.plans) { pl.smooth ??= 0; pl.connect ??= 'straight'; pl.connectSmooth ??= 0; }
+    b.interiorPlans ??= [];
+    if (!b.windowShapes?.length) b.windowShapes = defaultWindowShapes();
+    b.windows ??= {};
+    for (const pl of [...b.plans, ...b.interiorPlans]) {
+      pl.smooth ??= 0; pl.connect ??= 'straight'; pl.connectSmooth ??= 0;
+      pl.material ??= 'concrete'; pl.objects ??= [];
+    }
   }
   return p;
+}
+
+/** Projects from the multi-building version: split into one building project each + a site. */
+function splitMulti(list: Project[]): Project[] {
+  const out: Project[] = [];
+  for (const p of list) {
+    if (p.kind === 'site' || p.buildings.length <= 1) { out.push(p); continue; }
+    const site = createSite(p.name);
+    for (const b of p.buildings) {
+      const bp: Project = { ...createProject(`${p.name} – ${b.name}`, { name: b.name, baseLength: 1, floors: 1, floorHeight: 1, ground: 0, x: 0, y: 0 }), textures: p.textures };
+      bp.buildings = [{ ...b, x: 0, y: 0 }];
+      out.push(bp);
+      site.items.push({ id: uid(), projectId: bp.id, x: b.x, y: b.y });
+    }
+    out.push(site);
+  }
+  return out;
 }
 
 // resolved segment properties
@@ -128,6 +198,7 @@ export const segSmooth = (pl: StructurePlan, s: PlanSegment) => s.smooth ?? pl.s
 export const segConnect = (pl: StructurePlan, s: PlanSegment): ConnectMode => s.connect ?? pl.connect;
 export const segConnectSmooth = (pl: StructurePlan, s: PlanSegment) => s.connectSmooth ?? pl.connectSmooth;
 export const segColT = (pl: StructurePlan, s: PlanSegment) => s.columnThickness ?? pl.wallThickness;
+export const segMaterial = (pl: StructurePlan, s: PlanSegment) => s.material ?? pl.material;
 
 /** Floor label ("B2", "G", "5") -> floor index, or null. */
 function labelToIndex(b: Building, t: string): number | null {
@@ -167,7 +238,12 @@ export function formatRanges(b: Building, idx: number[]): string {
 const KEY = 'arch.projects.v1';
 
 export function loadProjects(): Project[] {
-  try { return (JSON.parse(localStorage.getItem(KEY) || '[]') as Project[]).map(normalize); } catch { return []; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(KEY) || '[]') as Project[];
+    const list = splitMulti(raw.map(normalize));
+    if (list.length !== raw.length) saveProjects(list);
+    return list;
+  } catch { return []; }
 }
 export function saveProjects(list: Project[]) {
   try { localStorage.setItem(KEY, JSON.stringify(list)); return true; } catch (e) { console.error('save failed', e); return false; }
