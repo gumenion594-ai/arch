@@ -5,7 +5,7 @@ import {
   BALCONY_AT, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
 } from './model';
 import { fitDesign, fitDesignSliced } from './assets';
-import { V2, enclosedFacesSegs, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
+import { V2, enclosedFacesSegs, pointInPoly, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
 
 export type Mats = {
   wall(material: string): THREE.Material;
@@ -63,17 +63,39 @@ export const interiorForFloor = (b: Building, floorId: string) => b.interiorPlan
 /** Plan coordinates (0..1) + elevation -> world. Plan y grows towards -z. */
 export const toWorld = (b: Building, v: V2, y: number) => new THREE.Vector3(b.x + v.x * b.baseLength, y, -(b.y + v.y * b.baseLength));
 
-/** Areas a floor's own floor slab covers: everything its external walls enclose. */
-function floorFaces(b: Building, i: number): V2[][] {
-  const pl = planAtLevel(b, i);
-  return pl ? enclosedFacesSegs(pl).map(f => f.poly) : [];
+/**
+ * Automatic floor area of floor i: what its external walls enclose, plus the areas of the floor below
+ * whose walls go straight up (so a setback terrace is covered by the floor of the storey above).
+ */
+export function autoFloorAreas(b: Building, i: number): V2[][] {
+  const own = planAtLevel(b, i);
+  const below = i > 0 ? planAtLevel(b, i - 1) : null;
+  const out: V2[][] = own ? enclosedFacesSegs(own).map(f => f.poly) : [];
+  if (below && below !== own) {
+    const same = (a: V2[], c: V2[]) => a.length === c.length && a.every(q => c.some(r => Math.hypot(q.x - r.x, q.y - r.y) < 1e-6));
+    for (const f of enclosedFacesSegs(below)) {
+      const segs = f.segIds.map(id => below.segments.find(s => s.id === id)!);
+      if (segs.every(s => segConnect(below, s) === 'straight') && !out.some(o => same(o, f.poly))) out.push(f.poly); // skip exact repeats
+    }
+  }
+  return out;
+}
+/** The floor area of floor i: its mask (areas minus carves), or the automatic one. */
+export function floorAreas(b: Building, i: number): { areas: V2[][]; carves: V2[][] } {
+  const m = b.floors[i]?.mask;
+  if (m) return { areas: m.areas.filter(a => a.length >= 3).map(a => smoothClosed(a, 0)), carves: m.carves.filter(a => a.length >= 3).map(a => smoothClosed(a, 0)) };
+  return { areas: autoFloorAreas(b, i), carves: [] };
+}
+/** Is plan point q on floor i's slab? */
+export function floorCovers(b: Building, i: number, q: V2): boolean {
+  const { areas, carves } = floorAreas(b, i);
+  return areas.some(a => pointInPoly(q, a)) && !carves.some(c => pointInPoly(q, c));
 }
 /**
- * Areas a floor's ceiling covers: enclosed areas whose walls go straight up; where walls
- * connect to the plan above, the ceiling takes the shape they end in (the plan above).
- * A plan above that encloses nothing (a ridge or a point: a roof) needs no ceiling.
+ * Roof of the top floor (nothing above it to be its ceiling): areas enclosed by walls going straight
+ * up; where walls connect to the Top level, its shape. A ridge or a point (a pitched roof) needs none.
  */
-function ceilingFaces(b: Building, i: number): V2[][] {
+function roofFaces(b: Building, i: number): V2[][] {
   const pl = planAtLevel(b, i);
   if (!pl) return [];
   const out: V2[][] = [];
@@ -88,12 +110,13 @@ function ceilingFaces(b: Building, i: number): V2[][] {
   if (lofted && above && above !== pl) out.push(...enclosedFacesSegs(above).map(f => f.poly));
   return out;
 }
-/** Floor / ceiling slab thickness of floor i (0 when switched off or nothing to cover). */
+/** Slab thicknesses of floor i: its floor (each floor's floor is the ceiling of the one below) and, on the top floor only, the roof. */
 export function slabThickness(b: Building, i: number): { floor: number; ceiling: number } {
-  const f = b.floors[i], pl = planAtLevel(b, i);
+  const f = b.floors[i], pl = planAtLevel(b, i) ?? (i > 0 ? planAtLevel(b, i - 1) : null);
   if (!pl) return { floor: 0, ceiling: 0 };
-  const fl = hasFloor(f) && floorFaces(b, i).length ? Math.min(pl.floorThickness, f.height * 0.45) : 0;
-  const ce = hasCeiling(f) && ceilingFaces(b, i).length ? Math.min(pl.ceilingThickness, f.height * 0.45) : 0;
+  const fl = hasFloor(f) && floorAreas(b, i).areas.length ? Math.min(pl.floorThickness, f.height * 0.45) : 0;
+  const top = i === b.floors.length - 1;
+  const ce = top && hasCeiling(f) && roofFaces(b, i).length ? Math.min(pl.ceilingThickness, f.height * 0.45) : 0;
   return { floor: fl, ceiling: ce };
 }
 
@@ -115,8 +138,13 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
   // ---------- each floor's own floor and ceiling slabs ----------
   const slabs = p.floors.map((_, i) => slabThickness(p, i));
-  const slab = (faces: V2[][], y: number, t: number, i: number) => faces.forEach((f, k) => {
+  const slab = (faces: V2[][], y: number, t: number, i: number, carves: V2[][] = []) => faces.forEach((f, k) => {
     const shape = new THREE.Shape(f.map(v => new THREE.Vector2(v.x * L, v.y * L)));
+    // carved-out parts inside this area become holes
+    for (const c of carves) {
+      const cc = c.reduce((a, q) => ({ x: a.x + q.x / c.length, y: a.y + q.y / c.length }), { x: 0, y: 0 });
+      if (pointInPoly(cc, f)) shape.holes.push(new THREE.Path(c.map(v => new THREE.Vector2(v.x * L, v.y * L))));
+    }
     const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 1 });
     geo.rotateX(-Math.PI / 2);
     geo.translate(p.x, y + k * 1e-4 * t, -p.y); // tiny offset: overlapping slabs don't flicker
@@ -134,8 +162,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   const hidden = (i: number) => cut !== null && i > cut;
   for (let i = 0; i < N; i++) {
     if (hidden(i)) continue;
-    if (slabs[i].floor) slab(floorFaces(p, i), elevation(p, i), slabs[i].floor, i);
-    if (slabs[i].ceiling && i !== cut) slab(ceilingFaces(p, i), elevation(p, i + 1) - slabs[i].ceiling, slabs[i].ceiling, i);
+    if (slabs[i].floor) { const fa = floorAreas(p, i); slab(fa.areas, elevation(p, i), slabs[i].floor, i, fa.carves); }
+    if (slabs[i].ceiling && i !== cut) slab(roofFaces(p, i), elevation(p, i + 1) - slabs[i].ceiling, slabs[i].ceiling, i); // the roof (top floor)
   }
 
   // ---------- walls / columns per floor ----------
@@ -192,9 +220,10 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const fs = interior ? 0 : faceSide(plan, seg);
         const d0 = norm({ x: bottom[bottom.length - 1].x - bottom[0].x, y: bottom[bottom.length - 1].y - bottom[0].y });
         const inward = shift ?? { x: -d0.y * fs * (ct / 2 / L), y: d0.x * fs * (ct / 2 / L) };
-        // around a floored area (a porch), straight columns stand on the floor slab and reach the ceiling
-        const onSlab = fs !== 0 && rows.length === 2;
-        const c0 = onSlab ? y0 + slabs[i].floor : y0, c1 = onSlab ? y1 - slabs[i].ceiling : y1;
+        // straight columns stand on the floor where there is floor under them, and reach the next floor (or the roof)
+        const q0 = polyAt(rows[0].poly, rows[0].params, t);
+        const onSlab = rows.length === 2 && slabs[i].floor > 0 && floorCovers(p, i, { x: q0.x + inward.x, y: q0.y + inward.y });
+        const c0 = onSlab ? y0 + slabs[i].floor : y0, c1 = rows.length === 2 ? y1 - slabs[i].ceiling : y1;
         const pts = rows.map((r, ri) => { const q = polyAt(r.poly, r.params, t); return W({ x: q.x + inward.x, y: q.y + inward.y }, c0 + (c1 - c0) * (ri / (rows.length - 1))); });
         if (pts.length === 2) {
           // straight columns are collected and joined with the ones above / below after all floors are built
@@ -365,7 +394,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   }
   for (const run of joined(pilPieces, x => `${r2(x.base.x)},${r2(x.base.z)},${r2(x.out.x)},${r2(x.out.z)},${x.pl.designId ?? ''}`, x => x.y0, x => x.y1, 0.05,
     // a floor or ceiling between the two storeys keeps them as separate pilasters (one per storey)
-    (a, b) => slabs[a.floor].ceiling > 0 || slabs[b.floor].floor > 0)) {
+    (_a, b) => slabs[b.floor].floor > 0)) {
     const f0 = run[0], y0 = f0.y0, y1 = run[run.length - 1].y1, H = y1 - y0;
     const { pw, pd, out } = f0;
     const up = new THREE.Vector3(0, 1, 0), side = new THREE.Vector3().crossVectors(up, out);
@@ -1123,6 +1152,7 @@ export function meshVolume(geo: THREE.BufferGeometry): number {
 /** Gross floor area of floor i (m²): area enclosed by its external walls (or the slab under it). */
 export function floorArea(b: Building, i: number): number {
   const L2 = b.baseLength ** 2;
-  const pl = planAtLevel(b, i);
-  return (pl ? enclosedFacesSegs(pl).reduce((s, f) => s + Math.abs(signedArea(f.poly)), 0) : 0) * L2;
+  const { areas, carves } = floorAreas(b, i);
+  const a = (ps: V2[][]) => ps.reduce((s, f) => s + Math.abs(signedArea(f)), 0);
+  return Math.max(0, a(areas) - a(carves)) * L2;
 }

@@ -7,13 +7,13 @@ import {
 import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
 import { ShapeEditor } from './shapeeditor';
-import { DesignMode, PickMode, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
+import { DesignMode, PickMode, onPick, renderDesignPanel, renderFloorAreaPanel, renderViewPanel, setupDesignMode, setupFloorAreaMode } from './decor';
 import { V2, enclosedFaces, planValid, signedArea } from './geometry';
 import { Selection, interiorForFloor, loftPointTarget } from './build3d';
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
-type Mode = 'view' | 'structure' | 'floorplan' | DesignMode;
+type Mode = 'view' | 'structure' | 'floorplan' | 'floorarea' | DesignMode;
 const isDesign = (m: Mode): m is DesignMode => m === 'openings' || m === 'niches' || m === 'balconies';
 const PLAN_COLORS = ['#4a90d9', '#d97a4a', '#5cb85c', '#b05cd9', '#d9c84a', '#4ad9c8', '#d94a7a', '#8a8a8a'];
 
@@ -39,6 +39,8 @@ export class Editor {
   addType: PlacementType = 'opening';
   libCategory: DesignCategory = 'frame';
   upTo: number | null = null; // cutaway (3D view)
+  maskFloor: string | null = null; // floor whose floor area is being edited
+  maskSub: 'areas' | 'carves' = 'areas';
   shapeEds: ShapeEditor[] = [];
   report: Report | null = null;
   root = h('div', { class: 'editor' });
@@ -113,6 +115,9 @@ export class Editor {
       this.viewer.onTexture = () => this.refresh();
       this.viewer.onPick = (hit, e) => onPick(this, hit, e);
       this.viewer.onWalkChange = () => this.renderRight();
+    } else if (m === 'floorarea') {
+      if (!this.b.floors.some(f => f.id === this.maskFloor)) this.maskFloor = [...this.selFloors][0] ?? this.b.floors[this.b.ground].id;
+      setupFloorAreaMode(this);
     } else if (isDesign(m)) {
       const list = m === 'balconies' ? this.b.balconyShapes : this.b.openingShapes.filter(x => x.kind === (m === 'openings' ? 'opening' : 'niche'));
       if (!list.some(x => x.id === this.activeDesign[m])) this.activeDesign[m] = list[0]?.id ?? null;
@@ -214,7 +219,7 @@ export class Editor {
     put(this.header, 
       h('button', { onclick: () => this.onBack() }, '← Projects'),
       nameIn,
-      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('openings', 'Openings'), tab('niches', 'Niches'), tab('balconies', 'Balconies')),
+      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('floorarea', 'Floor areas'), tab('openings', 'Openings'), tab('niches', 'Niches'), tab('balconies', 'Balconies')),
       this.mode === 'view' ? vm : null,
       this.mode === 'view' ? h('label', { class: 'chk', title: 'Show the building-area outline and floor lines' }, area, 'Area lines') : null,
       h('div', { class: 'spacer' }),
@@ -237,6 +242,7 @@ export class Editor {
       this.anchor = id;
     }
     this.selWalls.clear(); this.selDivs.clear();
+    if (this.mode === 'floorarea' && this.selFloors.has(id)) { this.maskFloor = id; this.shapeEds.forEach(x => x.reset()); }
     // in a planner, show the plan the clicked floor uses
     if ((this.mode === 'structure' || this.mode === 'floorplan') && this.selFloors.has(id)) {
       const pl = this.mode === 'structure' ? planForFloor(this.b, id) : interiorForFloor(this.b, id);
@@ -365,7 +371,9 @@ export class Editor {
       h('label', {}, one ? 'Height (m)' : 'Height of each (m)', hin),
       planPicker(p.plans, 'Structure plan'),
       planPicker(p.interiorPlans, 'Floor plan'),
-      h('div', { class: 'row' }, this.floorToggle(sel, 'hasFloor', 'Floor'), this.floorToggle(sel, 'hasCeiling', 'Ceiling')),
+      h('div', { class: 'row' }, this.floorToggle(sel, 'hasFloor', 'Floor'),
+        sel.some(f => f === p.floors[p.floors.length - 1]) ? this.floorToggle(sel.filter(f => f === p.floors[p.floors.length - 1]), 'hasCeiling', 'Roof') : null,
+        one ? h('button', { title: 'Change where this floor has floor: add areas or carve openings', onclick: () => { this.maskFloor = one.id; this.setMode('floorarea'); } }, 'Edit floor area') : null),
       one ? h('div', { class: 'muted small' }, `Starts at ${fmt(elevation(p, idx[0]))} m`) : null,
       h('div', { class: 'row' },
         h('button', { onclick: () => this.editFloorIn('structure', sel[0].id) }, 'Edit structure'),
@@ -495,6 +503,7 @@ export class Editor {
   renderRight() {
     if (this.mode === 'view') return renderViewPanel(this);
     if (isDesign(this.mode)) return renderDesignPanel(this, this.mode);
+    if (this.mode === 'floorarea') return renderFloorAreaPanel(this);
     this.renderPlanPanel();
   }
 
@@ -608,7 +617,7 @@ export class Editor {
           this.numField(interior ? 'Internal wall thickness (m)' : 'External wall thickness (m)', pl.wallThickness, v => (pl.wallThickness = v!), p.baseLength / 2),
           this.materialField(pl.material, v => (pl.material = v!), false),
           interior ? null : this.numField('Floor thickness (m)', pl.floorThickness, v => (pl.floorThickness = v!), MAX_M),
-          interior ? null : this.numField('Ceiling thickness (m)', pl.ceilingThickness, v => (pl.ceilingThickness = v!), MAX_M),
+          interior ? null : this.numField('Roof thickness, top floor (m)', pl.ceilingThickness, v => (pl.ceilingThickness = v!), MAX_M),
           interior ? null : h('div', { class: 'muted small' }, 'Each floor has its own floor and ceiling; switch them on or off per floor in the floor panel.'),
           this.slider('Smoothness', pl.smooth, v => (pl.smooth = v)),
           interior ? null : this.connectField(pl.connect, v => (pl.connect = v!), false),
@@ -805,6 +814,9 @@ export class Editor {
     }
     const segs = pl.segments.filter(s => pn.selSegs.has(s.id));
     if (segs.length) box.append(this.segmentProps(pl, segs, interior));
+    if (pn.pairOfSelected()) box.append(h('div', { class: 'row' },
+      h('button', { title: 'Move their shared point so the two walls meet at 90°', onclick: () => pn.alignSelected('right') }, 'Right angle'),
+      h('button', { title: 'Move their shared point onto the line between the other two ends', onclick: () => pn.alignSelected('straight') }, 'One straight line')));
     box.append(h('button', { class: 'danger', onclick: () => pn.deleteSelection() }, nP ? 'Delete selected' : 'Delete wall(s)'));
     return box;
   }

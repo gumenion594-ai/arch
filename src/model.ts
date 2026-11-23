@@ -11,6 +11,11 @@ export interface Floor {
   hasCeiling?: boolean; // ceiling slab at the top of this floor (default on)
   color?: string | null; // slab colour
   texture?: string | null; // slab texture
+  /**
+   * Floor mask: where this floor's slab is, in plan coordinates (0..1). null = automatic (what the
+   * walls enclose). areas are added, carves are cut out (stair openings, double-height spaces …).
+   */
+  mask?: { areas: WinPoint[][]; carves: WinPoint[][] } | null;
 }
 
 export interface PlanPoint {

@@ -6,7 +6,7 @@ import {
   divisionBorders, floorLabel, planForFloor, segColT, segDivLen, segKind, uid,
 } from './model';
 import { polyLength, sampleSeg } from './geometry';
-import { autoColumns, columnRange } from './build3d';
+import { autoColumns, autoFloorAreas, columnRange } from './build3d';
 import { Hit } from './viewer';
 import { ShapeEditor, ShapeHost } from './shapeeditor';
 import { formatOf, importDesignFile, deleteAsset } from './assets';
@@ -565,6 +565,8 @@ export function renderDesignPanel(ed: Editor, mode: DesignMode) {
       ed.slider(`Smoothness at this point${pt.s == null ? ' (shape default)' : ''}`, pt.s ?? null, v => (pt.s = v), () => (pt.s = null)),
       h('div', { class: 'row' },
         h('button', { onclick: () => eds.forEach(e => e.deleteSelected()) }, 'Delete point'),
+        h('button', { title: 'Make a right angle at this point (only this point moves)', onclick: () => eds.forEach(e => e.selectedPoint() && e.align('right')) }, 'Right angle'),
+        h('button', { title: 'Put this point on the line between its neighbours', onclick: () => eds.forEach(e => e.selectedPoint() && e.align('straight')) }, 'Straighten'),
         !isBal ? h('button', { onclick: () => main.deleteOutline() }, 'Delete this outline') : null),
     ) : null,
     cur ? h('div', { class: 'row' },
@@ -621,3 +623,92 @@ async function importShape(ed: Editor, mode: DesignMode) {
 
 export const shapePoints = (pts: WinPoint[]) => pts.length;
 export { floorLabel };
+
+// ---------------------------------------------------------------- floor areas (floor masks)
+const r4 = (v: number) => Math.round(v * 10000) / 10000;
+/** The floor whose area is edited, and its current areas / carves (automatic ones shown until edited). */
+function maskOf(ed: Editor) {
+  const i = ed.b.floors.findIndex(f => f.id === ed.maskFloor);
+  const f = ed.b.floors[i];
+  return { i, f };
+}
+function autoAsPoints(ed: Editor, i: number): WinPoint[][] {
+  return autoFloorAreas(ed.b, i).map(poly => simplify(poly).map(q => ({ x: r4(q.x), y: r4(q.y) })));
+}
+/** Drop points that lie on a straight line between their neighbours (sampled straight walls). */
+function simplify(poly: { x: number; y: number }[]) {
+  return poly.filter((q, k) => {
+    const a = poly[(k - 1 + poly.length) % poly.length], c = poly[(k + 1) % poly.length];
+    return Math.abs((q.x - a.x) * (c.y - a.y) - (q.y - a.y) * (c.x - a.x)) > 1e-7;
+  });
+}
+
+export function setupFloorAreaMode(ed: Editor) {
+  const cell = h('div', { class: 'edcell one' });
+  ed.center.append(cell);
+  const L = () => ed.b.baseLength;
+  ed.shapeEds = [new ShapeEditor(cell, {
+    allowOverlap: true,
+    getOutlines: () => {
+      const { i, f } = maskOf(ed);
+      if (!f) return null;
+      if (!f.mask) return ed.maskSub === 'areas' ? autoAsPoints(ed, i) : [];
+      return f.mask[ed.maskSub];
+    },
+    setOutlines: o => {
+      const { i, f } = maskOf(ed);
+      if (!f) return;
+      if (!f.mask) f.mask = { areas: autoAsPoints(ed, i), carves: [] }; // first edit: start from the automatic area
+      f.mask[ed.maskSub] = o;
+    },
+    smooth: () => 0,
+    begin: () => ed.begin(), commit: () => ed.commit(), toast, selectionChanged: () => ed.renderRight(),
+    aspect: () => 1,
+    labels: { bottom: 'building area, seen from above', top: '' },
+    readout: q => `${fmt(q.x * L())} m, ${fmt(q.y * L())} m`,
+    ghostLines: () => {
+      const { i, f } = maskOf(ed);
+      if (!f) return [];
+      const pl = planForFloor(ed.b, f.id);
+      const walls = pl ? pl.segments.map(sg => sampleSeg(pl, sg)) : [];
+      // the other kind (carves while editing areas, and the reverse), drawn faintly
+      const other = f.mask ? f.mask[ed.maskSub === 'areas' ? 'carves' : 'areas'] : ed.maskSub === 'carves' ? autoAsPoints(ed, i) : [];
+      return [...walls, ...other.map(o => [...o, o[0]])];
+    },
+  })];
+}
+
+export function renderFloorAreaPanel(ed: Editor) {
+  const b = ed.b, { i, f } = maskOf(ed);
+  const main = ed.shapeEds[0];
+  const pt = main?.selectedPoint() ?? null;
+  const floorSel = h('select', { onchange: () => { ed.maskFloor = floorSel.value; main?.reset(); ed.refresh(); } },
+    ...b.floors.map((fl, k) => h('option', { value: fl.id }, `Floor ${floorLabel(b, k)}${fl.mask ? ' (edited)' : ''}`)));
+  if (f) floorSel.value = f.id;
+  const sub = (k: 'areas' | 'carves', label: string) => h('button', { class: ed.maskSub === k ? 'tab active' : 'tab', onclick: () => { ed.maskSub = k; main?.reset(); ed.refresh(); } }, label);
+  ed.right.innerHTML = '';
+  put(ed.right,
+    h('div', { class: 'box-title' }, 'Floor areas'),
+    h('label', {}, 'Floor', floorSel),
+    f ? h('div', { class: 'muted small' }, f.mask ? 'Edited by hand.' : 'Automatic: what the walls of this floor enclose (and areas of the floor below whose walls go straight up). Edit it to change it.') : null,
+    h('div', { class: 'row' }, sub('areas', 'Floor area'), sub('carves', 'Carve')),
+    pt ? h('div', { class: 'box' },
+      h('div', { class: 'box-title' }, 'Selected point'),
+      h('div', { class: 'row' },
+        h('button', { onclick: () => main.deleteSelected() }, 'Delete point'),
+        h('button', { onclick: () => main.deleteOutline() }, ed.maskSub === 'areas' ? 'Delete this area' : 'Delete this carve'),
+        h('button', { title: 'Right angle at this point (only this point moves)', onclick: () => main.align('right') }, 'Right angle'),
+        h('button', { title: 'Put this point on the line between its neighbours', onclick: () => main.align('straight') }, 'Straighten')),
+    ) : null,
+    h('div', { class: 'row' },
+      h('button', { disabled: main?.cur == null, onclick: () => main.finish() }, 'Finish outline (Enter)'),
+      f?.mask ? h('button', { title: 'Go back to the automatic floor area', onclick: () => { ed.mutate(() => (f.mask = null)); main?.reset(); } }, 'Back to automatic') : null,
+    ),
+    h('div', { class: 'muted small help' },
+      ed.maskSub === 'areas'
+        ? 'Each floor builds only its floor: the floor above is its ceiling (the top floor also gets a roof). Drag points to change the floor, click to start a new area (Enter finishes it), double-click an edge to add a point. Areas may overlap; they add up.'
+        : 'Draw shapes to cut out of the floor: stair openings, double-height spaces, light wells. Click to add points, Enter finishes a shape, drag to adjust.',
+      ' The walls of the floor are shown in white. Columns stand on the floor where there is floor, and join the column below where it is carved away.'),
+    void i,
+  );
+}

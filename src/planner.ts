@@ -1,7 +1,7 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
 import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, divisionBorders, segColT, segKind, uid } from './model';
 import { columnPositions } from './build3d';
-import { V2, distToSeg, enclosedFaces, enclosedFacesSegs, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
+import { V2, alignMiddle, distToSeg, enclosedFaces, enclosedFacesSegs, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
 
 export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator';
 
@@ -321,6 +321,30 @@ export class Planner {
     this.selPoints.clear(); this.selSegs.clear(); this.selPoints.add(np.id);
     this.h.commit();
     this.h.selectionChanged();
+    this.draw();
+  }
+
+  /** The two selected walls meeting at a point: their shared (middle) point and the two other ends. */
+  pairOfSelected(): { M: PlanPoint; A: PlanPoint; C: PlanPoint } | null {
+    const plan = this.h.getPlan();
+    if (!plan || this.selSegs.size !== 2) return null;
+    const [s1, s2] = plan.segments.filter(s => this.selSegs.has(s.id));
+    if (!s1 || !s2) return null;
+    const mid = [s1.a, s1.b].find(id => id === s2.a || id === s2.b);
+    if (!mid) return null;
+    const P = (id: string) => plan.points.find(q => q.id === id)!;
+    return { M: P(mid), A: P(s1.a === mid ? s1.b : s1.a), C: P(s2.a === mid ? s2.b : s2.a) };
+  }
+  /** Right angle / one straight line between the two selected walls: only the middle point moves. */
+  alignSelected(kind: 'right' | 'straight') {
+    const plan = this.h.getPlan(), pr = this.pairOfSelected();
+    if (!plan || !pr) return this.h.toast('Select two walls that meet at a point');
+    const np = alignMiddle(pr.A, pr.M, pr.C, kind);
+    if (np.x < 0 || np.x > 1 || np.y < 0 || np.y > 1) return this.h.toast('That would put the point outside the building area');
+    if (!planValid(plan, new Map([[pr.M.id, np]])) || !this.okPointWithWalls(plan, pr.M.id, np)) return this.h.toast('That would make walls cross');
+    this.h.begin();
+    pr.M.x = np.x; pr.M.y = np.y;
+    this.h.commit();
     this.draw();
   }
 

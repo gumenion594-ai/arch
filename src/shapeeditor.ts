@@ -2,7 +2,7 @@
 // 'closed' edits one or more closed outlines; 'profileX' / 'profileY' edit one open profile line
 // whose points stay ordered along x (bottom view) or y (side view).
 import { WinPoint, clamp } from './model';
-import { V2, distToSeg, pointInPoly, segmentsConflict, smoothClosed } from './geometry';
+import { V2, alignMiddle, distToSeg, pointInPoly, segmentsConflict, smoothClosed } from './geometry';
 import { smoothOpen } from './build3d';
 
 export interface ShapeHost {
@@ -18,6 +18,8 @@ export interface ShapeHost {
   readout(p: V2): string;
   ghost?(): V2[] | null; // faint outline drawn behind (e.g. the front shape behind a profile)
   single?: boolean; // closed mode: only one outline (new points always join it)
+  allowOverlap?: boolean; // closed mode: outlines may overlap each other (they add up), e.g. floor areas
+  ghostLines?(): V2[][]; // faint reference lines (e.g. walls)
 }
 export type ShapeMode = 'closed' | 'profileX' | 'profileY';
 
@@ -76,6 +78,7 @@ export class ShapeEditor {
         if (j === i + 1 || (i === 0 && j === ea.length - 1)) continue;
         if (segmentsConflict(ea[i][0], ea[i][1], ea[j][0], ea[j][1])) return false;
       }
+      if (this.h.allowOverlap) continue;
       for (let b = a + 1; b < outlines.length; b++) {
         const B = outlines[b], eb = edges(B);
         for (const [p, q] of ea) for (const [r, t] of eb) if (segmentsConflict(p, q, r, t)) return false;
@@ -197,6 +200,19 @@ export class ShapeEditor {
     for (const p of all) { p.x = x1 > x0 ? (p.x - x0) / (x1 - x0) : 0.5; p.y = y1 > y0 ? (p.y - y0) / (y1 - y0) : 0.5; }
     this.h.begin(); this.h.setOutlines(ols); this.h.commit(); this.draw();
   }
+  /** Right angle / straight line at the selected point, between its two neighbouring edges (only that point moves). */
+  align(kind: 'right' | 'straight') {
+    if (!this.sel) return;
+    const ols = this.copy(), ol = ols[this.sel.o], i = this.sel.i, n = ol?.length ?? 0;
+    if (!ol || n < 3 && !this.profile) return;
+    const prev = this.profile ? ol[i - 1] : ol[(i - 1 + n) % n], next = this.profile ? ol[i + 1] : ol[(i + 1) % n];
+    if (!prev || !next) return this.h.toast('This point needs a neighbour on each side');
+    const np = alignMiddle(prev, ol[i], next, kind);
+    if (np.x < 0 || np.x > 1 || np.y < 0 || np.y > 1) return this.h.toast('That would put the point outside the box');
+    Object.assign(ol[i], np);
+    if (!this.valid(ols)) return this.h.toast('That would make the outline cross itself');
+    this.h.begin(); this.h.setOutlines(ols); this.h.commit(); this.draw();
+  }
   selectedPoint(): WinPoint | null {
     const ols = this.h.getOutlines();
     return ols && this.sel ? ols[this.sel.o]?.[this.sel.i] ?? null : null;
@@ -224,6 +240,11 @@ export class ShapeEditor {
     if (lb.top) g.fillText(lb.top, b.x0 + 2, b.y0 - 6);
     if (lb.left) { g.save(); g.translate(b.x0 - 6, b.y0 + b.sh); g.rotate(-Math.PI / 2); g.fillText(lb.left, 0, 0); g.restore(); }
     if (lb.right) { g.save(); g.translate(b.x0 + b.sw + 14, b.y0 + b.sh); g.rotate(-Math.PI / 2); g.fillText(lb.right, 0, 0); g.restore(); }
+    for (const gl of this.h.ghostLines?.() ?? []) {
+      if (gl.length < 2) continue;
+      g.strokeStyle = 'rgba(255,255,255,0.35)'; g.lineWidth = 2;
+      g.beginPath(); gl.forEach((q, i) => { const p2 = this.S(q); i ? g.lineTo(p2.x, p2.y) : g.moveTo(p2.x, p2.y); }); g.stroke();
+    }
     const ghost = this.h.ghost?.();
     if (ghost && ghost.length > 2) {
       g.setLineDash([3, 3]); g.strokeStyle = 'rgba(255,176,112,0.6)';

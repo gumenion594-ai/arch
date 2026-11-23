@@ -283,3 +283,20 @@ export function smoothClosed(pts: { x: number; y: number; s?: number | null }[],
   }
   return out;
 }
+
+/**
+ * Where to move the middle point M of A–M–C: 'straight' puts it on line AC (closest point),
+ * 'right' puts it on the circle with diameter AC (Thales), closest to where it is, so the angle at M is 90°.
+ */
+export function alignMiddle(A: V2, M: V2, C: V2, kind: 'right' | 'straight'): V2 {
+  const dx = C.x - A.x, dy = C.y - A.y, L2 = dx * dx + dy * dy;
+  if (L2 < 1e-12) return M;
+  if (kind === 'straight') {
+    const t = Math.max(0.02, Math.min(0.98, ((M.x - A.x) * dx + (M.y - A.y) * dy) / L2));
+    return { x: A.x + dx * t, y: A.y + dy * t };
+  }
+  const c = { x: (A.x + C.x) / 2, y: (A.y + C.y) / 2 }, r = Math.sqrt(L2) / 2;
+  let vx = M.x - c.x, vy = M.y - c.y, vl = Math.hypot(vx, vy);
+  if (vl < 1e-9) { vx = -dy; vy = dx; vl = Math.sqrt(L2); } // M on the middle: pick a side
+  return { x: c.x + (vx / vl) * r, y: c.y + (vy / vl) * r };
+}
