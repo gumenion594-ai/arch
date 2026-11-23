@@ -165,7 +165,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   };
 
   type ColPiece = { a: THREE.Vector3; c: THREE.Vector3; ct: number; bottom: V2[]; pick: PickInfo; seg: PlanSegment; material: string; selected: boolean };
-  type PilPiece = { base: THREE.Vector3; out: THREE.Vector3; along: THREE.Vector3; y0: number; y1: number; pw: number; pd: number; pl: Placement; mat: THREE.Material; pick: PickInfo };
+  type PilPiece = { base: THREE.Vector3; out: THREE.Vector3; along: THREE.Vector3; y0: number; y1: number; pw: number; pd: number; pl: Placement; mat: THREE.Material; pick: PickInfo; floor: number };
   const colPieces: ColPiece[] = [], pilPieces: PilPiece[] = [];
 
   for (let i = 0; i < N; i++) {
@@ -336,7 +336,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
   }
 
   // ---------- columns and pilasters: stacked pieces join into one (one base, one top) ----------
-  const joined = <T>(list: T[], key: (x: T) => string, lo: (x: T) => number, hi: (x: T) => number, gap: number) => {
+  const joined = <T>(list: T[], key: (x: T) => string, lo: (x: T) => number, hi: (x: T) => number, gap: number, apart?: (a: T, b: T) => boolean) => {
     const groups = new Map<string, T[]>();
     for (const x of list) { const k = key(x); (groups.get(k) ?? groups.set(k, []).get(k)!).push(x); }
     const runs: T[][] = [];
@@ -344,7 +344,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       g2.sort((x, y) => lo(x) - lo(y));
       let cur: T[] = [];
       for (const x of g2) {
-        if (cur.length && lo(x) - hi(cur[cur.length - 1]) > gap) { runs.push(cur); cur = []; }
+        if (cur.length && (lo(x) - hi(cur[cur.length - 1]) > gap || apart?.(cur[cur.length - 1], x))) { runs.push(cur); cur = []; }
         cur.push(x);
       }
       if (cur.length) runs.push(cur);
@@ -352,7 +352,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     return runs;
   };
   const r2 = (v: number) => Math.round(v * 50) / 50; // 2 cm grid
-  for (const run of joined(colPieces, x => `${r2(x.a.x)},${r2(x.a.z)},${r2(x.ct)},${x.seg.columnDesign ?? ''}`, x => x.a.y, x => x.c.y, 1.0)) {
+  for (const run of joined(colPieces, x => `${r2(x.a.x)},${r2(x.a.z)},${r2(x.ct)},${x.seg.columnDesign ?? ''}`, x => x.a.y, x => x.c.y, 0.01)) { // only when nothing (no floor / ceiling) separates them
     const first = run[0], last = run[run.length - 1];
     const a = first.a.clone(), c = new THREE.Vector3(a.x, last.c.y, a.z);
     const selected = run.some(x => x.selected), seg = first.seg;
@@ -363,7 +363,9 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     if (designAt(seg.columnDesign, mid, along, up, out, first.ct, c.y - a.y, first.ct, selected ? mats.selected : seg.color ? mats.color(seg.color) : null, first.pick, true)) continue;
     add(column(a, c, first.ct, first.bottom), selected ? mats.selected : segMat(seg, first.material, true), first.pick, { cat: 'col', material: first.material });
   }
-  for (const run of joined(pilPieces, x => `${r2(x.base.x)},${r2(x.base.z)},${r2(x.out.x)},${r2(x.out.z)},${x.pl.designId ?? ''}`, x => x.y0, x => x.y1, 0.05)) {
+  for (const run of joined(pilPieces, x => `${r2(x.base.x)},${r2(x.base.z)},${r2(x.out.x)},${r2(x.out.z)},${x.pl.designId ?? ''}`, x => x.y0, x => x.y1, 0.05,
+    // a floor or ceiling between the two storeys keeps them as separate pilasters (one per storey)
+    (a, b) => slabs[a.floor].ceiling > 0 || slabs[b.floor].floor > 0)) {
     const f0 = run[0], y0 = f0.y0, y1 = run[run.length - 1].y1, H = y1 - y0;
     const { pw, pd, out } = f0;
     const up = new THREE.Vector3(0, 1, 0), side = new THREE.Vector3().crossVectors(up, out);
@@ -439,7 +441,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           add(geo, mat, pick);
         };
         void box;
-        pilPieces.push({ base, out: new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize(), along: fr.along.clone(), y0: wall.y0, y1: wall.y0 + wallH, pw, pd, pl, mat, pick });
+        pilPieces.push({ base, out: new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize(), along: fr.along.clone(), y0: wall.y0, y1: wall.y0 + wallH, pw, pd, pl, mat, pick, floor: i });
       } else if (pl.type === 'balcony') {
         const shape = p.balconyShapes.find(x => x.id === pl.shapeId) ?? p.balconyShapes[0];
         if (!shape) continue;
