@@ -6,7 +6,7 @@ import {
 } from './model';
 import { fitDesign, fitDesignSliced } from './assets';
 import polygonClipping, { MultiPolygon } from 'polygon-clipping';
-import { V2, enclosedFacesSegs, pointInPoly, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
+import { V2, areaFaces, enclosedFacesSegs, pointInPoly, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
 
 export type Mats = {
   wall(material: string): THREE.Material;
@@ -81,12 +81,7 @@ export function autoFloorAreas(b: Building, i: number): V2[][] {
   }
   return out;
 }
-/** The floor area of floor i: its mask (areas minus carves), or the automatic one. */
-export function floorAreas(b: Building, i: number): { areas: V2[][]; carves: V2[][] } {
-  const m = b.floors[i]?.mask;
-  if (m) return { areas: m.areas.filter(a => a.length >= 3).map(a => smoothClosed(a, 0)), carves: m.carves.filter(a => a.length >= 3).map(a => smoothClosed(a, 0)) };
-  return { areas: autoFloorAreas(b, i), carves: [] };
-}
+export const areaForFloor = (b: Building, floorId: string) => b.areaPlans.find(pl => pl.floorIds.includes(floorId)) ?? null;
 /** A region of the plan: outer ring (counter-clockwise) and holes. */
 export type Region = { outer: V2[]; holes: V2[][] };
 const regionCache = new Map<string, Region[]>();
@@ -119,7 +114,29 @@ export function unionRegions(areas: V2[][], carves: V2[][] = []): Region[] {
 const regionArea = (rs: Region[]) => rs.reduce((s, r) => s + Math.abs(signedArea(r.outer)) - r.holes.reduce((h, q) => h + Math.abs(signedArea(q)), 0), 0);
 const inRegions = (rs: Region[], q: V2) => rs.some(r => pointInPoly(q, r.outer) && !r.holes.some(h => pointInPoly(q, h)));
 /** Floor i's slab as non-overlapping regions. */
-export const floorRegions = (b: Building, i: number) => { const { areas, carves } = floorAreas(b, i); return unionRegions(areas, carves); };
+export function floorRegions(b: Building, i: number): Region[] {
+  const f = b.floors[i];
+  if (!f) return [];
+  const ap = areaForFloor(b, f.id);
+  return ap ? areaPlanRegions(ap) : unionRegions(autoFloorAreas(b, i));
+}
+/** A floor-area plan's floor: its enclosed shapes, carved ones removed (a shape inside another one decides for itself). */
+export function areaPlanRegions(pl: StructurePlan): Region[] {
+  const key = 'area:' + JSON.stringify([pl.points, pl.segments.map(s => [s.a, s.b]), pl.carved]);
+  const hit = regionCache.get(key);
+  if (hit) return hit;
+  const ring = (a: V2[]) => [a.map(q => [q.x, q.y] as [number, number])];
+  let mp: MultiPolygon = [];
+  try {
+    for (const f of areaFaces(pl)) { // largest first: smaller shapes inside them come later and win
+      if (f.area < 1e-10) continue;
+      mp = f.carved ? (mp.length ? polygonClipping.difference(mp, ring(f.poly)) : mp) : polygonClipping.union(mp, ring(f.poly));
+    }
+  } catch { mp = []; }
+  const out = unionRegions(mp.map(poly => poly[0].map(([x, y]) => ({ x, y }))), mp.flatMap(poly => poly.slice(1).map(h => h.map(([x, y]) => ({ x, y })))));
+  regionCache.set(key, out);
+  return out;
+}
 /** Is plan point q on floor i's slab? */
 export function floorCovers(b: Building, i: number, q: V2): boolean {
   return inRegions(floorRegions(b, i), q);

@@ -1,5 +1,6 @@
 // Data model, persistence and undo history.
 
+import { enclosedFaces, interiorPoint, planarize, pointInPoly } from './geometry';
 export const MAX_M = 10000; // 10 km cap for every length
 export const MAX_AREA = MAX_M * MAX_M;
 
@@ -140,6 +141,8 @@ export interface StructurePlan {
   segments: PlanSegment[];
   material: string; // default wall material (key of MATERIALS)
   objects: PlanObject[]; // stairs / elevators (floor plans only)
+  /** Floor-area plans: marks of the enclosed shapes that are carved out (no floor there). */
+  carved?: { x: number; y: number }[];
 }
 
 export interface Building {
@@ -153,6 +156,8 @@ export interface Building {
   plans: StructurePlan[];
   topPlanId: string | null; // plan at the very top of the building (roof level), no walls of its own
   interiorPlans: StructurePlan[]; // floor plans: internal walls, doors, stairs, elevators
+  /** Floor-area plans: points and lines whose enclosed shapes are the floor (unless carved); assigned to floors like structure plans. */
+  areaPlans: StructurePlan[];
   divLen: number; // default wall division length, m
   openingShapes: OpeningShape[]; // openings and niches
   balconyShapes: BalconyShape[];
@@ -203,6 +208,29 @@ export function nextMainFloor(b: Building, i: number): number {
   return k;
 }
 
+/** A floor-area plan: lines only (no walls); its enclosed shapes are the floor. */
+export function newAreaPlan(name: string, floorIds: string[] = []): StructurePlan {
+  return { ...newPlan(name, floorIds), wallThickness: 0, carved: [] };
+}
+/** Add closed loops (plan coordinates) to a floor-area plan as points and lines. */
+export function addLoops(pl: StructurePlan, loops: { x: number; y: number }[][], lines: { x: number; y: number }[][] = []) {
+  for (const ln of lines) { // open polylines
+    const ids = ln.map(q => { const pt = { id: uid(), n: pl.nextN++, x: q.x, y: q.y }; pl.points.push(pt); return pt.id; });
+    for (let k = 0; k + 1 < ids.length; k++) pl.segments.push({ id: uid(), a: ids[k], b: ids[k + 1] });
+  }
+  for (const ring0 of loops) {
+    // drop points lying on a straight line between their neighbours (sampled straight walls)
+    const ring = ring0.filter((q, k) => {
+      const a = ring0[(k - 1 + ring0.length) % ring0.length], c = ring0[(k + 1) % ring0.length];
+      return Math.abs((q.x - a.x) * (c.y - a.y) - (q.y - a.y) * (c.x - a.x)) > 1e-7;
+    });
+    if (ring.length < 3) continue;
+    const ids = ring.map(q => { const pt = { id: uid(), n: pl.nextN++, x: q.x, y: q.y }; pl.points.push(pt); return pt.id; });
+    ids.forEach((id, k) => pl.segments.push({ id: uid(), a: id, b: ids[(k + 1) % ids.length] }));
+  }
+  planarize(pl, uid);
+}
+
 export function newPlan(name: string, floorIds: string[] = []): StructurePlan {
   return {
     id: uid(), name, floorIds, wallThickness: 0.3, floorThickness: 0.25, ceilingThickness: 0.15, floorEnabled: true,
@@ -218,7 +246,7 @@ export function createBuilding(s: BuildingSpec): Building {
   const plan = newPlan('Plan 1', fl.map(f => f.id));
   return {
     id: uid(), name: s.name, baseLength: s.baseLength, x: s.x, y: s.y, ground: s.ground, floors: fl, plans: [plan], topPlanId: null,
-    interiorPlans: [], divLen: 3, openingShapes: defaultOpeningShapes(), balconyShapes: defaultBalconyShapes(), placements: [],
+    interiorPlans: [], areaPlans: [], divLen: 3, openingShapes: defaultOpeningShapes(), balconyShapes: defaultBalconyShapes(), placements: [],
   };
 }
 
@@ -294,6 +322,17 @@ export function normalize(p: Project): Project {
     const ob = b as any;
     b.ground ??= 0;
     b.interiorPlans ??= [];
+    b.areaPlans ??= [];
+    // older per-floor masks (areas + carves) -> a floor-area plan for that floor
+    for (const f of b.floors) {
+      if (!f.mask) continue;
+      const areas = f.mask.areas.filter(a => a.length >= 3), carves = f.mask.carves.filter(a => a.length >= 3);
+      const pl = newAreaPlan(`Floor area ${b.areaPlans.length + 1}`, [f.id]);
+      addLoops(pl, [...areas, ...carves]);
+      pl.carved = enclosedFaces(pl).map(interiorPoint).filter(ip => !areas.some(a => pointInPoly(ip, a)) || carves.some(c => pointInPoly(ip, c)));
+      b.areaPlans.push(pl);
+      delete f.mask;
+    }
     b.divLen ??= 3;
     b.balconyShapes ??= defaultBalconyShapes();
     b.placements ??= [];

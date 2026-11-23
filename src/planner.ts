@@ -1,9 +1,9 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
 import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, divisionBorders, segColT, segKind, uid } from './model';
 import { columnPositions } from './build3d';
-import { V2, alignMiddle, distToSeg, enclosedFaces, enclosedFacesSegs, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
+import { V2, alignMiddle, areaFaces, distToSeg, enclosedFaces, enclosedFacesSegs, faceAt, planarize, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
 
-export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator';
+export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator' | 'carve';
 
 export interface PlannerHost {
   getPlan(): StructurePlan | null;
@@ -18,6 +18,10 @@ export interface PlannerHost {
   commit(): void; // persist + refresh UI after a change
   toast(msg: string): void;
   selectionChanged(): void;
+  /** Floor-area plan: plain lines that may cross (crossings become points); enclosed shapes are floor unless carved. */
+  area?: boolean;
+  /** Plans whose points and lines new points snap to (e.g. the walls of the floor). */
+  snapPlans?(): StructurePlan[];
 }
 
 const HIT = 9; // px
@@ -35,6 +39,9 @@ export class Planner {
   private hover: V2 | null = null;
   private drag: { id: string; moved: boolean; began: boolean } | null = null;
   private ro: ResizeObserver;
+  private zoom = 1;
+  private pan = { x: 0, y: 0 };
+  private panning: { x: number; y: number } | null = null;
 
   constructor(private host: HTMLElement, private h: PlannerHost) {
     host.appendChild(this.canvas);
@@ -42,6 +49,15 @@ export class Planner {
     this.ro.observe(host);
     this.canvas.addEventListener('mousedown', e => this.down(e));
     this.canvas.addEventListener('dblclick', e => this.dbl(e));
+    this.canvas.addEventListener('contextmenu', e => e.preventDefault());
+    this.canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      const r = this.canvas.getBoundingClientRect(), before = this.toPlan(e);
+      this.zoom = clamp(this.zoom * Math.exp(-e.deltaY * 0.0015), 0.5, 40);
+      const after = this.toScreen(before);
+      this.pan.x += e.clientX - r.left - after.x; this.pan.y += e.clientY - r.top - after.y;
+      this.draw();
+    }, { passive: false });
     window.addEventListener('mousemove', this.move);
     this.canvas.addEventListener('mouseenter', () => (this.canvas.style.cursor = this.tool === 'move' ? 'move' : 'crosshair'));
     window.addEventListener('mouseup', this.up);
@@ -58,8 +74,8 @@ export class Planner {
   // ---- coordinate mapping ----
   private get box() {
     const w = this.canvas.clientWidth, hh = this.canvas.clientHeight;
-    const s = Math.max(50, Math.min(w, hh) - 80);
-    return { x0: (w - s) / 2, y0: (hh - s) / 2, s };
+    const s = Math.max(50, Math.min(w, hh) - 80) * this.zoom;
+    return { x0: (w - s) / 2 + this.pan.x, y0: (hh - s) / 2 + this.pan.y, s };
   }
   private toScreen(p: V2) { const b = this.box; return { x: b.x0 + p.x * b.s, y: b.y0 + (1 - p.y) * b.s }; }
   private toPlan(e: MouseEvent): V2 {
@@ -99,6 +115,38 @@ export class Planner {
     for (const id of [...this.selSegs]) if (!sids.has(id)) this.selSegs.delete(id);
     if (this.head && !pids.has(this.head)) this.head = null;
     if (this.selObj && !plan?.objects.some(o => o.id === this.selObj)) this.selObj = null;
+  }
+
+  resetView() { this.zoom = 1; this.pan = { x: 0, y: 0 }; this.draw(); }
+  /** Area plans: split lines where they cross / touch, then the host commits. */
+  private settle(plan: StructurePlan) {
+    if (!this.h.area) return;
+    const remap = planarize(plan, uid);
+    const fix = (id: string) => { while (remap.has(id)) id = remap.get(id)!; return id; };
+    if (this.head) this.head = fix(this.head);
+    this.selPoints = new Set([...this.selPoints].map(fix));
+    this.prune();
+  }
+  /** Area plans, draw tool: snap a click to an own line, then to the walls (corners first, then lines). */
+  private snapArea(plan: StructurePlan, p: V2): V2 {
+    const tol = HIT / this.box.s;
+    const s = this.hitSeg(plan, p);
+    const proj = (a: V2, b: V2) => {
+      const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+      const t = l2 ? clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / l2, 0, 1) : 0;
+      return { x: a.x + dx * t, y: a.y + dy * t };
+    };
+    if (s) { const A = plan.points.find(q => q.id === s.a)!, B = plan.points.find(q => q.id === s.b)!; return proj(A, B); }
+    const refs = this.h.snapPlans?.() ?? [];
+    let best: V2 | null = null, bd = tol;
+    for (const r of refs) for (const q of r.points) { const d = Math.hypot(q.x - p.x, q.y - p.y); if (d < bd) { bd = d; best = { x: q.x, y: q.y }; } }
+    if (best) return best;
+    bd = tol;
+    for (const r of refs) for (const sg of r.segments) {
+      const sp = sampleSeg(r, sg);
+      for (let i = 0; i + 1 < sp.length; i++) { const f = proj(sp[i], sp[i + 1]), d = Math.hypot(f.x - p.x, f.y - p.y); if (d < bd) { bd = d; best = f; } }
+    }
+    return best ?? p;
   }
 
   clearSelection() { this.selPoints.clear(); this.selSegs.clear(); this.selObj = null; this.h.selectionChanged(); this.draw(); }
@@ -164,19 +212,36 @@ export class Planner {
 
   // ---- mouse ----
   private down(e: MouseEvent) {
+    if (e.button === 1 || e.button === 2) { e.preventDefault(); this.panning = { x: e.clientX, y: e.clientY }; return; }
     const plan = this.h.getPlan();
     if (!plan || e.button !== 0) return;
-    const p = this.toPlan(e);
-    const pt = this.hitPoint(plan, p);
+    const p0 = this.toPlan(e);
+    const pt = this.hitPoint(plan, p0);
+    const p = this.h.area && this.tool === 'draw' && !pt ? this.snapArea(plan, p0) : p0;
+
+    if (this.tool === 'carve') {
+      const f = faceAt(areaFaces(plan), p);
+      if (!f) return this.h.toast('Click inside a closed shape');
+      this.h.begin();
+      plan.carved = f.carved
+        ? (plan.carved ?? []).filter(c => faceAt(areaFaces(plan), c) !== null && !samePoly(faceAt(areaFaces(plan), c)!.poly, f.poly))
+        : [...(plan.carved ?? []), { x: p.x, y: p.y }];
+      this.h.commit(); this.draw();
+      return;
+    }
 
     if (this.tool === 'draw') {
       if (pt) {
         if (this.head && this.head !== pt.id && !plan.segments.some(s => (s.a === this.head && s.b === pt.id) || (s.b === this.head && s.a === pt.id))) {
-          if (!planValid(plan, undefined, [[this.head, pt.id]])) return this.h.toast('That wall would cross an existing wall');
+          if (!this.h.area && !planValid(plan, undefined, [[this.head, pt.id]])) return this.h.toast('That wall would cross an existing wall');
           if (!this.okSeg(plan.points.find(q => q.id === this.head)!, pt)) return this.h.toast('Internal walls must stay inside the external walls');
           this.h.begin();
           plan.segments.push({ id: uid(), a: this.head, b: pt.id });
+          this.head = pt.id;
+          this.settle(plan);
           this.h.commit();
+          this.draw();
+          return;
         }
         this.head = pt.id;
         this.draw();
@@ -187,12 +252,13 @@ export class Planner {
       if (this.head && !this.okSeg(plan.points.find(q => q.id === this.head)!, p)) return this.h.toast('Internal walls must stay inside the external walls');
       const np: PlanPoint = { id: uid(), n: plan.nextN, x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
       const test: StructurePlan = { ...plan, points: [...plan.points, np] };
-      if (!planValid(test, undefined, this.head ? [[this.head, np.id]] : [])) return this.h.toast('That wall would cross an existing wall');
+      if (!this.h.area && !planValid(test, undefined, this.head ? [[this.head, np.id]] : [])) return this.h.toast('That wall would cross an existing wall');
       this.h.begin();
       plan.nextN++;
       plan.points.push(np);
       if (this.head) plan.segments.push({ id: uid(), a: this.head, b: np.id });
       this.head = np.id;
+      this.settle(plan);
       this.h.commit();
       this.draw();
       return;
@@ -239,6 +305,11 @@ export class Planner {
   }
 
   private move = (e: MouseEvent) => {
+    if (this.panning) {
+      this.pan.x += e.clientX - this.panning.x; this.pan.y += e.clientY - this.panning.y;
+      this.panning = { x: e.clientX, y: e.clientY };
+      this.draw(); return;
+    }
     const plan = this.h.getPlan();
     if (!plan) return;
     const p = this.toPlan(e);
@@ -268,8 +339,10 @@ export class Planner {
     if (this.drag) {
       const pt = plan.points.find(x => x.id === this.drag!.id);
       if (!pt) return;
-      const np = { x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
-      if (planValid(plan, new Map([[pt.id, np]])) && this.okPointWithWalls(plan, pt.id, np)) {
+      const np0 = { x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
+      // area plans: dragged points snap to the walls too (not to their own lines)
+      const np = this.h.area ? this.snapArea({ ...plan, segments: plan.segments.filter(sg => sg.a !== pt.id && sg.b !== pt.id) }, np0) : np0;
+      if (this.h.area || (planValid(plan, new Map([[pt.id, np]])) && this.okPointWithWalls(plan, pt.id, np))) {
         if (!this.drag.began) { this.h.begin(); this.drag.began = true; }
         pt.x = np.x; pt.y = np.y;
         this.drag.moved = true;
@@ -280,6 +353,8 @@ export class Planner {
   };
 
   private up = () => {
+    this.panning = null;
+    if (this.drag?.moved) { const plan = this.h.getPlan(); if (plan) this.settle(plan); }
     if (this.drag?.moved || this.objDrag?.began || this.moveAll?.began) this.h.commit();
     this.drag = null; this.objDrag = null; this.moveAll = null;
   };
@@ -341,9 +416,10 @@ export class Planner {
     if (!plan || !pr) return this.h.toast('Select two walls that meet at a point');
     const np = alignMiddle(pr.A, pr.M, pr.C, kind);
     if (np.x < 0 || np.x > 1 || np.y < 0 || np.y > 1) return this.h.toast('That would put the point outside the building area');
-    if (!planValid(plan, new Map([[pr.M.id, np]])) || !this.okPointWithWalls(plan, pr.M.id, np)) return this.h.toast('That would make walls cross');
+    if (!this.h.area && (!planValid(plan, new Map([[pr.M.id, np]])) || !this.okPointWithWalls(plan, pr.M.id, np))) return this.h.toast('That would make walls cross');
     this.h.begin();
     pr.M.x = np.x; pr.M.y = np.y;
+    this.settle(plan);
     this.h.commit();
     this.draw();
   }
@@ -389,7 +465,7 @@ export class Planner {
     g.fillText(`${fmt(this.h.baseLength())} m`, b.x0 + b.s / 2 - 16, b.y0 + b.s + 14);
 
     const plan = this.h.getPlan();
-    if (!plan) { g.fillStyle = '#aaa'; g.fillText('No structure plan selected', b.x0 + 10, b.y0 + 20); return; }
+    if (!plan) { g.fillStyle = '#aaa'; g.fillText(this.h.area ? 'No floor-area plan selected: floors get their floor from their walls. Press New, or Edit floor area on a floor.' : 'No structure plan selected', b.x0 + 10, b.y0 + 20); return; }
     const pts = new Map(plan.points.map(p => [p.id, p]));
     const path = (poly: V2[]) => {
       g.beginPath();
@@ -399,7 +475,7 @@ export class Planner {
     // ghost of the plan below
     const ghost = this.h.getGhost();
     if (ghost && ghost !== plan) {
-      g.strokeStyle = 'rgba(255,160,96,0.45)'; g.lineWidth = 1; g.setLineDash([3, 3]);
+      g.strokeStyle = this.h.area ? 'rgba(255,160,96,0.8)' : 'rgba(255,160,96,0.45)'; g.lineWidth = this.h.area ? 2 : 1; g.setLineDash(this.h.area ? [] : [3, 3]);
       for (const s of ghost.segments) { path(sampleSeg(ghost, s)); g.stroke(); }
       g.setLineDash([]);
       g.fillStyle = 'rgba(255,160,96,0.5)';
@@ -415,11 +491,30 @@ export class Planner {
     }
 
     // enclosed areas
-    g.fillStyle = 'rgba(58,123,213,0.18)';
-    for (const f of enclosedFaces(plan)) {
-      g.beginPath();
-      f.forEach((v, i) => { const s = this.toScreen(v); i ? g.lineTo(s.x, s.y) : g.moveTo(s.x, s.y); });
-      g.closePath(); g.fill();
+    if (this.h.area) {
+      // floor (blue) / carved (dark, hatched); largest first so shapes inside others paint over them
+      const hov = this.tool === 'carve' && this.hover ? faceAt(areaFaces(plan), this.hover) : null;
+      for (const f of areaFaces(plan)) {
+        g.beginPath();
+        f.poly.forEach((v, i) => { const s = this.toScreen(v); i ? g.lineTo(s.x, s.y) : g.moveTo(s.x, s.y); });
+        g.closePath();
+        g.fillStyle = f.carved ? '#232323' : 'rgba(58,123,213,0.45)';
+        g.fill();
+        if (f.carved) {
+          g.save(); g.clip();
+          g.strokeStyle = 'rgba(217,90,74,0.55)'; g.lineWidth = 1;
+          for (let x = -hh; x < w; x += 10) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x + hh, hh); g.stroke(); }
+          g.restore();
+        }
+        if (hov && samePoly(hov.poly, f.poly)) { g.strokeStyle = '#ffd400'; g.lineWidth = 3; g.stroke(); }
+      }
+    } else {
+      g.fillStyle = 'rgba(58,123,213,0.18)';
+      for (const f of enclosedFaces(plan)) {
+        g.beginPath();
+        f.forEach((v, i) => { const s = this.toScreen(v); i ? g.lineTo(s.x, s.y) : g.moveTo(s.x, s.y); });
+        g.closePath(); g.fill();
+      }
     }
 
     // walls: translucent band showing thickness + centre line
@@ -431,7 +526,7 @@ export class Planner {
       const sp = sampleSeg(plan, s);
       const sel = this.selSegs.has(s.id);
       const kind = segKind(s);
-      if (kind === 'wall') {
+      if (kind === 'wall' && !this.h.area) {
         // wall thickness: inside the line for walls around an enclosed area (as built in 3D), centred otherwise
         const side = sideOf.get(s.id) ?? 0, t = plan.wallThickness / this.h.baseLength();
         const d0 = { x: sp[sp.length - 1].x - sp[0].x, y: sp[sp.length - 1].y - sp[0].y }, dl = Math.hypot(d0.x, d0.y) || 1;
@@ -456,7 +551,7 @@ export class Planner {
         const cpx = Math.max(4, (segColT(plan, s) / this.h.baseLength()) * b.s);
         g.fillStyle = sel ? '#ffd400' : '#f0f0f0';
         for (const u of cus) { const q = this.toScreen(polyAt(sp, pp, u)); g.fillRect(q.x - cpx / 2, q.y - cpx / 2, cpx, cpx); }
-      } else if (kind === 'wall') {
+      } else if (kind === 'wall' && !this.h.area) {
         g.strokeStyle = sel ? '#ffd400' : 'rgba(240,240,240,0.7)'; g.lineWidth = 1;
         for (const u of us) {
           const A = this.toScreen(polyAt(sp, pp, Math.max(0, u - 0.002))), C = this.toScreen(polyAt(sp, pp, Math.min(1, u + 0.002))), q = this.toScreen(polyAt(sp, pp, u));
@@ -523,3 +618,5 @@ export class Planner {
 }
 
 export const fmt = (v: number) => (Math.round(v * 100) / 100).toString();
+
+const samePoly = (a: V2[], b: V2[]) => a.length === b.length && a.every((q, i) => q.x === b[i].x && q.y === b[i].y);

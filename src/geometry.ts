@@ -300,3 +300,105 @@ export function alignMiddle(A: V2, M: V2, C: V2, kind: 'right' | 'straight'): V2
   if (vl < 1e-9) { vx = -dy; vy = dx; vl = Math.sqrt(L2); } // M on the middle: pick a side
   return { x: c.x + (vx / vl) * r, y: c.y + (vy / vl) * r };
 }
+
+// ---------- floor-area plans: lines that may cross; every enclosed shape is floor unless carved ----------
+
+/**
+ * Make a plan planar: merge points that coincide, split lines at points lying on them and at every
+ * crossing (the crossing becomes a point). Returns old point id -> surviving id for merged points.
+ */
+export function planarize(plan: StructurePlan, newId: () => string, eps = 1e-6): Map<string, string> {
+  const remap = new Map<string, string>();
+  const P = () => new Map(plan.points.map(p => [p.id, p]));
+  // merge coincident points
+  for (let i = 0; i < plan.points.length; i++) for (let j = plan.points.length - 1; j > i; j--) {
+    const a = plan.points[i], b = plan.points[j];
+    if (Math.hypot(a.x - b.x, a.y - b.y) < eps) { remap.set(b.id, a.id); plan.points.splice(j, 1); }
+  }
+  const fix = (id: string) => { while (remap.has(id)) id = remap.get(id)!; return id; };
+  for (const s of plan.segments) { s.a = fix(s.a); s.b = fix(s.b); }
+  const split = (s: PlanSegment, mid: string) => {
+    const i = plan.segments.indexOf(s);
+    const { id: _i, a: _a, b: _b, ...props } = s;
+    plan.segments.splice(i, 1, { ...props, id: newId(), a: s.a, b: mid }, { ...props, id: newId(), a: mid, b: s.b });
+  };
+  const dedupe = () => {
+    const seen = new Set<string>();
+    plan.segments = plan.segments.filter(s => {
+      if (s.a === s.b) return false;
+      const k = s.a < s.b ? s.a + '|' + s.b : s.b + '|' + s.a;
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+  };
+  dedupe();
+  for (let guard = 0; guard < 2000; guard++) {
+    const pts = P();
+    let changed = false;
+    // a point lying on a line splits it
+    outer: for (const s of plan.segments) {
+      const A = pts.get(s.a)!, B = pts.get(s.b)!;
+      for (const p of plan.points) {
+        if (p.id === s.a || p.id === s.b) continue;
+        if (distToSeg(p, A, B) < eps) { split(s, p.id); changed = true; break outer; }
+      }
+    }
+    if (!changed) {
+      // two lines crossing: a new point where they cross
+      outer2: for (let i = 0; i < plan.segments.length; i++) for (let j = i + 1; j < plan.segments.length; j++) {
+        const s = plan.segments[i], t = plan.segments[j];
+        if (s.a === t.a || s.a === t.b || s.b === t.a || s.b === t.b) continue;
+        const A = pts.get(s.a)!, B = pts.get(s.b)!, C = pts.get(t.a)!, D = pts.get(t.b)!;
+        const r = { x: B.x - A.x, y: B.y - A.y }, q = { x: D.x - C.x, y: D.y - C.y };
+        const den = r.x * q.y - r.y * q.x;
+        if (Math.abs(den) < 1e-14) continue;
+        const u = ((C.x - A.x) * q.y - (C.y - A.y) * q.x) / den, v = ((C.x - A.x) * r.y - (C.y - A.y) * r.x) / den;
+        if (u <= 1e-9 || u >= 1 - 1e-9 || v <= 1e-9 || v >= 1 - 1e-9) continue;
+        const X = { x: A.x + r.x * u, y: A.y + r.y * u };
+        const np = { id: newId(), n: plan.nextN++, x: X.x, y: X.y };
+        plan.points.push(np);
+        split(t, np.id); split(s, np.id);
+        changed = true; break outer2;
+      }
+    }
+    if (!changed) break;
+    dedupe();
+  }
+  return remap;
+}
+
+/** A point well inside a polygon (centroid when it is inside, else the middle of the widest horizontal span). */
+export function interiorPoint(poly: V2[]): V2 {
+  const c = poly.reduce((a, q) => ({ x: a.x + q.x / poly.length, y: a.y + q.y / poly.length }), { x: 0, y: 0 });
+  if (pointInPoly(c, poly)) return c;
+  const y0 = Math.min(...poly.map(q => q.y)), y1 = Math.max(...poly.map(q => q.y));
+  let best: V2 = c, bw = -1;
+  for (let k = 1; k < 20; k++) {
+    const y = y0 + ((y1 - y0) * k) / 20, xs: number[] = [];
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      if ((a.y <= y) !== (b.y <= y)) xs.push(a.x + ((y - a.y) * (b.x - a.x)) / (b.y - a.y));
+    }
+    xs.sort((m, n) => m - n);
+    for (let i = 0; i + 1 < xs.length; i += 2) if (xs[i + 1] - xs[i] > bw) { bw = xs[i + 1] - xs[i]; best = { x: (xs[i] + xs[i + 1]) / 2, y }; }
+  }
+  return best;
+}
+
+export interface AreaFace { poly: V2[]; area: number; carved: boolean }
+/** The enclosed shapes of a floor-area plan, largest first; a shape is carved when a carve mark lies in it (and in no smaller shape inside it). */
+export function areaFaces(plan: StructurePlan): AreaFace[] {
+  const faces: AreaFace[] = enclosedFaces(plan).map(poly => ({ poly, area: Math.abs(signedArea(poly)), carved: false }));
+  faces.sort((a, b) => b.area - a.area);
+  for (const s of plan.carved ?? []) {
+    const f = faceAt(faces, s);
+    if (f) f.carved = true;
+  }
+  return faces;
+}
+/** The smallest shape containing p. */
+export function faceAt<T extends { poly: V2[]; area: number }>(faces: T[], p: V2): T | null {
+  let best: T | null = null;
+  for (const f of faces) if (pointInPoly(p, f.poly) && (!best || f.area < best.area)) best = f;
+  return best;
+}
