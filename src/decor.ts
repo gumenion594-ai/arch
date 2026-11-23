@@ -103,6 +103,12 @@ export function renderViewPanel(ed: Editor) {
       pm('wall', 'Wall', 'A whole wall on one floor'),
       pm('floor', 'Floor', 'Everything on a floor')),
     h('div', { class: 'muted small' }, 'Click in the 3D view (Shift = add). Esc clears. Imported designs and textures show in the Detailed view.'),
+    ed.viewer?.walk
+      ? h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => ed.viewer?.exitWalk() }, 'Exit walk (Esc)'))
+      : h('div', { class: 'row' }, h('button', {
+        class: 'primary', title: 'Walk around at eye height (1.6 m), climb stairs, fly',
+        onclick: () => { ed.viewer?.enterWalk(); },
+      }, 'Walk'), h('span', { class: 'muted small' }, 'First person, eyes at 1.6 m')),
     h('div', { class: 'row views' }, h('span', { class: 'muted small' }, 'View from'),
       ...(['front', 'back', 'left', 'right', 'top', 'corner'] as const).map(d => h('button', { onclick: () => ed.viewer?.look(d) }, d[0].toUpperCase() + d.slice(1)))),
     cutawayField(ed),

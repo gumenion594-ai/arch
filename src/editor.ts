@@ -112,6 +112,7 @@ export class Editor {
       this.viewer = new Viewer(this.center);
       this.viewer.onTexture = () => this.refresh();
       this.viewer.onPick = (hit, e) => onPick(this, hit, e);
+      this.viewer.onWalkChange = () => this.renderRight();
     } else if (isDesign(m)) {
       const list = m === 'balconies' ? this.b.balconyShapes : this.b.openingShapes.filter(x => x.kind === (m === 'openings' ? 'opening' : 'niche'));
       if (!list.some(x => x.id === this.activeDesign[m])) this.activeDesign[m] = list[0]?.id ?? null;
@@ -172,6 +173,7 @@ export class Editor {
   }
 
   private onKey = (e: KeyboardEvent) => {
+    if (this.viewer?.walk) return; // walk mode has its own keys
     const tgt = e.target as HTMLElement;
     const typing = tgt.tagName === 'INPUT' || tgt.tagName === 'SELECT' || tgt.tagName === 'TEXTAREA';
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) { e.preventDefault(); this.undo(); return; }

@@ -51,12 +51,19 @@ export class Viewer {
     const el = this.renderer.domElement;
     el.addEventListener('pointerdown', e => (down = { x: e.clientX, y: e.clientY }));
     el.addEventListener('pointerup', e => {
-      if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) this.onPick?.(this.pick(e), e);
+      if (down && !this.walk && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) this.onPick?.(this.pick(e), e);
       down = null;
     });
+    let last = performance.now();
     const loop = () => {
       if (this.disposed) return;
-      this.controls.update();
+      const now = performance.now(), dt = (now - last) / 1000;
+      last = now;
+      if (this.walk) {
+        // small fixed steps keep walking speed and collisions right at any frame rate
+        let left = Math.min(0.25, dt);
+        while (left > 1e-4 && this.walk) { const st = Math.min(0.02, left); this.walkStep(st); left -= st; }
+      } else this.controls.update();
       this.renderer.render(this.scene, this.camera);
       requestAnimationFrame(loop);
     };
@@ -71,6 +78,7 @@ export class Viewer {
   }
 
   dispose() {
+    this.exitWalk();
     this.disposed = true;
     this.ro.disconnect();
     this.clear();
@@ -148,9 +156,12 @@ export class Viewer {
   }
 
   /** Rebuild the scene. */
+  private lastOpts: ViewOpts | null = null;
   update(s: Scene3D, o: ViewOpts) {
     this.clear();
     this.last = s;
+    this.lastOpts = o;
+    if (this.walk) o = { ...o, showArea: false, selection: undefined }; // at eye level the area box is just clutter
     const key = s.id + ':' + s.buildings.map(b => b.id + b.x + ',' + b.y).join(';');
     if (key !== this.frameKey) { this.frame(s); this.frameKey = key; }
     const B = this.bounds(s);
@@ -269,6 +280,164 @@ export class Viewer {
     const { group, stats } = buildStructure(b, { detailed, interior: detailed, mats, selection: sel, textures: s.textures, upTo: active ? o.upTo : null });
     this.stats.windowCount += stats.windowCount; this.stats.windowArea += stats.windowArea; this.stats.windowSkipped += stats.windowSkipped;
     grp.add(group);
+  }
+
+  // ---------------------------------------------------------------- walk mode (first person)
+  static readonly EYE = 1.6; // eye height above what you stand on, m
+  walk: {
+    x: number; z: number; feet: number; vy: number; yaw: number; pitch: number;
+    fly: boolean; onGround: boolean; keys: Set<string>; drag: boolean; hud: HTMLElement;
+    saved: { pos: THREE.Vector3; target: THREE.Vector3; fov: number; near: number };
+  } | null = null;
+  onWalkChange?: (walking: boolean) => void;
+
+  /** Start walking in front of the building (south side), on the ground, facing it. */
+  enterWalk() {
+    if (this.walk || !this.last) return;
+    const B = this.bounds(this.last);
+    const hud = document.createElement('div');
+    hud.className = 'walk-hud';
+    this.host.appendChild(hud);
+    this.walk = {
+      x: (B.x0 + B.x1) / 2, z: B.z1 + Math.max(6, (B.z1 - B.z0) * 0.6), feet: 0, vy: 0, yaw: 0, pitch: 0.05,
+      fly: false, onGround: false, keys: new Set(), drag: false, hud,
+      saved: { pos: this.camera.position.clone(), target: this.controls.target.clone(), fov: this.camera.fov, near: this.camera.near },
+    };
+    this.walk.feet = this.groundBelow(this.walk.x, this.walk.z, 50) ?? 0;
+    this.controls.enabled = false;
+    this.camera.fov = 70; this.camera.near = 0.05; this.camera.updateProjectionMatrix();
+    window.addEventListener('keydown', this.walkKey);
+    window.addEventListener('keyup', this.walkKey);
+    window.addEventListener('mousemove', this.walkMouse);
+    this.renderer.domElement.addEventListener('mousedown', this.walkDown);
+    window.addEventListener('mouseup', this.walkUp);
+    this.updateHud();
+    if (this.last && this.lastOpts) this.update(this.last, this.lastOpts);
+    this.onWalkChange?.(true);
+  }
+  exitWalk() {
+    const w = this.walk;
+    if (!w) return;
+    this.walk = null;
+    w.hud.remove();
+    window.removeEventListener('keydown', this.walkKey);
+    window.removeEventListener('keyup', this.walkKey);
+    window.removeEventListener('mousemove', this.walkMouse);
+    this.renderer.domElement.removeEventListener('mousedown', this.walkDown);
+    window.removeEventListener('mouseup', this.walkUp);
+    if (document.pointerLockElement === this.renderer.domElement) document.exitPointerLock();
+    this.camera.fov = w.saved.fov; this.camera.near = w.saved.near; this.camera.updateProjectionMatrix();
+    this.camera.position.copy(w.saved.pos); this.controls.target.copy(w.saved.target);
+    this.controls.enabled = true;
+    this.controls.update();
+    if (this.last && this.lastOpts && !this.disposed) this.update(this.last, this.lastOpts);
+    this.onWalkChange?.(false);
+  }
+  private walkKey = (e: KeyboardEvent) => {
+    const w = this.walk;
+    if (!w) return;
+    const t = (e.target as HTMLElement).tagName;
+    if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return;
+    const k = e.code;
+    if (e.type === 'keydown') {
+      if (k === 'Escape') { e.preventDefault(); this.exitWalk(); return; }
+      if (k === 'KeyF' && !e.repeat) { w.fly = !w.fly; w.vy = 0; this.updateHud(); }
+      if (k === 'Space' && !w.fly && w.onGround) w.vy = 4.2; // jump
+      w.keys.add(k);
+    } else w.keys.delete(k);
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
+    e.stopPropagation();
+  };
+  private walkDown = () => {
+    const el = this.renderer.domElement;
+    // capture the mouse like a game; where the browser refuses, dragging looks around instead
+    try { const r = el.requestPointerLock?.() as unknown; if (r instanceof Promise) r.catch(() => {}); } catch { /* not allowed here */ }
+    if (this.walk) this.walk.drag = true;
+  };
+  private walkUp = () => { if (this.walk) this.walk.drag = false; };
+  private walkMouse = (e: MouseEvent) => {
+    const w = this.walk;
+    if (!w) return;
+    const locked = document.pointerLockElement === this.renderer.domElement;
+    if (!locked && !w.drag) return;
+    if (Math.abs(e.movementX) > 150 || Math.abs(e.movementY) > 150) return; // browsers sometimes report a bogus jump
+    w.yaw -= e.movementX * 0.0025;
+    w.pitch = Math.max(-1.45, Math.min(1.45, w.pitch - e.movementY * 0.0025));
+  };
+  private updateHud() {
+    const w = this.walk;
+    if (!w) return;
+    w.hud.innerHTML = `<b>${w.fly ? 'Flying' : 'Walking'}</b> · eyes ${Viewer.EYE} m above ${w.fly ? 'your feet' : 'the floor'} · ${w.feet.toFixed(1)} m elevation<br>`
+      + `WASD / arrows move · mouse looks (click the view to capture it, or drag) · Shift run · `
+      + (w.fly ? 'Space / E up · C / Q down' : 'Space jump') + ' · F fly · Esc exit';
+  }
+  /** Solid things you can stand on or bump into (not lines, not the invisible click surfaces). */
+  private solids(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = [];
+    this.content.traverse(o => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      const mat = m.material as THREE.Material | THREE.Material[];
+      if (Array.isArray(mat) ? mat.every(x => !x.visible) : !mat.visible) return;
+      out.push(m);
+    });
+    return out;
+  }
+  private ray = new THREE.Raycaster();
+  /** Height of the first surface below (x, fromY, z), or null. */
+  private groundBelow(x: number, z: number, fromY: number, objs = this.solids()): number | null {
+    this.ray.set(new THREE.Vector3(x, fromY, z), new THREE.Vector3(0, -1, 0));
+    this.ray.far = fromY + 1000;
+    const hit = this.ray.intersectObjects(objs, false)[0];
+    return hit ? hit.point.y : null;
+  }
+  /** Can we move from (x, z) by (dx, dz) without walking into something (checked at knee and chest height)? */
+  private pathClear(x: number, z: number, dx: number, dz: number, feet: number, objs: THREE.Object3D[]): boolean {
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-9) return true;
+    const dir = new THREE.Vector3(dx / len, 0, dz / len);
+    for (const hgt of [0.55, 1.0, 1.5]) { // above stair steps (you step up those), below and through the body
+      this.ray.set(new THREE.Vector3(x, feet + hgt, z), dir);
+      this.ray.far = len + 0.25; // keep 25 cm from walls
+      if (this.ray.intersectObjects(objs, false).length) return false;
+    }
+    return true;
+  }
+  private walkStep(dt: number) {
+    const w = this.walk!;
+    const k = w.keys, on = (...c: string[]) => c.some(x => k.has(x));
+    const objs = this.solids();
+    const run = on('ShiftLeft', 'ShiftRight');
+    const speed = (w.fly ? 9 : 2.8) * (run ? 2.6 : 1);
+    const fwd = (on('KeyW', 'ArrowUp') ? 1 : 0) - (on('KeyS', 'ArrowDown') ? 1 : 0);
+    const side = (on('KeyD', 'ArrowRight') ? 1 : 0) - (on('KeyA', 'ArrowLeft') ? 1 : 0);
+    const fx = -Math.sin(w.yaw), fz = -Math.cos(w.yaw), rx = Math.cos(w.yaw), rz = -Math.sin(w.yaw);
+    let dx = fx * fwd + rx * side, dz = fz * fwd + rz * side;
+    const l = Math.hypot(dx, dz);
+    if (l > 0) { dx = (dx / l) * speed * dt; dz = (dz / l) * speed * dt; }
+    // slide along walls: try the full move, then each axis on its own
+    if (this.pathClear(w.x, w.z, dx, dz, w.feet, objs)) { w.x += dx; w.z += dz; }
+    else {
+      if (this.pathClear(w.x, w.z, dx, 0, w.feet, objs)) w.x += dx;
+      if (this.pathClear(w.x, w.z, 0, dz, w.feet, objs)) w.z += dz;
+    }
+    if (w.fly) {
+      const v = ((on('Space', 'KeyE') ? 1 : 0) - (on('KeyC', 'KeyQ', 'ControlLeft') ? 1 : 0)) * speed * dt;
+      const g = this.groundBelow(w.x, w.z, w.feet + 0.4, objs);
+      w.feet = Math.max(g ?? -1e9, w.feet + v);
+      w.onGround = false;
+    } else {
+      // gravity; step up onto anything up to 40 cm higher (stairs), fall otherwise
+      w.vy -= 9.8 * dt;
+      const g = this.groundBelow(w.x, w.z, w.feet + 0.4, objs);
+      const next = w.feet + w.vy * dt;
+      if (g !== null && next <= g) { w.feet = g; w.vy = 0; w.onGround = true; }
+      else { w.feet = next; w.onGround = false; }
+      if (w.feet < -500) { w.feet = 0; w.vy = 0; } // fell off the world
+    }
+    this.camera.position.set(w.x, w.feet + Viewer.EYE, w.z);
+    this.camera.rotation.set(w.pitch, w.yaw, 0, 'YXZ');
+    if (Math.round(w.feet * 10) !== Math.round((w as any).lastHud ?? -1e9)) { (w as any).lastHud = Math.round(w.feet * 10); this.updateHud(); }
   }
 
   private texCache = new Map<string, THREE.Texture>();
