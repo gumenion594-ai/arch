@@ -14,6 +14,7 @@ export interface ViewOpts {
   mode: ViewMode;
   selection?: Selection;
   showArea: boolean;
+  upTo?: number | null; // cutaway: show floors up to this index (without its ceiling)
 }
 export type Hit = PickInfo & { buildingId: string; point: THREE.Vector3 };
 
@@ -263,7 +264,7 @@ export class Viewer {
       selLine: new THREE.LineBasicMaterial({ color: 0xffd400 }),
       tex: id => this.texMat(s, id),
     };
-    const { group, stats } = buildStructure(b, { detailed, interior: detailed, mats, selection: sel, textures: s.textures });
+    const { group, stats } = buildStructure(b, { detailed, interior: detailed, mats, selection: sel, textures: s.textures, upTo: active ? o.upTo : null });
     this.stats.windowCount += stats.windowCount; this.stats.windowArea += stats.windowArea; this.stats.windowSkipped += stats.windowSkipped;
     grp.add(group);
   }

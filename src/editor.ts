@@ -38,6 +38,7 @@ export class Editor {
   selElements = new Set<string>(); // placement ids
   addType: PlacementType = 'opening';
   libCategory: DesignCategory = 'frame';
+  upTo: number | null = null; // cutaway (3D view)
   shapeEds: ShapeEditor[] = [];
   report: Report | null = null;
   root = h('div', { class: 'editor' });
@@ -93,7 +94,7 @@ export class Editor {
     this.renderHeader();
     this.renderLeft();
     // 3D first: the side panel shows numbers the build produces (e.g. windows that no longer fit)
-    if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures, designs: this.p.designs }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea });
+    if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures, designs: this.p.designs }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea, upTo: this.upTo });
     this.renderRight();
     this.planner?.draw();
     this.shapeEds.forEach(e => e.draw());

@@ -3,9 +3,10 @@
 import type { Editor } from './editor';
 import {
   BalconyShape, DESIGN_CATEGORIES, Design, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
-  divisionBorders, floorLabel, planForFloor, segDivLen, segKind, uid,
+  divisionBorders, floorLabel, planForFloor, segColT, segDivLen, segKind, uid,
 } from './model';
 import { polyLength, sampleSeg } from './geometry';
+import { columnRange } from './build3d';
 import { Hit } from './viewer';
 import { ShapeEditor, ShapeHost } from './shapeeditor';
 import { formatOf, importDesignFile, deleteAsset } from './assets';
@@ -104,6 +105,7 @@ export function renderViewPanel(ed: Editor) {
     h('div', { class: 'muted small' }, 'Click in the 3D view (Shift = add). Esc clears. Imported designs and textures show in the Detailed view.'),
     h('div', { class: 'row views' }, h('span', { class: 'muted small' }, 'View from'),
       ...(['front', 'back', 'left', 'right', 'top', 'corner'] as const).map(d => h('button', { onclick: () => ed.viewer?.look(d) }, d[0].toUpperCase() + d.slice(1)))),
+    cutawayField(ed),
     nSel ? h('div', { class: 'box' },
       h('div', { class: 'box-title' }, `Selected: ${parts.join(', ')}`),
       firstWall ? h('div', { class: 'row' },
@@ -125,6 +127,16 @@ export function renderViewPanel(ed: Editor) {
     libraryBox(ed),
     ed.reportBox(),
   );
+}
+
+/** Look inside: show the building only up to a floor, without that floor's ceiling. */
+function cutawayField(ed: Editor) {
+  const b = ed.b;
+  const sel = h('select', { onchange: () => { ed.upTo = sel.value === '' ? null : +sel.value; if (ed.upTo !== null && ed.viewMode !== 'detailed') { ed.viewMode = 'detailed'; toast('Detailed view: internal walls, stairs and elevators show there'); } ed.refresh(); } },
+    h('option', { value: '' }, 'Whole building'),
+    ...b.floors.map((_, i) => h('option', { value: String(i) }, `Up to floor ${floorLabel(b, i)} (open)`)));
+  sel.value = ed.upTo === null || ed.upTo >= b.floors.length ? '' : String(ed.upTo);
+  return h('label', { title: 'Hides the floors above and the ceiling of this floor, so you can see its rooms, internal walls, stairs and elevators (Detailed view)' }, 'Show', sel);
 }
 
 /** Add openings, niches, balconies, cornices or pilasters to the selection. */
@@ -256,10 +268,20 @@ function columnBox(ed: Editor, keys: string[]) {
   const lenOf = (plan: StructurePlan, seg: PlanSegment) => polyLength(sampleSeg(plan, seg)) * b.baseLength;
   /** First edit: turn the automatic columns (on the division borders) into a list we can change. */
   const own = (plan: StructurePlan, seg: PlanSegment) => { if (!seg.columns) seg.columns = wallBorders(ed, plan, seg).slice(1, -1); return seg.columns; };
-  const move = (d: number) => ed.mutate(() => found.forEach(f => {
-    const list = own(f.plan, f.seg), L = lenOf(f.plan, f.seg);
-    if (f.idx < list.length) list[f.idx] = Math.round(Math.min(L, Math.max(0, list[f.idx] + d)) * 100) / 100;
-  }));
+  /** Keep the whole column on its line (and clear of corner columns). */
+  const range = (plan: StructurePlan, seg: PlanSegment) => columnRange(plan, seg, lenOf(plan, seg), segColT(plan, seg));
+  const fit = (plan: StructurePlan, seg: PlanSegment, m: number) => { const [lo, hi] = range(plan, seg); return Math.round(Math.min(hi, Math.max(lo, m)) * 100) / 100; };
+  const move = (d: number) => {
+    let stopped = false;
+    ed.mutate(() => found.forEach(f => {
+      const list = own(f.plan, f.seg);
+      if (f.idx >= list.length) return;
+      const v = fit(f.plan, f.seg, list[f.idx] + d);
+      if (Math.abs(v - (list[f.idx] + d)) > 1e-6) stopped = true;
+      list[f.idx] = v;
+    }));
+    if (stopped) toast('A column stops at the end of its line');
+  };
   const one = found.length === 1 ? found[0] : null;
   const pos = one ? (one.seg.columns ?? wallBorders(ed, one.plan, one.seg).slice(1, -1))[one.idx] ?? 0 : 0;
   return h('div', { class: 'sub' },
@@ -268,17 +290,17 @@ function columnBox(ed: Editor, keys: string[]) {
       h('span', { class: 'muted small' }, one ? `${fmt(pos)} m from the start of the line` : 'Move along the line'),
       h('button', { title: 'Back along the line', onclick: () => move(-0.1) }, '◀'),
       h('button', { title: 'Forward along the line', onclick: () => move(0.1) }, '▶')),
-    one ? h('label', {}, 'Position (m from the start)', ed.numInput(pos, v => { const list = own(one.plan, one.seg); list[one.idx] = Math.min(lenOf(one.plan, one.seg), Math.max(0, v)); }, 0, 10000)) : null,
+    one ? h('label', {}, `Position (m from the start, ${fmt(range(one.plan, one.seg)[0])}–${fmt(range(one.plan, one.seg)[1])})`, ed.numInput(pos, v => { const list = own(one.plan, one.seg); list[one.idx] = fit(one.plan, one.seg, v); }, 0, 10000)) : null,
     h('div', { class: 'row' },
       h('button', {
         title: 'Add a copy halfway to the next column (or 1 m further)',
         onclick: () => {
           const added: string[] = [];
           ed.mutate(() => found.forEach(f => {
-            const list = own(f.plan, f.seg), L = lenOf(f.plan, f.seg), p0 = list[f.idx];
+            const list = own(f.plan, f.seg), p0 = list[f.idx];
             const next = list.filter(x => x > p0 + 1e-6).sort((a, c) => a - c)[0];
-            const at = next !== undefined ? (p0 + next) / 2 : Math.min(L, p0 + 1);
-            list.push(Math.round(at * 100) / 100);
+            const at = next !== undefined ? (p0 + next) / 2 : p0 + 1;
+            list.push(fit(f.plan, f.seg, at));
             added.push(`col:${f.seg.id}:${list.length - 1}`);
           }));
           ed.selElements.clear(); added.forEach(k => ed.selElements.add(k)); ed.refresh();

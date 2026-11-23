@@ -48,6 +48,8 @@ export interface BuildOpts {
   mats: Mats;
   selection?: Selection;
   textures: Texture[];
+  /** Cutaway: build floors up to this index only, without its ceiling (to look inside). */
+  upTo?: number | null;
 }
 export interface BuildStats { windowCount: number; windowArea: number; windowSkipped: number }
 
@@ -128,9 +130,12 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const m = add(geo, top, { floorId: fl.id, floorIndex: i });
     (m as unknown as THREE.Mesh<THREE.BufferGeometry, THREE.Material[]>).material = [top, edge]; // ExtrudeGeometry groups: 0 = top / bottom, 1 = sides
   });
+  const cut = o.upTo ?? null;
+  const hidden = (i: number) => cut !== null && i > cut;
   for (let i = 0; i < N; i++) {
+    if (hidden(i)) continue;
     if (slabs[i].floor) slab(floorFaces(p, i), elevation(p, i), slabs[i].floor, i);
-    if (slabs[i].ceiling) slab(ceilingFaces(p, i), elevation(p, i + 1) - slabs[i].ceiling, slabs[i].ceiling, i);
+    if (slabs[i].ceiling && i !== cut) slab(ceilingFaces(p, i), elevation(p, i + 1) - slabs[i].ceiling, slabs[i].ceiling, i);
   }
 
   // ---------- walls / columns per floor ----------
@@ -163,7 +168,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const floor = p.floors[i];
     // external walls run the full floor height; internal walls stand between floor and ceiling
     const yBase = elevation(p, i), yTop = elevation(p, i + 1);
-    if (yTop - yBase <= 1e-6) continue;
+    if (yTop - yBase <= 1e-6 || hidden(i)) continue;
     const floorSel = sel.floors.has(floor.id);
 
     const plans: { plan: StructurePlan; interior: boolean }[] = [];
@@ -183,7 +188,10 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const fs = interior ? 0 : faceSide(plan, seg);
         const d0 = norm({ x: bottom[bottom.length - 1].x - bottom[0].x, y: bottom[bottom.length - 1].y - bottom[0].y });
         const inward = { x: -d0.y * fs * (ct / 2 / L), y: d0.x * fs * (ct / 2 / L) };
-        const pts = rows.map((r, ri) => { const q = polyAt(r.poly, r.params, t); return W({ x: q.x + inward.x, y: q.y + inward.y }, y0 + (y1 - y0) * (ri / (rows.length - 1))); });
+        // around a floored area (a porch), straight columns stand on the floor slab and reach the ceiling
+        const onSlab = fs !== 0 && rows.length === 2;
+        const c0 = onSlab ? y0 + slabs[i].floor : y0, c1 = onSlab ? y1 - slabs[i].ceiling : y1;
+        const pts = rows.map((r, ri) => { const q = polyAt(r.poly, r.params, t); return W({ x: q.x + inward.x, y: q.y + inward.y }, c0 + (c1 - c0) * (ri / (rows.length - 1))); });
         for (let k = 0; k + 1 < pts.length; k++) {
           const a = pts[k], c = pts[k + 1];
           // imported column design (detailed view), else a plain square column
@@ -301,7 +309,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         } else {
           // colonnade: columns on the division borders (+ free-standing ends)
           // columns: on the division borders, unless they have been moved / added / removed by hand
-          columnPositions(seg, borders, lenM).forEach((u, k) => {
+          columnPositions(seg, borders, lenM, columnRange(plan, seg, lenM, segColT(plan, seg))).forEach((u, k) => {
             const id = `col:${seg.id}:${k}`;
             colAlong(rows, u, segColT(plan, seg), bottom, { ...pick, placementId: id }, seg, material, selected || sel.elements.has(id));
           });
@@ -334,7 +342,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     if (pl.type !== 'model' || !o.detailed || !mats.design) continue;
     const src = mats.design(pl.designId);
     const fl = p.floors.findIndex(f => f.id === pl.floorId);
-    if (!src || fl < 0) continue;
+    if (!src || fl < 0 || hidden(fl)) continue;
     const size = (src.userData.size as THREE.Vector3) ?? new THREE.Vector3(1, 1, 1);
     const k = (pl.scale ?? 1) / Math.max(size.x, size.y, size.z, 1e-9);
     const pos = pl.pos ?? { x: 0, y: 0, z: 0 };
@@ -469,9 +477,23 @@ export const BALCONY_HEIGHT = BALCONY_AT;
 const BALUSTER = [[0, 0], [0.055, 0], [0.055, 0.05], [0.035, 0.1], [0.06, 0.32], [0.065, 0.4], [0.03, 0.55], [0.025, 0.7], [0.045, 0.75], [0.045, 0.8], [0, 0.8]].map(([x, y]) => new THREE.Vector2(x, y));
 
 /** Column positions along a colonnade (u 0..1): hand-placed ones, else the inner division borders. */
-export function columnPositions(seg: PlanSegment, borders: number[], lenM: number): number[] {
-  if (seg.columns) return seg.columns.map(m => Math.min(1, Math.max(0, lenM ? m / lenM : 0)));
+export function columnPositions(seg: PlanSegment, borders: number[], lenM: number, range?: [number, number]): number[] {
+  const [lo, hi] = range ?? [0, lenM];
+  if (seg.columns) return seg.columns.map(m => (lenM ? Math.min(hi, Math.max(lo, m)) / lenM : 0));
   return borders.slice(1, -1);
+}
+
+/**
+ * Where a column's centre may be along a colonnade (m from its start): the whole column stays on the
+ * line, and clear of the corner columns standing at free ends.
+ */
+export function columnRange(plan: StructurePlan, seg: PlanSegment, lenM: number, ct: number): [number, number] {
+  const cornerCol = (id: string) => {
+    const segs = plan.segments.filter(x => x.a === id || x.b === id);
+    return !segs.some(x => segKind(x) === 'wall') && segs.some(x => segKind(x) === 'colonnade');
+  };
+  const lo = cornerCol(seg.a) ? ct : ct / 2, hi = lenM - (cornerCol(seg.b) ? ct : ct / 2);
+  return lo <= hi ? [lo, hi] : [lenM / 2, lenM / 2];
 }
 
 /** +1: the wall runs counter-clockwise around an enclosed area (inside on its left), −1: clockwise, 0: not around one. */
