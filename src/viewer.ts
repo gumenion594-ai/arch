@@ -179,6 +179,8 @@ export class Viewer {
 
     this.stats = { windowCount: 0, windowArea: 0, windowSkipped: 0 };
     for (const b of s.buildings) this.addBuilding(s, b, !o.activeId || o.activeId === '*' || b.id === o.activeId, o);
+    // first person: no drawing lines (edges, division lines, floor lines), just the building
+    if (this.walk) this.content.traverse(x => { if ((x as THREE.Line).isLine) x.visible = false; });
   }
 
   private addBuilding(s: Scene3D, b: Building, active: boolean, o: ViewOpts) {

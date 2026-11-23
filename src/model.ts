@@ -442,29 +442,90 @@ export function formatRanges(b: Building, idx: number[]): string {
   return r.join(', ');
 }
 
-// ---------- persistence (localStorage) ----------
-const KEY = 'arch.projects.v1';
-
-export function loadProjects(): Project[] {
-  try {
-    const raw = JSON.parse(localStorage.getItem(KEY) || '[]') as Project[];
-    const list = splitMulti(raw.map(normalize));
-    if (list.length !== raw.length) saveProjects(list);
-    return list;
-  } catch (e) { console.error(e); return []; }
+// ---------- persistence ----------
+// Projects live in IndexedDB (room for hundreds of MB, unlike localStorage's ~5 MB). They are read once at
+// start-up into memory; saving updates memory at once and writes that one project in the background.
+const KEY = 'arch.projects.v1'; // old localStorage key (moved over on first start)
+const DB = 'arch-projects', STORE = 'projects';
+let cache: Project[] = [];
+let dbp: Promise<IDBDatabase> | null = null;
+function projectDb(): Promise<IDBDatabase> {
+  return (dbp ??= new Promise((res, rej) => {
+    const r = indexedDB.open(DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: 'id' });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  }));
 }
+function tx(mode: IDBTransactionMode, fn: (st: IDBObjectStore) => void): Promise<void> {
+  return projectDb().then(d => new Promise<void>((res, rej) => {
+    const t = d.transaction(STORE, mode);
+    fn(t.objectStore(STORE));
+    t.oncomplete = () => res();
+    t.onerror = () => rej(t.error);
+    t.onabort = () => rej(t.error);
+  }));
+}
+const failed = (e: unknown) => { console.error('save failed', e); window.dispatchEvent(new CustomEvent('arch-save-failed')); };
+
+/** Load every project into memory (call once before anything else); moves projects over from localStorage. */
+export async function initStorage(): Promise<void> {
+  let list: Project[] = [];
+  try {
+    list = await projectDb().then(d => new Promise<Project[]>((res, rej) => {
+      const r = d.transaction(STORE).objectStore(STORE).getAll();
+      r.onsuccess = () => res(r.result as Project[]);
+      r.onerror = () => rej(r.error);
+    }));
+    const legacy = localStorage.getItem(KEY);
+    if (legacy) {
+      const old = JSON.parse(legacy) as Project[];
+      const have = new Set(list.map(p => p.id));
+      const moved = old.filter(p => !have.has(p.id));
+      await tx('readwrite', st => moved.forEach(p => st.put(p)));
+      list.push(...moved);
+      localStorage.removeItem(KEY); // frees the old 5 MB box once everything is safely in IndexedDB
+    }
+  } catch (e) {
+    console.error('IndexedDB unavailable, using localStorage', e);
+    try { list = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { list = []; }
+    useLocal = true;
+  }
+  const raw = list.length;
+  cache = splitMulti(list.map(normalize));
+  if (cache.length !== raw) saveProjects(cache);
+  // ask the browser not to clear this site's data when space runs low
+  try { navigator.storage?.persist?.().catch(() => {}); } catch { /* not supported */ } // the answer can take a while: don't wait for it
+}
+let useLocal = false;
+
+/** All projects (the array is a copy; the projects are the live ones). */
+export function loadProjects(): Project[] { return cache.slice(); }
 export function saveProjects(list: Project[]) {
-  try { localStorage.setItem(KEY, JSON.stringify(list)); return true; } catch (e) { console.error('save failed', e); return false; }
+  cache = list.slice();
+  if (useLocal) { try { localStorage.setItem(KEY, JSON.stringify(cache)); } catch (e) { failed(e); } return true; }
+  tx('readwrite', st => { st.clear(); cache.forEach(p => st.put(JSON.parse(JSON.stringify(p)))); }).catch(failed);
+  return true;
 }
 export function saveProject(p: Project) {
   p.updated = Date.now();
-  const list = loadProjects();
-  const i = list.findIndex(x => x.id === p.id);
-  if (i >= 0) list[i] = p; else list.push(p);
-  if (!saveProjects(list)) window.dispatchEvent(new CustomEvent('arch-save-failed'));
+  const i = cache.findIndex(x => x.id === p.id);
+  if (i >= 0) cache[i] = p; else cache.push(p);
+  if (useLocal) return void saveProjects(cache);
+  const copy = JSON.parse(JSON.stringify(p)); // a snapshot: later edits don't leak into this write
+  tx('readwrite', st => st.put(copy)).catch(failed);
 }
 export function deleteProject(id: string) {
-  saveProjects(loadProjects().filter(p => p.id !== id));
+  cache = cache.filter(p => p.id !== id);
+  if (useLocal) return void saveProjects(cache);
+  tx('readwrite', st => st.delete(id)).catch(failed);
+}
+/** How much this site stores and may store (bytes), where the browser tells. */
+export async function storageInfo(): Promise<{ usage: number; quota: number; persisted: boolean } | null> {
+  try {
+    const e = await navigator.storage.estimate();
+    return { usage: e.usage ?? 0, quota: e.quota ?? 0, persisted: (await navigator.storage.persisted?.()) ?? false };
+  } catch { return null; }
 }
 
 // ---------- undo ----------
