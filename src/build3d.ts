@@ -1,7 +1,7 @@
 // Turns a project into 3D geometry (structural / detailed views).
 import * as THREE from 'three';
 import {
-  PlanSegment, Project, StructurePlan, floorBase, planForFloor, segColT, segConnect, segConnectSmooth, segKind, totalHeight,
+  Building, PlanSegment, StructurePlan, Texture, elevation, planForFloor, segColT, segConnect, segConnectSmooth, segKind,
 } from './model';
 import { V2, enclosedFaces, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath } from './geometry';
 
@@ -11,15 +11,19 @@ type Mats = {
 };
 
 /** Plan that sits at a level (0..N). Level N is the "Top" (roof) level. */
-export function planAtLevel(p: Project, k: number): StructurePlan | null {
-  if (k < p.floors.length) return planForFloor(p, p.floors[k].id) ?? null;
-  return p.plans.find(pl => pl.id === p.topPlanId) ?? null;
+export function planAtLevel(b: Building, k: number): StructurePlan | null {
+  if (k < b.floors.length) return planForFloor(b, b.floors[k].id) ?? null;
+  return b.plans.find(pl => pl.id === b.topPlanId) ?? null;
 }
 
-export function buildStructure(p: Project, detailed: boolean, mats: Mats): THREE.Group {
+/** Plan coordinates (0..1) + elevation -> world. Plan y grows towards -z. */
+export const toWorld = (b: Building, v: V2, y: number) => new THREE.Vector3(b.x + v.x * b.baseLength, y, -(b.y + v.y * b.baseLength));
+
+export function buildStructure(p: Building, textures: Texture[], detailed: boolean, mats: Mats): THREE.Group {
   const g = new THREE.Group();
   const L = p.baseLength, N = p.floors.length;
-  const W = (v: V2, y: number) => new THREE.Vector3(v.x * L, y, (1 - v.y) * L);
+  const W = (v: V2, y: number) => toWorld(p, v, y);
+  const floorBase = (_: Building, i: number) => elevation(p, i);
 
   const add = (geo: THREE.BufferGeometry, mat: THREE.Material, edges = true) => {
     const m = new THREE.Mesh(geo, mat);
@@ -42,13 +46,13 @@ export function buildStructure(p: Project, detailed: boolean, mats: Mats): THREE
       if (faces.length) {
         const hFloor = k < N ? p.floors[k].height : p.floors[N - 1].height;
         t = Math.min(settings.floorThickness, hFloor * 0.9);
-        const y = k === N ? totalHeight(p) - t : floorBase(p, k);
+        const y = k === N ? floorBase(p, N) - t : floorBase(p, k);
         faces.forEach((f, i) => {
           const shape = new THREE.Shape(f.map(v => new THREE.Vector2(v.x * L, v.y * L)));
           const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 1 });
           geo.rotateX(-Math.PI / 2);
           // tiny offset so overlapping slabs from two plans don't flicker
-          geo.translate(0, y + i * 1e-4 * t, L);
+          geo.translate(p.x, y + i * 1e-4 * t, -p.y);
           add(geo, mats.slab);
         });
       }
@@ -82,7 +86,7 @@ export function buildStructure(p: Project, detailed: boolean, mats: Mats): THREE
       if (kind === 'wall') {
         const offs = offsets(plan, seg, bottom, plan.wallThickness / 2 / L);
         const tex = detailed && seg.texture ? mats.tex(seg.texture) : null;
-        const texInfo = tex ? p.textures.find(t => t.id === seg.texture) : undefined;
+        const texInfo = tex ? textures.find(t => t.id === seg.texture) : undefined;
         const tileH = p.floors[i].height, tileW = texInfo ? tileH * (texInfo.w / texInfo.h) : 1;
         add(solidFromGrid(rows, offs, polyParams(bottom), y0, y1, W, L, tileW, tileH), tex ?? mats.wall);
       } else {

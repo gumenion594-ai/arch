@@ -1,9 +1,9 @@
 // Three.js 3D view: ground, building-area wireframe, floor lines, walls and slabs.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Project, floorBase, segKind, totalHeight } from './model';
+import { Building, Project, elevation, segKind } from './model';
 import { enclosedFaces, sampleSeg, V2 } from './geometry';
-import { buildStructure, planAtLevel } from './build3d';
+import { buildStructure, planAtLevel, toWorld } from './build3d';
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
 
@@ -14,7 +14,6 @@ export class Viewer {
   controls: OrbitControls;
   private content = new THREE.Group();
   private ro: ResizeObserver;
-  private lastBase = -1;
   private disposed = false;
 
   constructor(private host: HTMLElement) {
@@ -67,64 +66,79 @@ export class Viewer {
     this.content.clear();
   }
 
+  /** Bounds of all buildings: [minX, maxX, minZ, maxZ, minY, maxY]. */
+  private bounds(p: Project) {
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, y0 = 0, y1 = 0;
+    for (const b of p.buildings) {
+      x0 = Math.min(x0, b.x); x1 = Math.max(x1, b.x + b.baseLength);
+      z0 = Math.min(z0, -(b.y + b.baseLength)); z1 = Math.max(z1, -b.y);
+      y0 = Math.min(y0, elevation(b, 0)); y1 = Math.max(y1, elevation(b, b.floors.length));
+    }
+    return { x0, x1, z0, z1, y0, y1 };
+  }
+
   frame(p: Project) {
-    const L = p.baseLength, H = totalHeight(p);
-    const r = Math.max(L, H) * 1.6;
-    this.camera.position.set(L * 0.5 + r, H * 0.6 + r * 0.6, L * 0.5 + r);
-    this.controls.target.set(L / 2, H / 3, L / 2);
+    const B = this.bounds(p);
+    const L = Math.max(B.x1 - B.x0, B.z1 - B.z0), H = B.y1 - B.y0;
+    const r = Math.max(L, H) * 1.4;
+    const cx = (B.x0 + B.x1) / 2, cz = (B.z0 + B.z1) / 2;
+    this.camera.position.set(cx + r, B.y1 * 0.6 + r * 0.6, cz + r);
+    this.controls.target.set(cx, (B.y0 + B.y1) / 3, cz);
     this.camera.near = Math.max(0.01, r / 1e4);
     this.camera.far = r * 100;
     this.camera.updateProjectionMatrix();
   }
 
-  /** Rebuild the scene. World: x = plan x * L, z = (1 - plan y) * L, y = up. */
-  update(p: Project, mode: ViewMode, selected: Set<string>) {
+  private frameKey = '';
+  /** Rebuild the scene. All buildings are drawn; the active one is highlighted. */
+  update(p: Project, activeId: string, mode: ViewMode, selected: Set<string>) {
     this.clear();
-    const L = p.baseLength, H = totalHeight(p);
-    if (this.lastBase !== L) { this.frame(p); this.lastBase = L; }
+    const key = p.id + ':' + p.buildings.map(b => b.id).join(',');
+    if (key !== this.frameKey) { this.frame(p); this.frameKey = key; }
+    const B = this.bounds(p);
+    const span = Math.max(B.x1 - B.x0, B.z1 - B.z0, 1);
+    const underground = p.buildings.some(b => b.ground > 0);
 
-    // ground plane
+    // ground plane (see-through when there are underground floors)
     const g = new THREE.Mesh(
-      new THREE.PlaneGeometry(L * 6, L * 6),
-      new THREE.MeshStandardMaterial({ color: 0x6a6a6a, roughness: 1 }),
+      new THREE.PlaneGeometry(span * 6, span * 6),
+      new THREE.MeshStandardMaterial({ color: 0x6a6a6a, roughness: 1, transparent: underground, opacity: underground ? 0.35 : 1, depthWrite: !underground, side: THREE.DoubleSide }),
     );
     g.rotation.x = -Math.PI / 2;
-    g.position.set(L / 2, -0.001 * L, L / 2);
+    g.position.set((B.x0 + B.x1) / 2, -0.0005 * span, (B.z0 + B.z1) / 2);
     this.content.add(g);
 
-    // building area: square at ground, at every floor and at top, plus vertical edges
-    const white = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 });
-    const yellow = new THREE.LineBasicMaterial({ color: 0xffd400 });
-    const sq = (y: number, mat: THREE.LineBasicMaterial) => {
-      const geo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(0, y, 0), new THREE.Vector3(L, y, 0), new THREE.Vector3(L, y, L), new THREE.Vector3(0, y, L),
-      ]);
-      this.content.add(new THREE.LineLoop(geo, mat));
-    };
-    let y = 0;
-    p.floors.forEach(f => {
-      sq(y, selected.has(f.id) ? yellow : white);
-      y += f.height;
-    });
-    sq(H, white);
-    p.floors.forEach((f, i) => { if (selected.has(f.id)) sq(floorBase(p, i + 1), yellow); });
-    const vgeo = new THREE.BufferGeometry().setFromPoints(
-      [[0, 0], [L, 0], [L, L], [0, L]].flatMap(([x, z]) => [new THREE.Vector3(x, 0, z), new THREE.Vector3(x, H, z)]),
-    );
-    this.content.add(new THREE.LineSegments(vgeo, white));
+    for (const b of p.buildings) this.addBuilding(p, b, b.id === activeId, mode, selected);
+  }
 
-    const toW = (v: V2, yy: number) => new THREE.Vector3(v.x * L, yy, (1 - v.y) * L);
+  private addBuilding(p: Project, b: Building, active: boolean, mode: ViewMode, selected: Set<string>) {
+    const L = b.baseLength, N = b.floors.length;
+    const yTop = elevation(b, N), yBot = elevation(b, 0);
+    const white = new THREE.LineBasicMaterial({ color: active ? 0xffffff : 0x9a9a9a, transparent: true, opacity: active ? 0.55 : 0.3 });
+    const under = new THREE.LineBasicMaterial({ color: 0x8fb0ff, transparent: true, opacity: active ? 0.5 : 0.25 });
+    const yellow = new THREE.LineBasicMaterial({ color: 0xffd400 });
+    const corners: V2[] = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+    const sq = (y: number, mat: THREE.LineBasicMaterial) => {
+      this.content.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners.map(c => toWorld(b, c, y))), mat));
+    };
+    // building area: square at every floor level and at the top, plus vertical edges
+    for (let i = 0; i <= N; i++) {
+      const sel = (i < N && active && selected.has(b.floors[i].id)) || (i > 0 && active && selected.has(b.floors[i - 1].id));
+      sq(elevation(b, i), sel ? yellow : i < b.ground ? under : white);
+    }
+    this.content.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(
+      corners.flatMap(c => [toWorld(b, c, yBot), toWorld(b, c, yTop)])), white));
 
     if (mode === 'plan') {
       // stacked 2D plans (levels 0..N, N = Top)
-      for (let k = 0; k <= p.floors.length; k++) {
-        const plan = planAtLevel(p, k);
+      for (let k = 0; k <= N; k++) {
+        const plan = planAtLevel(b, k);
         if (!plan) continue;
-        const yy = (k < p.floors.length ? floorBase(p, k) : H) + 0.002 * L;
-        const isSel = k < p.floors.length && selected.has(p.floors[k].id);
-        const color = isSel ? 0xffd400 : k === p.floors.length ? 0xffa060 : 0x7fc8ff;
+        const yy = elevation(b, k) + 0.002 * L;
+        const isSel = active && k < N && selected.has(b.floors[k].id);
+        const color = isSel ? 0xffd400 : !active ? 0x667788 : k === N ? 0xffa060 : 0x7fc8ff;
         for (const s of plan.segments) {
-          const pts = sampleSeg(plan, s).map(v => toW(v, yy));
+          const pts = sampleSeg(plan, s).map(v => toWorld(b, v, yy));
           const kind = segKind(s);
           const mat = kind === 'wall'
             ? new THREE.LineBasicMaterial({ color })
@@ -136,10 +150,10 @@ export class Viewer {
         for (const face of enclosedFaces(plan)) {
           const shape = new THREE.Shape(face.map(v => new THREE.Vector2(v.x * L, v.y * L)));
           const m = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({
-            color: 0x3a7bd5, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false,
+            color: 0x3a7bd5, transparent: true, opacity: active ? 0.18 : 0.08, side: THREE.DoubleSide, depthWrite: false,
           }));
           m.rotation.x = -Math.PI / 2;
-          m.position.set(0, yy, L);
+          m.position.set(b.x, yy, -b.y);
           this.content.add(m);
         }
       }
@@ -147,11 +161,11 @@ export class Viewer {
     }
 
     const detailed = mode === 'detailed';
-    this.content.add(buildStructure(p, detailed, {
+    this.content.add(buildStructure(b, p.textures, detailed, {
       wall: new THREE.MeshStandardMaterial({ color: detailed ? 0xd8d2c4 : 0xbdbdbd, roughness: 0.9 }),
       column: new THREE.MeshStandardMaterial({ color: detailed ? 0xe6e1d6 : 0xc8c8c8, roughness: 0.8 }),
       slab: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1 }),
-      edge: new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: detailed ? 0.25 : 0.6 }),
+      edge: new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: detailed ? 0.25 : active ? 0.6 : 0.3 }),
       tex: id => this.texMat(p, id),
     }));
   }

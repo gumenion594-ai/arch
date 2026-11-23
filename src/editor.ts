@@ -1,6 +1,7 @@
 // Project editor: header, floor panel, 3D view / structure planner and their panels.
+import { buildingDialog } from './dialogs';
 import {
-  ConnectMode, History, MAX_M, PlanSegment, Project, SegKind, StructurePlan, clamp, floorBase, formatRanges,
+  Building, ConnectMode, createBuilding, elevation, floorLabel, History, MAX_M, PlanSegment, Project, SegKind, StructurePlan, clamp, floorBase, formatRanges,
   newPlan, parseRanges, planForFloor, saveProject, segKind, totalHeight, uid,
 } from './model';
 import { Viewer, ViewMode } from './viewer';
@@ -19,6 +20,7 @@ export class Editor {
   selFloors = new Set<string>();
   private anchor: string | null = null; // for shift-click range selection
   activePlan: string | null;
+  activeB: string;
   root = h('div', { class: 'editor' });
   left = h('div', { class: 'left panel' });
   center = h('div', { class: 'center' });
@@ -29,7 +31,8 @@ export class Editor {
 
   constructor(p: Project, private onBack: () => void) {
     this.p = p;
-    this.activePlan = p.plans[0]?.id ?? null;
+    this.activeB = p.buildings[0].id;
+    this.activePlan = this.b.plans[0]?.id ?? null;
     this.root.append(this.header, this.left, this.center, this.right);
     app.innerHTML = '';
     app.append(this.root);
@@ -50,8 +53,9 @@ export class Editor {
     const prev = this.hist.pop();
     if (!prev) return toast('Nothing to undo');
     this.p = prev;
-    for (const id of [...this.selFloors]) if (!this.p.floors.some(f => f.id === id)) this.selFloors.delete(id);
-    if (!this.p.plans.some(pl => pl.id === this.activePlan)) this.activePlan = this.p.plans[0]?.id ?? null;
+    if (!this.p.buildings.some(x => x.id === this.activeB)) this.activeB = this.p.buildings[0].id;
+    for (const id of [...this.selFloors]) if (!this.b.floors.some(f => f.id === id)) this.selFloors.delete(id);
+    if (!this.b.plans.some(pl => pl.id === this.activePlan)) this.activePlan = this.b.plans[0]?.id ?? null;
     saveProject(this.p);
     this.planner?.prune();
     this.refresh();
@@ -61,7 +65,7 @@ export class Editor {
     this.renderHeader();
     this.renderLeft();
     if (this.mode === 'structure') { this.renderRight(); this.planner?.draw(); }
-    else this.viewer?.update(this.p, this.viewMode, this.selFloors);
+    else this.viewer?.update(this.p, this.b.id, this.viewMode, this.selFloors);
   }
 
   setMode(m: Mode) {
@@ -77,7 +81,7 @@ export class Editor {
       this.planner = new Planner(this.center, {
         getPlan: () => this.plan(),
         getGhost: () => this.ghostPlan(),
-        baseLength: () => this.p.baseLength,
+        baseLength: () => this.b.baseLength,
         begin: () => this.begin(),
         commit: () => this.commit(),
         toast,
@@ -87,21 +91,43 @@ export class Editor {
     this.refresh();
   }
 
-  plan(): StructurePlan | null { return this.p.plans.find(pl => pl.id === this.activePlan) ?? null; }
+  /** The building being edited. */
+  get b(): Building { return this.p.buildings.find(x => x.id === this.activeB) ?? this.p.buildings[0]; }
+
+  switchBuilding(id: string) {
+    this.activeB = id;
+    this.selFloors.clear();
+    this.activePlan = this.b.plans[0]?.id ?? null;
+    if (this.planner) { this.planner.head = null; this.planner.selPoints.clear(); this.planner.selSegs.clear(); }
+    this.refresh();
+  }
+
+  addBuilding() {
+    buildingDialog({
+      title: 'New building', nameLabel: 'Building name', defaultName: `Building ${this.p.buildings.length + 1}`, project: this.p,
+      onCreate: spec => {
+        const nb = createBuilding(spec);
+        this.mutate(() => this.p.buildings.push(nb));
+        this.switchBuilding(nb.id);
+      },
+    });
+  }
+
+  plan(): StructurePlan | null { return this.b.plans.find(pl => pl.id === this.activePlan) ?? null; }
 
   /** The plan just below where the active plan starts (Top level -> top floor's plan). */
   ghostPlan(): StructurePlan | null {
     const pl = this.plan();
     if (!pl) return null;
-    const idx = this.p.floors.findIndex(f => pl.floorIds.includes(f.id));
-    if (idx > 0) return planForFloor(this.p, this.p.floors[idx - 1].id) ?? null;
-    if (idx < 0 && this.p.topPlanId === pl.id) return planForFloor(this.p, this.p.floors[this.p.floors.length - 1].id) ?? null;
+    const idx = this.b.floors.findIndex(f => pl.floorIds.includes(f.id));
+    if (idx > 0) return planForFloor(this.b, this.b.floors[idx - 1].id) ?? null;
+    if (idx < 0 && this.b.topPlanId === pl.id) return planForFloor(this.b, this.b.floors[this.b.floors.length - 1].id) ?? null;
     return null;
   }
 
   planColor(pl: StructurePlan | null | undefined) {
     if (!pl) return 'transparent';
-    return PLAN_COLORS[this.p.plans.indexOf(pl) % PLAN_COLORS.length];
+    return PLAN_COLORS[this.b.plans.indexOf(pl) % PLAN_COLORS.length];
   }
 
   private onKey = (e: KeyboardEvent) => {
@@ -132,6 +158,7 @@ export class Editor {
     this.header.append(
       h('button', { onclick: () => this.onBack() }, '← Projects'),
       nameIn,
+      this.buildingSwitcher(),
       h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure planner')),
       this.mode === 'view' ? vm : h('span'),
       h('div', { class: 'spacer' }),
@@ -140,9 +167,26 @@ export class Editor {
     );
   }
 
+  private buildingSwitcher() {
+    const sel = h('select', { title: 'Building', onchange: () => (sel.value === '__new' ? (sel.value = this.b.id, this.addBuilding()) : this.switchBuilding(sel.value)) },
+      ...this.p.buildings.map(x => h('option', { value: x.id }, x.name)),
+      h('option', { value: '__new' }, '+ New building…'),
+    );
+    sel.value = this.b.id;
+    const b = this.b;
+    return h('div', { class: 'bswitch' },
+      sel,
+      h('button', { title: 'Rename building', onclick: () => { const n = prompt('Rename building', b.name); if (n?.trim()) this.mutate(() => (b.name = n.trim())); } }, '✎'),
+      h('button', {
+        class: 'danger', title: 'Delete building', disabled: this.p.buildings.length <= 1,
+        onclick: () => { if (confirm(`Delete ${b.name}?`)) { this.mutate(() => (this.p.buildings = this.p.buildings.filter(x => x !== b))); this.switchBuilding(this.p.buildings[0].id); } },
+      }, '🗑'),
+    );
+  }
+
   // ---- floors panel ----
   private clickFloor(e: MouseEvent, id: string) {
-    const ids = this.p.floors.map(f => f.id);
+    const ids = this.b.floors.map(f => f.id);
     if (e.shiftKey && this.anchor && ids.includes(this.anchor)) {
       const [a, b] = [ids.indexOf(this.anchor), ids.indexOf(id)].sort((x, y) => x - y);
       this.selFloors = new Set(ids.slice(a, b + 1));
@@ -157,36 +201,8 @@ export class Editor {
   }
 
   renderLeft() {
-    const p = this.p, H = totalHeight(p);
+    const p = this.b, H = totalHeight(p);
     const bar = h('div', { class: 'floorbar' });
-    const total = h('input', {
-      type: 'number', step: 0.1, value: fmt(H),
-      onchange: () => {
-        const v = num(total.value);
-        if (!(v > 0) || v > MAX_M) { toast('Total height must be between 0 and 10 000 m'); return this.refresh(); }
-        const k = v / H;
-        this.mutate(() => p.floors.forEach(f => (f.height *= k)));
-      },
-    });
-    const count = h('input', {
-      type: 'number', step: 1, min: 1, value: p.floors.length,
-      onchange: () => {
-        const n = Math.round(num(count.value));
-        if (!(n >= 1) || n > 2000) { toast('Floors must be between 1 and 2000'); return this.refresh(); }
-        const top = p.floors[p.floors.length - 1];
-        const add = n - p.floors.length;
-        if (add > 0 && H + add * top.height > MAX_M) { toast('That would exceed 10 000 m'); return this.refresh(); }
-        this.mutate(() => {
-          if (add > 0) {
-            const pl = planForFloor(p, top.id);
-            for (let i = 0; i < add; i++) { const f = { id: uid(), height: top.height }; p.floors.push(f); pl?.floorIds.push(f.id); }
-          } else {
-            const removed = p.floors.splice(n).map(f => f.id);
-            p.plans.forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !removed.includes(id))));
-          }
-        });
-      },
-    });
 
     // floor bar: floors stacked bottom-up, sized by height, coloured stripe = plan
     const top = p.plans.find(pl => pl.id === p.topPlanId);
@@ -195,16 +211,15 @@ export class Editor {
       const bottom = (floorBase(p, i) / H) * 100, hp = (f.height / H) * 100;
       const pl = planForFloor(p, f.id);
       const seg = h('div', {
-        class: 'fseg' + (this.selFloors.has(f.id) ? ' sel' : ''),
+        class: 'fseg' + (this.selFloors.has(f.id) ? ' sel' : '') + (i < p.ground ? ' under' : ''),
         style: `bottom:${bottom}%;height:${hp}%;border-left-color:${this.planColor(pl)}`,
-        title: `Floor ${i + 1} · ${fmt(f.height)} m · ${pl?.name ?? 'no plan'}\nClick: select · Shift: range · Ctrl: add · Double-click: split here`,
+        title: `Floor ${floorLabel(p, i)} · ${fmt(f.height)} m · ${pl?.name ?? 'no plan'}\nClick: select · Shift: range · Ctrl: add · Double-click: split here`,
         onclick: (e: MouseEvent) => this.clickFloor(e, f.id),
         ondblclick: (e: MouseEvent) => {
           const r = seg.getBoundingClientRect();
-          const ratio = clamp((r.bottom - e.clientY) / r.height, 0.05, 0.95);
-          this.splitFloor(f.id, ratio);
+          this.splitFloor(f.id, clamp((r.bottom - e.clientY) / r.height, 0.05, 0.95));
         },
-      }, h('span', {}, `F${i + 1} · ${fmt(f.height)} m`));
+      }, h('span', {}, `${floorLabel(p, i)} · ${fmt(f.height)} m`));
       // drag handle on the top edge changes only this floor's height
       const handle = h('div', { class: 'fhandle', title: 'Drag to change this floor height' });
       handle.addEventListener('mousedown', e => {
@@ -224,13 +239,36 @@ export class Editor {
       seg.append(handle);
       bar.append(seg);
     });
+    // "+" at every boundary: insert a floor there (bottom edge, between floors, top edge)
+    for (let k = 0; k <= p.floors.length; k++) {
+      bar.append(h('button', {
+        class: 'fins', style: `bottom:${(floorBase(p, k) / H) * 100}%`,
+        title: k === 0 ? 'Add a floor at the bottom' : k === p.floors.length ? 'Add a floor on top' : `Insert a floor between ${floorLabel(p, k - 1)} and ${floorLabel(p, k)}`,
+        onclick: (e: Event) => { e.stopPropagation(); this.insertFloor(k); },
+      }, '+'));
+    }
+    // ground line
+    bar.append(h('div', { class: 'gline', style: `bottom:${(floorBase(p, p.ground) / H) * 100}%` }, h('span', {}, 'ground')));
 
+    const eqIn = h('input', { type: 'number', step: 0.1, value: fmt(H) });
     this.left.innerHTML = '';
     this.left.append(
-      h('div', { class: 'box-title' }, 'Floors'),
-      h('label', {}, 'Total height (m)', total),
-      h('label', {}, 'Number of floors', count),
-      h('div', { class: 'muted small' }, `Base ${fmt(p.baseLength)} m × ${fmt(p.baseLength)} m (${fmt(p.baseLength ** 2)} m²)`),
+      h('div', { class: 'box-title' }, `Floors · ${p.name}`),
+      h('div', { class: 'muted small' }, `${p.floors.length} floors (${p.ground} underground) · ${fmt(H)} m · base ${fmt(p.baseLength)} m (${fmt(p.baseLength ** 2)} m²)`),
+      h('div', { class: 'row' },
+        h('button', { onclick: () => this.insertFloor(p.floors.length) }, '+ Top floor'),
+      ),
+      h('div', { class: 'row eq' },
+        h('label', {}, 'Total height (m)', eqIn),
+        h('button', {
+          title: 'Make all floors the same height so they add up to this total',
+          onclick: () => {
+            const v = num(eqIn.value);
+            if (!(v > 0) || v > MAX_M) return toast('Total height must be between 0 and 10 000 m');
+            this.mutate(() => p.floors.forEach(f => (f.height = v / p.floors.length)));
+          },
+        }, 'Equalize'),
+      ),
       h('div', { class: 'floorbar-wrap' }, bar),
       this.floorSelectionBox(),
     );
@@ -238,10 +276,25 @@ export class Editor {
     bar.querySelectorAll<HTMLElement>('.fseg').forEach(el => { if (el.clientHeight < 14) el.querySelector('span')?.remove(); });
   }
 
+  /** Insert a new floor at boundary k (0 = bottom, n = top). Copies the height and plan of a neighbour. */
+  insertFloor(k: number) {
+    const p = this.b;
+    const ref = p.floors[Math.min(k, p.floors.length - 1)] ?? p.floors[k - 1];
+    const below = p.floors[k - 1] ?? ref;
+    if (totalHeight(p) + below.height > MAX_M) return toast('That would exceed 10 000 m');
+    this.mutate(() => {
+      const nf = { id: uid(), height: below.height };
+      p.floors.splice(k, 0, nf);
+      planForFloor(p, below.id)?.floorIds.push(nf.id);
+      if (k <= p.ground && k < p.floors.length - 1) p.ground++; // inserting at or below ground shifts it up
+      this.selFloors = new Set([nf.id]);
+    });
+  }
+
   private floorSelectionBox(): HTMLElement {
-    const p = this.p, H = totalHeight(p);
+    const p = this.b, H = totalHeight(p);
     const idx = p.floors.map((f, i) => (this.selFloors.has(f.id) ? i : -1)).filter(i => i >= 0);
-    if (!idx.length) return h('div', { class: 'muted small' }, 'Click a floor to select it (Shift = range, Ctrl = add). Drag its top edge to resize, double-click to split.');
+    if (!idx.length) return h('div', { class: 'muted small' }, 'Click a floor to select it (Shift = range, Ctrl = add). Drag its top edge to resize, double-click to split, + to insert a floor.');
     const sel = idx.map(i => p.floors[i]);
     const one = sel.length === 1 ? sel[0] : null;
     const sameH = sel.every(f => f.height === sel[0].height);
@@ -267,18 +320,24 @@ export class Editor {
     planSel.value = plans.size > 1 ? '__mixed' : [...plans][0];
 
     return h('div', { class: 'box' },
-      h('div', { class: 'box-title' }, one ? `Floor ${idx[0] + 1}` : `${sel.length} floors: ${formatRanges(idx.map(i => i + 1))}`),
+      h('div', { class: 'box-title' }, one ? `Floor ${floorLabel(p, idx[0])}` : `${sel.length} floors: ${formatRanges(p, idx)}`),
       h('label', {}, one ? 'Height (m)' : 'Height of each (m)', hin),
       h('label', {}, 'Structure plan', planSel),
-      one ? h('div', { class: 'muted small' }, `Starts at ${fmt(floorBase(p, idx[0]))} m`) : null,
+      one ? h('div', { class: 'muted small' }, `Starts at ${fmt(elevation(p, idx[0]))} m`) : null,
       h('div', { class: 'row' },
         one ? h('button', { onclick: () => this.splitFloor(one.id, 0.5) }, 'Split') : null,
+        one && idx[0] !== p.ground ? h('button', { title: 'Floors below this one become underground', onclick: () => this.mutate(() => (p.ground = idx[0])) }, 'Make ground floor') : null,
         h('button', {
           class: 'danger', disabled: sel.length >= p.floors.length,
           onclick: () => this.mutate(() => {
             const ids = sel.map(f => f.id);
+            const groundId = p.floors[p.ground].id;
+            const removedBelow = idx.filter(i => i < p.ground).length;
             p.floors = p.floors.filter(f => !ids.includes(f.id));
             p.plans.forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.includes(id))));
+            // keep the ground floor where it was (or the floor that took its place)
+            const gi = p.floors.findIndex(f => f.id === groundId);
+            p.ground = gi >= 0 ? gi : clamp(p.ground - removedBelow, 0, p.floors.length - 1);
             this.selFloors.clear();
           }),
         }, 'Delete'),
@@ -287,14 +346,14 @@ export class Editor {
   }
 
   splitFloor(id: string, ratio: number) {
-    const i = this.p.floors.findIndex(f => f.id === id);
-    const f = this.p.floors[i];
+    const i = this.b.floors.findIndex(f => f.id === id);
+    const f = this.b.floors[i];
     this.mutate(() => {
       const lower = Math.round(f.height * ratio * 100) / 100;
       const nf = { id: uid(), height: Math.round((f.height - lower) * 100) / 100 };
       f.height = lower;
-      this.p.floors.splice(i + 1, 0, nf);
-      planForFloor(this.p, f.id)?.floorIds.push(nf.id);
+      this.b.floors.splice(i + 1, 0, nf);
+      planForFloor(this.b, f.id)?.floorIds.push(nf.id);
       this.selFloors = new Set([nf.id]);
     });
   }
@@ -302,23 +361,23 @@ export class Editor {
   // ---- structure planner panel ----
   renderRight() {
     if (this.mode !== 'structure' || !this.planner) return;
-    const p = this.p, pl = this.plan(), pn = this.planner;
-    const floorNums = (x: StructurePlan) => p.floors.map((f, i) => (x.floorIds.includes(f.id) ? i + 1 : 0)).filter(Boolean);
+    const p = this.b, pl = this.plan(), pn = this.planner;
+    const floorIdx = (x: StructurePlan) => p.floors.map((f, i) => (x.floorIds.includes(f.id) ? i : -1)).filter(i => i >= 0);
     const plans = h('div', { class: 'plans' }, ...p.plans.map(x => h('div', {
       class: 'plan-row' + (x.id === this.activePlan ? ' active' : ''),
       style: `border-left-color:${this.planColor(x)}`,
       onclick: () => { this.activePlan = x.id; pn.head = null; pn.selPoints.clear(); pn.selSegs.clear(); this.refresh(); },
-    }, x.name, h('span', { class: 'muted small' }, ` ${formatRanges(floorNums(x)) || 'no floors'}${p.topPlanId === x.id ? ' + Top' : ''}`))));
+    }, x.name, h('span', { class: 'muted small' }, ` ${formatRanges(p, floorIdx(x)) || 'no floors'}${p.topPlanId === x.id ? ' + Top' : ''}`))));
 
     const body: (Node | null)[] = [];
     if (pl) {
       // floor assignment: range text, All / None / Selected floors, Top level
       const ranges = h('input', {
-        value: formatRanges(floorNums(pl)), placeholder: 'e.g. 1-20, 25',
+        value: formatRanges(p, floorIdx(pl)), placeholder: 'e.g. B2-G, 1-20, 25',
         onchange: () => {
-          const nums = parseRanges(ranges.value, p.floors.length);
-          if (!nums) { toast('Use floor numbers and ranges, e.g. 1-20, 25'); return this.refresh(); }
-          this.assign(pl, nums.map(n => p.floors[n - 1].id));
+          const idx = parseRanges(ranges.value, p);
+          if (!idx) { toast('Use floor labels and ranges, e.g. B2-G, 1-20, 25'); return this.refresh(); }
+          this.assign(pl, idx.map(i => p.floors[i].id));
         },
       });
       const topCb = h('input', { type: 'checkbox', checked: p.topPlanId === pl.id, onchange: () => this.mutate(() => (p.topPlanId = topCb.checked ? pl.id : null)) });
@@ -392,8 +451,8 @@ export class Editor {
   assign(pl: StructurePlan, ids: string[]) {
     this.mutate(() => {
       const set = new Set(ids);
-      this.p.plans.forEach(o => (o.floorIds = o.floorIds.filter(id => !set.has(id))));
-      pl.floorIds = this.p.floors.map(f => f.id).filter(id => set.has(id));
+      this.b.plans.forEach(o => (o.floorIds = o.floorIds.filter(id => !set.has(id))));
+      pl.floorIds = this.b.floors.map(f => f.id).filter(id => set.has(id));
     });
   }
 
@@ -462,7 +521,7 @@ export class Editor {
   }
 
   selectionBox(pl: StructurePlan): HTMLElement | null {
-    const pn = this.planner!, L = this.p.baseLength;
+    const pn = this.planner!, L = this.b.baseLength;
     const nP = pn.selPoints.size, nS = pn.selSegs.size;
     if (!nP && !nS) return null;
     const box = h('div', { class: 'box' }, h('div', { class: 'box-title' }, `Selected: ${nP} point(s), ${nS} wall(s)`));
@@ -491,7 +550,7 @@ export class Editor {
 
   /** Properties of one or more selected walls. */
   segmentProps(pl: StructurePlan, segs: PlanSegment[]): HTMLElement {
-    const L = this.p.baseLength, pn = this.planner!;
+    const L = this.b.baseLength, pn = this.planner!;
     const common = <T>(get: (s: PlanSegment) => T): T | 'mixed' => {
       const v = get(segs[0]);
       return segs.every(s => get(s) === v) ? v : 'mixed';

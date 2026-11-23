@@ -48,23 +48,37 @@ export interface StructurePlan {
   segments: PlanSegment[];
 }
 
+export interface Building {
+  id: string;
+  name: string;
+  baseLength: number; // m, fixed after creation
+  x: number; // m, world position of the base square's (0,0) corner
+  y: number; // m
+  ground: number; // index of the ground floor; floors below it are underground
+  floors: Floor[]; // index 0 = lowest floor
+  plans: StructurePlan[];
+  topPlanId: string | null; // plan at the very top of the building (roof level), no walls of its own
+}
+
 export interface Project {
   id: string;
   name: string;
   created: number;
   updated: number;
-  baseLength: number; // m, fixed after creation
-  floors: Floor[]; // index 0 = ground floor
-  plans: StructurePlan[];
-  topPlanId: string | null; // plan at the very top of the building (roof level), no walls of its own
+  buildings: Building[];
   textures: Texture[];
 }
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-export const totalHeight = (p: Project) => p.floors.reduce((s, f) => s + f.height, 0);
-export const floorBase = (p: Project, i: number) => p.floors.slice(0, i).reduce((s, f) => s + f.height, 0);
+export const totalHeight = (b: Building) => b.floors.reduce((s, f) => s + f.height, 0);
+/** Height of the bottom of floor i above the lowest floor's bottom. */
+export const floorBase = (b: Building, i: number) => b.floors.slice(0, i).reduce((s, f) => s + f.height, 0);
+/** World elevation of the bottom of floor i (0 = ground level). */
+export const elevation = (b: Building, i: number) => floorBase(b, i) - floorBase(b, b.ground);
+/** Floor label: G = ground, 1, 2 … above, B1, B2 … underground. */
+export const floorLabel = (b: Building, i: number) => (i === b.ground ? 'G' : i > b.ground ? `${i - b.ground}` : `B${b.ground - i}`);
 
 export function newPlan(name: string, floorIds: string[] = []): StructurePlan {
   return {
@@ -74,21 +88,36 @@ export function newPlan(name: string, floorIds: string[] = []): StructurePlan {
   };
 }
 
-export function createProject(name: string, baseLength: number, floors: number, floorHeight: number): Project {
-  const fl: Floor[] = Array.from({ length: floors }, () => ({ id: uid(), height: floorHeight }));
+export interface BuildingSpec { name: string; baseLength: number; floors: number; floorHeight: number; ground: number; x: number; y: number }
+
+export function createBuilding(s: BuildingSpec): Building {
+  const fl: Floor[] = Array.from({ length: s.floors }, () => ({ id: uid(), height: s.floorHeight }));
   const plan = newPlan('Plan 1', fl.map(f => f.id));
-  return { id: uid(), name, created: Date.now(), updated: Date.now(), baseLength, floors: fl, plans: [plan], topPlanId: null, textures: [] };
+  return { id: uid(), name: s.name, baseLength: s.baseLength, x: s.x, y: s.y, ground: s.ground, floors: fl, plans: [plan], topPlanId: null };
+}
+
+export function createProject(name: string, first: BuildingSpec): Project {
+  return { id: uid(), name, created: Date.now(), updated: Date.now(), buildings: [createBuilding(first)], textures: [] };
 }
 
 /** Plan that applies to a floor (a floor belongs to at most one plan). */
-export const planForFloor = (p: Project, floorId: string) => p.plans.find(pl => pl.floorIds.includes(floorId));
+export const planForFloor = (b: Building, floorId: string) => b.plans.find(pl => pl.floorIds.includes(floorId));
 
 /** Fill defaults for projects saved by older versions. */
 export function normalize(p: Project): Project {
-  p.topPlanId ??= null;
+  const old = p as any;
+  if (!p.buildings) {
+    // v1/v2 projects had a single building stored directly on the project
+    p.buildings = [{
+      id: uid(), name: 'Building 1', baseLength: old.baseLength, x: 0, y: 0, ground: 0,
+      floors: old.floors, plans: old.plans, topPlanId: old.topPlanId ?? null,
+    }];
+    delete old.baseLength; delete old.floors; delete old.plans; delete old.topPlanId;
+  }
   p.textures ??= [];
-  for (const pl of p.plans) {
-    pl.smooth ??= 0; pl.connect ??= 'straight'; pl.connectSmooth ??= 0;
+  for (const b of p.buildings) {
+    b.ground ??= 0;
+    for (const pl of b.plans) { pl.smooth ??= 0; pl.connect ??= 'straight'; pl.connectSmooth ??= 0; }
   }
   return p;
 }
@@ -100,25 +129,35 @@ export const segConnect = (pl: StructurePlan, s: PlanSegment): ConnectMode => s.
 export const segConnectSmooth = (pl: StructurePlan, s: PlanSegment) => s.connectSmooth ?? pl.connectSmooth;
 export const segColT = (pl: StructurePlan, s: PlanSegment) => s.columnThickness ?? pl.wallThickness;
 
-/** "1-5, 8, 10-12" -> sorted 1-based floor numbers (clamped to 1..n). */
-export function parseRanges(txt: string, n: number): number[] | null {
+/** Floor label ("B2", "G", "5") -> floor index, or null. */
+function labelToIndex(b: Building, t: string): number | null {
+  t = t.trim().toUpperCase();
+  if (t === 'G' || t === '0') return b.ground;
+  let m = t.match(/^B(\d+)$/);
+  if (m) return b.ground - +m[1];
+  m = t.match(/^(\d+)$/);
+  return m ? b.ground + +m[1] : null;
+}
+
+/** "B2-G, 3, 5-10" -> sorted floor indices (clamped to existing floors). */
+export function parseRanges(txt: string, b: Building): number[] | null {
   const out = new Set<number>();
   for (const part of txt.split(',').map(x => x.trim()).filter(Boolean)) {
-    const m = part.match(/^(\d+)\s*(?:-\s*(\d+))?$/);
+    const m = part.match(/^(B\d+|G|\d+)\s*(?:-\s*(B\d+|G|\d+))?$/i);
     if (!m) return null;
-    let a = +m[1], b = m[2] ? +m[2] : a;
-    if (a > b) [a, b] = [b, a];
-    for (let i = Math.max(1, a); i <= Math.min(n, b); i++) out.add(i);
+    let a = labelToIndex(b, m[1])!, c = m[2] ? labelToIndex(b, m[2])! : a;
+    if (a > c) [a, c] = [c, a];
+    for (let i = Math.max(0, a); i <= Math.min(b.floors.length - 1, c); i++) out.add(i);
   }
   return [...out].sort((x, y) => x - y);
 }
-/** [1,2,3,5,7,8] -> "1-3, 5, 7-8" */
-export function formatRanges(nums: number[]): string {
+/** floor indices -> "B2-G, 3, 5-10" */
+export function formatRanges(b: Building, idx: number[]): string {
   const r: string[] = [];
-  for (let i = 0; i < nums.length; ) {
+  for (let i = 0; i < idx.length; ) {
     let j = i;
-    while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
-    r.push(i === j ? `${nums[i]}` : `${nums[i]}-${nums[j]}`);
+    while (j + 1 < idx.length && idx[j + 1] === idx[j] + 1) j++;
+    r.push(i === j ? floorLabel(b, idx[i]) : `${floorLabel(b, idx[i])}-${floorLabel(b, idx[j])}`);
     i = j + 1;
   }
   return r.join(', ');
