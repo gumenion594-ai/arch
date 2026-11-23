@@ -88,3 +88,5 @@ label.inline input { width: 70px; }
 input[type=color] { width: 40px; height: 26px; padding: 0 2px; }
 textarea { font: 12px/1.4 ui-monospace, monospace; color: var(--text); background: #1f1f1f; border: 1px solid #4a4a4a; border-radius: 4px; }
 .row.views button { padding: 2px 7px; font-size: 12px; }
+.bands { display: flex; gap: 6px; margin-left: auto; margin-right: 6px; }
+label.inline.band { font-size: 11px; gap: 2px; } label.inline.band input { width: 42px; padding: 2px 4px; }

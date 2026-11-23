@@ -4,7 +4,7 @@ import {
   Building, Floor, OpeningShape, Placement, PlanObject, PlanSegment, StructurePlan, Texture, WinPoint, divisionBorders, elevation, hasCeiling, hasFloor,
   BALCONY_AT, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
 } from './model';
-import { fitDesign } from './assets';
+import { fitDesign, fitDesignSliced } from './assets';
 import { V2, enclosedFacesSegs, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
 
 export type Mats = {
@@ -149,11 +149,11 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     return tex ?? (pl.color ? mats.color(pl.color) : fallback);
   };
   /** An imported design fitted into a box, only in the detailed view (null otherwise). */
-  const designAt = (id: string | null | undefined, c: THREE.Vector3, along: THREE.Vector3, up: THREE.Vector3, out: THREE.Vector3, w: number, h: number, d: number, recolor?: THREE.Material | null, pick?: PickInfo) => {
+  const designAt = (id: string | null | undefined, c: THREE.Vector3, along: THREE.Vector3, up: THREE.Vector3, out: THREE.Vector3, w: number, h: number, d: number, recolor?: THREE.Material | null, pick?: PickInfo, sliced = false) => {
     if (!o.detailed || !id || !mats.design) return false;
     const src = mats.design(id);
     if (!src) return false;
-    const obj = fitDesign(src, c, along, up, out, w, h, d);
+    const obj = sliced ? fitDesignSliced(src, c, along, up, out, w, h, d) : fitDesign(src, c, along, up, out, w, h, d);
     obj.traverse(x => {
       const m = x as THREE.Mesh;
       if (!m.isMesh) return;
@@ -163,6 +163,10 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     g.add(obj);
     return true;
   };
+
+  type ColPiece = { a: THREE.Vector3; c: THREE.Vector3; ct: number; bottom: V2[]; pick: PickInfo; seg: PlanSegment; material: string; selected: boolean };
+  type PilPiece = { base: THREE.Vector3; out: THREE.Vector3; along: THREE.Vector3; y0: number; y1: number; pw: number; pd: number; pl: Placement; mat: THREE.Material; pick: PickInfo };
+  const colPieces: ColPiece[] = [], pilPieces: PilPiece[] = [];
 
   for (let i = 0; i < N; i++) {
     const floor = p.floors[i];
@@ -192,6 +196,11 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         const onSlab = fs !== 0 && rows.length === 2;
         const c0 = onSlab ? y0 + slabs[i].floor : y0, c1 = onSlab ? y1 - slabs[i].ceiling : y1;
         const pts = rows.map((r, ri) => { const q = polyAt(r.poly, r.params, t); return W({ x: q.x + inward.x, y: q.y + inward.y }, c0 + (c1 - c0) * (ri / (rows.length - 1))); });
+        if (pts.length === 2) {
+          // straight columns are collected and joined with the ones above / below after all floors are built
+          colPieces.push({ a: pts[0], c: pts[1], ct, bottom, pick, seg, material, selected });
+          return;
+        }
         for (let k = 0; k + 1 < pts.length; k++) {
           const a = pts[k], c = pts[k + 1];
           // imported column design (detailed view), else a plain square column
@@ -326,6 +335,54 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     }
   }
 
+  // ---------- columns and pilasters: stacked pieces join into one (one base, one top) ----------
+  const joined = <T>(list: T[], key: (x: T) => string, lo: (x: T) => number, hi: (x: T) => number, gap: number) => {
+    const groups = new Map<string, T[]>();
+    for (const x of list) { const k = key(x); (groups.get(k) ?? groups.set(k, []).get(k)!).push(x); }
+    const runs: T[][] = [];
+    for (const g2 of groups.values()) {
+      g2.sort((x, y) => lo(x) - lo(y));
+      let cur: T[] = [];
+      for (const x of g2) {
+        if (cur.length && lo(x) - hi(cur[cur.length - 1]) > gap) { runs.push(cur); cur = []; }
+        cur.push(x);
+      }
+      if (cur.length) runs.push(cur);
+    }
+    return runs;
+  };
+  const r2 = (v: number) => Math.round(v * 50) / 50; // 2 cm grid
+  for (const run of joined(colPieces, x => `${r2(x.a.x)},${r2(x.a.z)},${r2(x.ct)},${x.seg.columnDesign ?? ''}`, x => x.a.y, x => x.c.y, 1.0)) {
+    const first = run[0], last = run[run.length - 1];
+    const a = first.a.clone(), c = new THREE.Vector3(a.x, last.c.y, a.z);
+    const selected = run.some(x => x.selected), seg = first.seg;
+    const dir = norm({ x: first.bottom[first.bottom.length - 1].x - first.bottom[0].x, y: first.bottom[first.bottom.length - 1].y - first.bottom[0].y });
+    const along = new THREE.Vector3(dir.x, 0, -dir.y), up = new THREE.Vector3(0, 1, 0);
+    const mid = new THREE.Vector3().addVectors(a, c).multiplyScalar(0.5);
+    const out = new THREE.Vector3().crossVectors(along, up).normalize();
+    if (designAt(seg.columnDesign, mid, along, up, out, first.ct, c.y - a.y, first.ct, selected ? mats.selected : seg.color ? mats.color(seg.color) : null, first.pick, true)) continue;
+    add(column(a, c, first.ct, first.bottom), selected ? mats.selected : segMat(seg, first.material, true), first.pick, { cat: 'col', material: first.material });
+  }
+  for (const run of joined(pilPieces, x => `${r2(x.base.x)},${r2(x.base.z)},${r2(x.out.x)},${r2(x.out.z)},${x.pl.designId ?? ''}`, x => x.y0, x => x.y1, 0.05)) {
+    const f0 = run[0], y0 = f0.y0, y1 = run[run.length - 1].y1, H = y1 - y0;
+    const { pw, pd, out } = f0;
+    const up = new THREE.Vector3(0, 1, 0), side = new THREE.Vector3().crossVectors(up, out);
+    const selected = run.some(x => sel.elements.has(x.pl.id));
+    const mat = selected ? mats.selected : f0.mat;
+    const box = (w: number, h: number, d: number, yMid: number) => {
+      const geo = new THREE.BoxGeometry(w, h, d);
+      geo.applyMatrix4(new THREE.Matrix4().makeBasis(side, up, out));
+      const c = f0.base.clone().addScaledVector(out, d / 2);
+      geo.translate(c.x, y0 + yMid, c.z);
+      add(geo, mat, f0.pick);
+    };
+    const shaftC = f0.base.clone().addScaledVector(out, pd / 2); shaftC.y = y0 + H / 2;
+    if (designAt(f0.pl.designId, shaftC, f0.along, up, out, pw, H, pd, f0.pl.color || selected ? mat : null, f0.pick, true)) continue;
+    box(pw, H, pd, H / 2);
+    box(pw + 0.14, 0.3, pd + 0.08, 0.15); // one base at the bottom
+    box(pw + 0.14, 0.24, pd + 0.08, H - 0.12); // one capital at the top
+  }
+
   // free-standing imported 3D models (detailed view only)
   for (const pl of p.placements) {
     if (pl.type !== 'model' || !o.detailed || !mats.design) continue;
@@ -381,12 +438,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           geo.translate(c.x, wall.y0 + yMid, c.z);
           add(geo, mat, pick);
         };
-        const shaftC = base.clone().addScaledVector(fr.out, pd / 2); shaftC.y = wall.y0 + wallH / 2;
-        if (!designAt(pl.designId, shaftC, fr.along, new THREE.Vector3(0, 1, 0), fr.out, pw, wallH, pd, pl.color ? mat : sel.elements.has(pl.id) ? mats.selected : null, pick)) {
-          box(pw, wallH, pd, wallH / 2);
-          box(pw + 0.14, 0.3, pd + 0.08, 0.15); // base
-          box(pw + 0.14, 0.24, pd + 0.08, wallH - 0.12); // capital
-        }
+        void box;
+        pilPieces.push({ base, out: new THREE.Vector3(fr.out.x, 0, fr.out.z).normalize(), along: fr.along.clone(), y0: wall.y0, y1: wall.y0 + wallH, pw, pd, pl, mat, pick });
       } else if (pl.type === 'balcony') {
         const shape = p.balconyShapes.find(x => x.id === pl.shapeId) ?? p.balconyShapes[0];
         if (!shape) continue;

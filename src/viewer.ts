@@ -255,7 +255,9 @@ export class Viewer {
       deco: new THREE.MeshStandardMaterial({ color: detailed ? 0xeee8dc : 0xd0d0d0, roughness: 0.75, side: THREE.DoubleSide }),
       design: id => {
         const d = id ? s.designs?.find(x => x.id === id) : undefined;
-        return d ? designObject(d, () => this.onTexture?.()) : null;
+        const obj = d ? designObject(d, () => this.onTexture?.()) : null;
+        if (obj && d) { obj.userData.baseFracOverride = d.baseFrac ?? undefined; obj.userData.topFracOverride = d.topFrac ?? undefined; }
+        return obj;
       },
       slab: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1, side: THREE.DoubleSide }),
       object: new THREE.MeshStandardMaterial({ color: 0xa8b4c0, roughness: 0.8 }),

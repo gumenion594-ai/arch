@@ -77,7 +77,10 @@ export const DESIGN_CATEGORIES: Record<DesignCategory, string> = {
   frame: 'Opening frames', surround: 'Opening surrounds', cornice: 'Cornices', column: 'Columns / pilasters',
   baluster: 'Balusters', balcony: 'Balconies', nicheDeco: 'Niche decorations', model: '3D models',
 };
-export interface Design { id: string; name: string; category: DesignCategory; format: 'glb' | 'gltf' | 'obj' | 'stl' | 'builtin'; builtin?: string }
+export interface Design {
+  id: string; name: string; category: DesignCategory; format: 'glb' | 'gltf' | 'obj' | 'stl' | 'builtin'; builtin?: string;
+  baseFrac?: number | null; topFrac?: number | null; // columns: base / top bands (fractions of height) kept unstretched
+}
 
 /** Something added onto the structure. Openings / niches / balconies / cornices sit in a wall division, pilasters on a border between divisions. */
 export type PlacementType = 'opening' | 'niche' | 'balcony' | 'cornice' | 'pilaster' | 'model';

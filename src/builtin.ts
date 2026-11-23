@@ -101,6 +101,10 @@ export function ionicColumn(): THREE.Object3D {
   const abW = D * 1.2, abY = scrollY + volR + 0.02 * D;
   add(new THREE.BoxGeometry(abW, 0.06 * D, abW), abY + 0.03 * D);
   add(new THREE.BoxGeometry(abW * 1.04, 0.05 * D, abW * 1.04), abY + 0.085 * D);
+  // base (plinth + Attic base) and top (capital) bands: these keep their size when the column is stretched
+  const total = abY + 0.11 * D;
+  g.userData.baseFrac = shaftY / total;
+  g.userData.topFrac = (total - capY) / total;
   return g;
 }
 

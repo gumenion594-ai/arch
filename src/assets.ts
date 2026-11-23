@@ -63,7 +63,51 @@ function normalizeObject(obj: THREE.Object3D): THREE.Object3D {
   outer.add(wrap);
   outer.scale.set(1 / (size.x || 1), 1 / (size.y || 1), 1 / (size.z || 1));
   outer.userData.size = size; // original proportions
+  // base / top bands (fractions of the height) that keep their proportions when a column is stretched
+  if (obj.userData.baseFrac !== undefined) outer.userData.baseFrac = obj.userData.baseFrac;
+  if (obj.userData.topFrac !== undefined) outer.userData.topFrac = obj.userData.topFrac;
   return outer;
+}
+
+/** Default base / top bands of imported column designs (fractions of their height). */
+export const DEFAULT_BAND = 0.12;
+
+/**
+ * Fit a column-like design into a w × h × d box (centre `center`), keeping its base and top (capital)
+ * at their own proportions and stretching only the shaft between them. So a two-storey column has
+ * one base and one capital, not a stretched or repeated one.
+ */
+export function fitDesignSliced(src: THREE.Object3D, center: THREE.Vector3, along: THREE.Vector3, up: THREE.Vector3, out: THREE.Vector3, w: number, h: number, d: number): THREE.Object3D {
+  const size = (src.userData.size as THREE.Vector3) ?? new THREE.Vector3(1, 1, 1);
+  const bF = src.userData.baseFracOverride ?? src.userData.baseFrac ?? DEFAULT_BAND;
+  const tF = src.userData.topFracOverride ?? src.userData.topFrac ?? DEFAULT_BAND;
+  const k = w / (size.x || 1); // the design's own scale, from its width
+  let bH = bF * size.y * k, tH = tF * size.y * k;
+  if (bH + tH > h * 0.9) { const s2 = (h * 0.9) / (bH + tH); bH *= s2; tH *= s2; }
+  const shaftH = h - bH - tH;
+  const mapY = (t: number) => (t <= bF ? (bF > 0 ? (t / bF) * bH : 0)
+    : t >= 1 - tF ? h - (tF > 0 ? ((1 - t) / tF) * tH : 0)
+      : bH + ((t - bF) / Math.max(1e-9, 1 - bF - tF)) * shaftH) - h / 2;
+  const inner = new THREE.Group();
+  src.updateMatrixWorld(true);
+  src.traverse(o => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const geo = (m.geometry as THREE.BufferGeometry).clone();
+    geo.applyMatrix4(m.matrixWorld); // into the unit box (the cached design is normalised and has no parent)
+    const pos = geo.getAttribute('position');
+    for (let i = 0; i < pos.count; i++) pos.setXYZ(i, pos.getX(i) * w, mapY(pos.getY(i) + 0.5), pos.getZ(i) * d);
+    geo.deleteAttribute('normal');
+    geo.computeVertexNormals();
+    inner.add(new THREE.Mesh(geo, m.material));
+  });
+  const frame = new THREE.Group();
+  frame.add(inner);
+  const a = along.clone().normalize(), u = up.clone().normalize();
+  if (new THREE.Vector3().crossVectors(a, u).dot(out) < 0) a.negate();
+  frame.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(a, u, new THREE.Vector3().crossVectors(a, u).normalize()));
+  frame.position.copy(center);
+  return frame;
 }
 
 const cache = new Map<string, THREE.Object3D>();

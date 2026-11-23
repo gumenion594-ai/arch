@@ -403,6 +403,7 @@ function libraryBox(ed: Editor) {
     if (!list.length) return null;
     return h('div', {}, h('div', { class: 'muted small' }, label),
       ...list.map(d => h('div', { class: 'lib-row' }, d.name,
+        d.category === 'column' ? bandFields(ed, d) : null,
         h('button', {
           class: 'danger', title: 'Remove from the library',
           onclick: async () => {
@@ -428,6 +429,24 @@ function libraryBox(ed: Editor) {
     h('div', { class: 'muted small' }, '3D files (.glb, .obj, .stl) stretch to fit what you assign them to: frames and surrounds to openings, cornices to divisions, columns to colonnades and pilasters, balusters to railings. They show in the Detailed view and are stored in this browser.'),
     ...groups.filter(Boolean) as HTMLElement[],
   );
+}
+
+/** Column designs: how much of the height is base and top (capital); those keep their proportions, only the shaft stretches. */
+function bandFields(ed: Editor, d: Design) {
+  const f = (label: string, key: 'baseFrac' | 'topFrac') => {
+    const inp = h('input', {
+      type: 'number', step: 1, min: 0, max: 45, title: `${label} as % of the design's height (empty = ${d.format === 'builtin' ? 'its own' : 'default 12%'})`,
+      value: d[key] != null ? String(Math.round(d[key]! * 100)) : '', placeholder: d.format === 'builtin' ? 'auto' : '12',
+      onchange: () => {
+        if (inp.value.trim() === '') return ed.mutate(() => (d[key] = null));
+        const v = num(inp.value);
+        if (!(v >= 0 && v <= 45)) { toast('Use 0 to 45 %'); return ed.refresh(); }
+        ed.mutate(() => (d[key] = v / 100));
+      },
+    });
+    return h('label', { class: 'inline band' }, label, inp, '%');
+  };
+  return h('span', { class: 'bands' }, f('base', 'baseFrac'), f('top', 'topFrac'));
 }
 
 // ---------------------------------------------------------------- design modes
