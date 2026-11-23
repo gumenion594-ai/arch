@@ -42,7 +42,9 @@ function showList() {
   const buildings = list.filter(p => p.kind === 'building'), sites = list.filter(p => p.kind === 'site');
   app.append(h('div', { class: 'list-screen' },
     h('h1', {}, 'Arch'),
-    h('div', { class: 'row' }, h('h2', {}, 'Buildings'), h('button', { class: 'primary', onclick: newProjectDialog }, '+ New building project')),
+    h('div', { class: 'row' }, h('h2', {}, 'Buildings'), h('div', { class: 'row' },
+      h('button', { title: 'Add the example villa as a new project', onclick: () => { const p = sampleProject(); saveProject(p); openProject(p.id); } }, 'Load example villa'),
+      h('button', { class: 'primary', onclick: newProjectDialog }, '+ New building project'))),
     buildings.length ? h('div', { class: 'projects' }, ...buildings.map(row)) : h('div', { class: 'row' }, h('span', { class: 'muted' }, 'No building projects yet.'),
       h('button', { onclick: () => { const p = sampleProject(); saveProject(p); openProject(p.id); } }, 'Load example')),
     h('div', { class: 'row' }, h('h2', {}, 'Sites'), h('button', { class: 'primary', onclick: newSite }, '+ New site')),
