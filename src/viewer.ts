@@ -220,6 +220,7 @@ export class Viewer {
       new THREE.MeshStandardMaterial({ color: this.walk ? 0x5f8f3e : 0x6a6a6a, roughness: 1, transparent: underground, opacity: underground ? 0.35 : 1, depthWrite: !underground, side: THREE.DoubleSide }),
     );
     g.rotation.x = -Math.PI / 2;
+    g.userData.ground = true;
     g.position.set((B.x0 + B.x1) / 2, -0.0005 * span, (B.z0 + B.z1) / 2);
     this.content.add(g);
 
@@ -350,10 +351,15 @@ export class Viewer {
     hud.className = 'walk-hud';
     this.host.appendChild(hud);
     this.walk = {
-      x: (B.x0 + B.x1) / 2, z: B.z1 + Math.max(6, (B.z1 - B.z0) * 0.6), feet: 0, vy: 0, yaw: 0, pitch: 0.05,
+      x: 0, z: 0, feet: 0, vy: 0, yaw: 0, pitch: 0.05,
       fly: false, onGround: false, keys: new Set(), drag: false, hud,
       saved: { pos: this.camera.position.clone(), target: this.controls.target.clone(), fov: this.camera.fov, near: this.camera.near },
     };
+    // start 6 m in front of what is actually built (not the building area), centred on it, facing it
+    const built = new THREE.Box3();
+    this.content.traverse(o => { if ((o as THREE.Mesh).isMesh && !o.userData.ground) built.expandByObject(o); });
+    const front = built.isEmpty() ? { x: (B.x0 + B.x1) / 2, z: B.z1 } : { x: (built.min.x + built.max.x) / 2, z: built.max.z };
+    this.walk.x = front.x; this.walk.z = front.z + 6;
     this.walk.feet = this.groundBelow(this.walk.x, this.walk.z, 50) ?? 0;
     this.controls.enabled = false;
     this.camera.fov = 70; this.camera.near = 0.05; this.camera.updateProjectionMatrix();
