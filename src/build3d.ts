@@ -68,7 +68,8 @@ export const toWorld = (b: Building, v: V2, y: number) => new THREE.Vector3(b.x 
 
 /**
  * Automatic floor area of floor i: what its external walls enclose, plus the areas of the floor below
- * whose walls go straight up (so a setback terrace is covered by the floor of the storey above).
+ * whose walls go straight up (so a setback room is covered by the floor of the storey above) — but not
+ * open terraces (areas edged by a railing), which stay open to the sky.
  */
 export function autoFloorAreas(b: Building, i: number): V2[][] {
   const own = planAtLevel(b, i);
@@ -78,6 +79,7 @@ export function autoFloorAreas(b: Building, i: number): V2[][] {
     const same = (a: V2[], c: V2[]) => a.length === c.length && a.every(q => c.some(r => Math.hypot(q.x - r.x, q.y - r.y) < 1e-6));
     for (const f of enclosedFacesSegs(below)) {
       const segs = f.segIds.map(id => below.segments.find(s => s.id === id)!);
+      if (segs.some(s => segKind(s) === 'balustrade')) continue; // an open terrace below: no floor over it (it would hang with nothing holding it)
       if (segs.every(s => segConnect(below, s) === 'straight') && !out.some(o => same(o, f.poly))) out.push(f.poly); // skip exact repeats
     }
   }
