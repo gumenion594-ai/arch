@@ -2,10 +2,11 @@
 import * as THREE from 'three';
 import {
   Building, Floor, OpeningShape, Placement, PlanObject, PlanSegment, StructurePlan, Texture, WinPoint, divisionBorders, elevation, hasCeiling, hasFloor,
-  BALCONY_AT, PILASTER_REF_H, PilasterShape, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
+  BALCONY_AT, PILASTER_REF_H, PilasterShape, mainFloorIndex, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
 } from './model';
 import { fitDesign, fitDesignSliced } from './assets';
 import { REF_WALL } from './deco';
+import { SPIRAL_POST, localToPlan, stairLayout } from './stairs';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import polygonClipping, { MultiPolygon } from 'polygon-clipping';
 import { V2, areaFaces, enclosedFacesSegs, pointInPoly, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
@@ -122,7 +123,31 @@ export function floorRegions(b: Building, i: number): Region[] {
   const f = b.floors[i];
   if (!f) return [];
   const ap = areaForFloor(b, f.id);
-  return ap ? areaPlanRegions(ap) : unionRegions(autoFloorAreas(b, i));
+  const base = ap ? areaPlanRegions(ap) : unionRegions(autoFloorAreas(b, i));
+  const holes = stairHoles(b, i);
+  return holes.length ? regionsMinus(base, holes) : base;
+}
+/** Holes for the stairs that pass through floor i or arrive on it (from the main floor below). */
+export function stairHoles(b: Building, i: number): V2[][] {
+  if (i <= 0) return [];
+  const j = mainFloorIndex(b, i - 1), ip = interiorForFloor(b, b.floors[j].id);
+  if (!ip) return [];
+  const nm = nextMainFloor(b, j);
+  const rise = (nm < b.floors.length ? elevation(b, nm) : elevation(b, b.floors.length)) - elevation(b, j);
+  return ip.objects.filter(o => o.type === 'stairs' || o.type === 'spiral').map(o => stairLayout(o, rise).footprint.map(q => localToPlan(o, b.baseLength, q)));
+}
+function regionsMinus(base: Region[], holes: V2[][]): Region[] {
+  const key = 'minus:' + JSON.stringify([base, holes]);
+  const hit = regionCache.get(key);
+  if (hit) return hit;
+  const ring = (a: V2[]) => a.map(q => [q.x, q.y] as [number, number]);
+  let out: Region[] = base;
+  try {
+    const mp = polygonClipping.difference(base.map(r => [ring(r.outer), ...r.holes.map(ring)]), ...holes.map(hh => [ring(hh)]));
+    out = unionRegions(mp.map(poly => poly[0].map(([x, y]) => ({ x, y }))), mp.flatMap(poly => poly.slice(1).map(hh => hh.map(([x, y]) => ({ x, y })))));
+  } catch { /* keep the floor whole */ }
+  regionCache.set(key, out);
+  return out;
 }
 /** A floor-area plan's floor: its enclosed shapes, carved ones removed (a shape inside another one decides for itself). */
 export function areaPlanRegions(pl: StructurePlan): Region[] {
@@ -258,7 +283,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const plans: { plan: StructurePlan; interior: boolean }[] = [];
     const ext = planAtLevel(p, i);
     if (ext) plans.push({ plan: ext, interior: false });
-    const inner = o.interior ? interiorForFloor(p, floor.id) : null;
+    const inner = o.interior && !floor.sub ? interiorForFloor(p, floor.id) : null; // subfloors: the main floor's plan runs through them
     if (inner) plans.push({ plan: inner, interior: true });
 
     // footprints of the external walls (plan), for trimming internal walls
@@ -273,8 +298,9 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       }
     }
     for (const { plan, interior } of plans) {
+      const nmI = nextMainFloor(p, i);
       const y0 = interior ? yBase + slabs[i].floor : yBase;
-      const y1 = interior ? yTop - slabs[i].ceiling : yTop;
+      const y1 = interior ? (nmI < N ? elevation(p, nmI) : elevation(p, N) - slabs[N - 1].ceiling) : yTop; // up to the next main floor
       const above = interior ? null : planAtLevel(p, i + 1);
       let vert: Vertical | undefined;
       const rowsBySeg = new Map<string, { rows: Row[]; bottom: V2[] }>();
@@ -451,7 +477,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       // stairs climb to the next main floor (subfloors are part of the same floor)
       const nm = nextMainFloor(p, i);
       const yStairs = nm < N ? elevation(p, nm) + slabs[nm].floor : y1;
-      if (interior) for (const ob of plan.objects) buildObject(ob, p, y0, y1, yStairs, mats.object, (geo: THREE.BufferGeometry) => add(geo, mats.object, { floorId: floor.id, floorIndex: i, interior: true }));
+      if (interior) for (const ob of plan.objects) buildObject(ob, p, y0, y1, yStairs, (nm < N ? elevation(p, nm) : yTop) - yBase, mats.object, (geo: THREE.BufferGeometry) => add(geo, mats.object, { floorId: floor.id, floorIndex: i, interior: true }));
     }
   }
 
@@ -824,7 +850,7 @@ const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const clamp01 = (v: number) => clamp(v, 0, 1);
 
 /** Stairs (a flight of steps along d) or an elevator shaft (four thin walls). */
-function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStairs: number, _mat: THREE.Material, add: (g: THREE.BufferGeometry) => void) {
+function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStairs: number, layoutRise: number, _mat: THREE.Material, add: (g: THREE.BufferGeometry) => void) {
   const c = toWorld(b, ob, 0);
   const rot = (ob.rot * Math.PI) / 180;
   const place = (geo: THREE.BufferGeometry, lx: number, ly: number, lz: number) => {
@@ -833,14 +859,17 @@ function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStair
     geo.translate(c.x, 0, c.z);
     add(geo);
   };
-  if (ob.type === 'stairs') {
-    const rise = yStairs - y0;
-    const n = Math.max(2, Math.round(rise / 0.18));
-    const run = ob.d / n;
-    for (let k = 0; k < n; k++) {
-      const h = (rise * (k + 1)) / n;
-      place(new THREE.BoxGeometry(ob.w, h, run), 0, y0 + h / 2, ob.d / 2 - run * (k + 0.5));
-    }
+  if (ob.type === 'stairs' || ob.type === 'spiral') {
+    // steps (a stepped slab, open underneath) and platforms; risers scaled to the real floor-to-floor height
+    const lay = stairLayout(ob, layoutRise), k = (yStairs - y0) / Math.max(1e-9, layoutRise);
+    const prism = (pts: [number, number][], top: number, t: number) => {
+      const geo = new THREE.ExtrudeGeometry(new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, -z))), { depth: t, bevelEnabled: false, curveSegments: 1 });
+      geo.rotateX(-Math.PI / 2); // shape (x, −z) -> local (x, z); the depth goes up
+      place(geo, 0, y0 + top * k - t, 0);
+    };
+    for (const tr of lay.treads) prism(tr.pts, tr.top, lay.riser * k + 0.12);
+    for (const pf of lay.platforms) prism(pf.pts, pf.top, 0.2);
+    if (ob.type === 'spiral') place(new THREE.CylinderGeometry(SPIRAL_POST, SPIRAL_POST, yStairs - y0, 16), 0, y0 + (yStairs - y0) / 2, 0);
   } else {
     const t = 0.15, h = y1 - y0;
     place(new THREE.BoxGeometry(ob.w, h, t), 0, y0 + h / 2, ob.d / 2 - t / 2);

@@ -1,9 +1,10 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
 import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, divisionBorders, segColT, segKind, uid } from './model';
 import { columnPositions } from './build3d';
+import { localToPlan, stairLayout } from './stairs';
 import { V2, alignMiddle, areaFaces, distToSeg, enclosedFaces, enclosedFacesSegs, faceAt, planarize, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
 
-export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'elevator' | 'carve';
+export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'spiral' | 'elevator' | 'carve';
 
 export interface PlannerHost {
   getPlan(): StructurePlan | null;
@@ -22,6 +23,8 @@ export interface PlannerHost {
   area?: boolean;
   /** Plans whose points and lines new points snap to (e.g. the walls of the floor). */
   snapPlans?(): StructurePlan[];
+  /** Floor plans: how high stairs climb here (to the next main floor), for their layout. */
+  stairRise?(): number;
 }
 
 const HIT = 9; // px
@@ -197,7 +200,9 @@ export class Planner {
   }
 
   // ---- stairs / elevators ----
+  private layout(o: PlanObject) { return stairLayout(o, this.h.stairRise?.() ?? 3); }
   private objCorners(o: PlanObject): V2[] {
+    if (o.type === 'stairs' || o.type === 'spiral') return this.layout(o).footprint.map(q => localToPlan(o, this.h.baseLength(), q));
     const L = this.h.baseLength(), r = (o.rot * Math.PI) / 180;
     const hw = o.w / 2 / L, hd = o.d / 2 / L;
     // rotation in plan space: world rotY(rot) maps local (x, z) -> plan (x, -z)
@@ -271,11 +276,12 @@ export class Planner {
       this.moveAll = { x: p.x, y: p.y, began: false, orig: new Map([...plan.points, ...plan.objects].map(q => [q.id, { x: q.x, y: q.y }])) };
       return;
     }
-    if (this.tool === 'stairs' || this.tool === 'elevator') {
+    if (this.tool === 'stairs' || this.tool === 'spiral' || this.tool === 'elevator') {
       if (!this.okPoint(p)) return this.h.toast('Place it inside the building (inside the external walls)');
       this.h.begin();
       const o: PlanObject = this.tool === 'stairs'
-        ? { id: uid(), type: 'stairs', x: p.x, y: p.y, w: 1.2, d: 3.6, rot: 0 }
+        ? { id: uid(), type: 'stairs', x: p.x, y: p.y, w: 1.2, d: 3.2, rot: 0 }
+        : this.tool === 'spiral' ? { id: uid(), type: 'spiral', x: p.x, y: p.y, w: 1.8, d: 1.8, rot: 0 }
         : { id: uid(), type: 'elevator', x: p.x, y: p.y, w: 2, d: 2, rot: 0 };
       plan.objects.push(o);
       this.selPoints.clear(); this.selSegs.clear(); this.selObj = o.id;
@@ -614,14 +620,30 @@ export class Planner {
       g.strokeStyle = sel ? '#ffd400' : '#a8c0d8'; g.lineWidth = 1.5;
       g.beginPath(); cs.forEach((c, i) => (i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y))); g.closePath(); g.fill(); g.stroke();
       g.lineWidth = 1;
-      if (o.type === 'stairs') {
-        const n = 12;
-        for (let k = 1; k < n; k++) {
-          const t = k / n;
-          const a = { x: cs[0].x + (cs[3].x - cs[0].x) * t, y: cs[0].y + (cs[3].y - cs[0].y) * t };
-          const b2 = { x: cs[1].x + (cs[2].x - cs[1].x) * t, y: cs[1].y + (cs[2].y - cs[1].y) * t };
-          g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b2.x, b2.y); g.stroke();
+      if (o.type === 'stairs' || o.type === 'spiral') {
+        const lay = this.layout(o), L = this.h.baseLength();
+        const S = (q: [number, number]) => this.toScreen(localToPlan(o, L, q));
+        const poly = (pts: [number, number][], fill: string | null) => {
+          g.beginPath(); pts.forEach((q, i) => { const c = S(q); i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y); }); g.closePath();
+          if (fill) { g.fillStyle = fill; g.fill(); }
+          g.stroke();
+        };
+        g.strokeStyle = sel ? '#ffd400' : '#a8c0d8';
+        for (const pf of lay.platforms) poly(pf.pts, 'rgba(160,190,220,0.3)');
+        for (const tr of lay.treads) poly(tr.pts, null);
+        // the way up: from the first step (dot + UP) to the arrival (arrowhead)
+        const path = lay.path.map(S);
+        if (path.length > 1) {
+          g.strokeStyle = '#4cd964'; g.lineWidth = 2;
+          g.beginPath(); path.forEach((c, i) => (i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y))); g.stroke();
+          const a = path[path.length - 2], e = path[path.length - 1], ang = Math.atan2(e.y - a.y, e.x - a.x), hl = 10;
+          g.fillStyle = '#4cd964';
+          g.beginPath(); g.moveTo(e.x, e.y); g.lineTo(e.x - hl * Math.cos(ang - 0.45), e.y - hl * Math.sin(ang - 0.45)); g.lineTo(e.x - hl * Math.cos(ang + 0.45), e.y - hl * Math.sin(ang + 0.45)); g.closePath(); g.fill();
+          g.beginPath(); g.arc(path[0].x, path[0].y, 4, 0, Math.PI * 2); g.fill();
+          g.font = 'bold 11px system-ui'; g.fillText('UP', path[0].x + 6, path[0].y + 4); g.font = '11px system-ui';
         }
+        if (lay.problem) { g.fillStyle = '#ff9b4a'; g.fillText('!', cs[0].x + 4, cs[0].y - 4); }
+        g.lineWidth = 1;
       } else {
         g.beginPath(); g.moveTo(cs[0].x, cs[0].y); g.lineTo(cs[2].x, cs[2].y); g.moveTo(cs[1].x, cs[1].y); g.lineTo(cs[3].x, cs[3].y); g.stroke();
       }

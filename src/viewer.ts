@@ -41,6 +41,7 @@ export class Viewer {
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1e6);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    (window as unknown as { __archViewer?: Viewer }).__archViewer = this; // for automated checks
     // right button: selection box; middle button pans (the wheel zooms)
     this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: null as unknown as THREE.MOUSE };
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.6));

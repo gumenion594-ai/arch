@@ -53,7 +53,12 @@ export interface PlanSegment {
 }
 
 /** Stairs / elevator placed in a floor plan. x, y = centre (0..1), w × d in metres, rot in degrees. */
-export interface PlanObject { id: string; type: 'stairs' | 'elevator'; x: number; y: number; w: number; d: number; rot: number }
+/**
+ * Stairs, spiral stairs or an elevator in a floor plan (x, y: plan position). Stairs: w = width of a flight,
+ * d = the length they may use (they climb away from their first step, turning back at platforms if needed;
+ * flip = turn back on the left instead of the right). Spiral: w = diameter, flip = clockwise.
+ */
+export interface PlanObject { id: string; type: 'stairs' | 'spiral' | 'elevator'; x: number; y: number; w: number; d: number; rot: number; flip?: boolean }
 
 /** A point of a drawn outline or profile; s = this point's smoothness (null = the shape's). */
 export interface WinPoint { x: number; y: number; s?: number | null }
@@ -122,7 +127,8 @@ export interface Placement {
   scale?: number; // 3D model: size of its largest side in m
 }
 
-export const hasFloor = (f: Floor) => f.hasFloor !== false;
+/** A subfloor (3.1…) only changes the structure: by default it has no floor slab of its own. */
+export const hasFloor = (f: Floor) => f.hasFloor ?? !f.sub;
 export const hasCeiling = (f: Floor) => f.hasCeiling !== false;
 
 /** Wall materials with density in kg/m³. */
@@ -373,6 +379,9 @@ export function normalize(p: Project): Project {
     b.ground ??= 0;
     b.interiorPlans ??= [];
     b.areaPlans ??= [];
+    // floor plans are per main floor: subfloors use their main floor's
+    const subIds = new Set(b.floors.filter(f => f.sub).map(f => f.id));
+    for (const ip of b.interiorPlans) ip.floorIds = ip.floorIds.filter(id => !subIds.has(id));
     // older per-floor masks (areas + carves) -> a floor-area plan for that floor
     for (const f of b.floors) {
       if (!f.mask) continue;
@@ -749,20 +758,13 @@ export function blockProject(name: string): Project {
       ip.segments.push({ id: uid(), a: a.id, b: c.id });
     }
     ip.nextN = m;
-    if (withStairs) for (const k of entrances) ip.objects.push({ id: uid(), type: 'stairs', x: bayX(k) + X(2.2), y: y0 + X(3), w: 1.2, d: 3.6, rot: 0 });
+    // a dog-leg stair behind each entrance: two flights of 8 steps with a half landing, climbing away from the door
+    // (3.2 m long, 2 × 1.2 m wide; the floor above gets a hole over it automatically)
+    if (withStairs) for (const k of entrances) ip.objects.push({ id: uid(), type: 'stairs', x: bayX(k), y: y0 + X(0.35 + 1.3 + 1.6), w: 1.2, d: 3.2, rot: 0 });
     b.interiorPlans.push(ip);
     return ip;
   };
   inner(true, fl.slice(0, 4), 'Sections + stairs');
   inner(false, [fl[4]], 'Sections (top floor)');
-  // floors 1–4: holes in the floor above each staircase
-  const ap = newAreaPlan('Floors with stairwells', fl.slice(1).map(f => f.id));
-  const holes = entrances.map(k => {
-    const cx = bayX(k) + X(2.2), cy = y0 + X(3), hw = X(0.75), hd = X(1.95);
-    return [{ x: cx - hw, y: cy - hd }, { x: cx + hw, y: cy - hd }, { x: cx + hw, y: cy + hd }, { x: cx - hw, y: cy + hd }];
-  });
-  addLoops(ap, [[{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }], ...holes]);
-  ap.carved = holes.map(hh => ({ x: (hh[0].x + hh[2].x) / 2, y: (hh[0].y + hh[2].y) / 2 }));
-  b.areaPlans.push(ap);
   return p;
 }

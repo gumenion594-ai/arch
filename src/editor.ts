@@ -1,12 +1,13 @@
 // Building project editor: floors panel, 3D view, structure / floor / window planners.
 import {
   Building, BalconyShape, DecoDesign, DecoType, PilasterShape, WallShape, ConnectMode, DesignCategory, Floor, History, OpeningShape, PlacementType, segConnect, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan,
-  addLoops, clamp, elevation, floorBase, floorLabel, formatRanges, newAreaPlan, newInteriorPlan, newPlan, parseRanges, planForFloor, saveProject,
+  addLoops, clamp, elevation, hasFloor, mainFloorIndex, nextMainFloor, floorBase, floorLabel, formatRanges, newAreaPlan, newInteriorPlan, newPlan, parseRanges, planForFloor, saveProject,
   segKind, totalHeight, uid,
 } from './model';
 import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
 import { DesignView } from './designview';
+import { GOING, SPIRAL_STEPS_PER_TURN, stairLayout } from './stairs';
 import { renderDecoPanel } from './decopanel';
 import { ShapeEditor, ShapeTool } from './shapeeditor';
 import { DesignMode, PickMode, onBoxPick, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
@@ -185,6 +186,7 @@ export class Editor {
         toast,
         selectionChanged: () => this.renderRight(),
         area: m === 'floorarea',
+        stairRise: () => this.stairRise(),
         snapPlans: () => this.areaRefs(),
       });
       if (m === 'floorarea') this.planner.tool = 'draw';
@@ -194,6 +196,14 @@ export class Editor {
 
   plans(): StructurePlan[] { return this.mode === 'floorplan' ? this.b.interiorPlans : this.mode === 'floorarea' ? this.b.areaPlans : this.b.plans; }
   private planKey(): 'structure' | 'floorplan' | 'floorarea' { return this.mode === 'floorplan' ? 'floorplan' : this.mode === 'floorarea' ? 'floorarea' : 'structure'; }
+  /** How high stairs in the active floor plan climb: from its (first) floor to the next main floor. */
+  stairRise(): number {
+    const pl = this.plan(), b = this.b;
+    const i = b.floors.findIndex(f => pl?.floorIds.includes(f.id));
+    if (i < 0) return 3;
+    const nm = nextMainFloor(b, i);
+    return elevation(b, Math.min(nm, b.floors.length)) - elevation(b, i);
+  }
   /** Floor of the active floor-area plan: the selected floor if it uses it, else its first floor. */
   private areaFloor(): number {
     const pl = this.plan();
@@ -336,7 +346,8 @@ export class Editor {
     this.selWalls.clear(); this.selDivs.clear();
     // in a planner, show the plan the clicked floor uses
     if ((this.mode === 'structure' || this.mode === 'floorplan' || this.mode === 'floorarea') && this.selFloors.has(id)) {
-      const pl = this.mode === 'structure' ? planForFloor(this.b, id) : this.mode === 'floorplan' ? interiorForFloor(this.b, id) : areaForFloor(this.b, id);
+      const mainId = this.b.floors[mainFloorIndex(this.b, this.b.floors.findIndex(f => f.id === id))]?.id ?? id;
+      const pl = this.mode === 'structure' ? planForFloor(this.b, id) : this.mode === 'floorplan' ? interiorForFloor(this.b, mainId) : areaForFloor(this.b, id);
       if (pl && pl.id !== this.plan()?.id) {
         this.setActivePlan(pl.id);
         if (this.planner) { this.planner.head = null; this.planner.selPoints.clear(); this.planner.selSegs.clear(); this.planner.selObj = null; }
@@ -461,7 +472,9 @@ export class Editor {
       h('div', { class: 'box-title' }, one ? `Floor ${floorLabel(p, idx[0])}` : `${sel.length} floors: ${formatRanges(p, idx)}`),
       h('label', {}, one ? 'Height (m)' : 'Height of each (m)', hin),
       planPicker(p.plans, 'Structure plan'),
-      planPicker(p.interiorPlans, 'Floor plan'),
+      sel.some(f => f.sub)
+        ? h('div', { class: 'muted small' }, 'Floor plan: a subfloor uses its main floor’s (its internal walls and stairs run through it).')
+        : planPicker(p.interiorPlans, 'Floor plan'),
       planPicker(p.areaPlans, 'Floor area'),
       h('div', { class: 'row' }, this.floorToggle(sel, 'hasFloor', 'Floor'),
         sel.some(f => f === p.floors[p.floors.length - 1]) ? this.floorToggle(sel.filter(f => f === p.floors[p.floors.length - 1]), 'hasCeiling', 'Roof') : null,
@@ -494,7 +507,7 @@ export class Editor {
 
   /** Checkbox switching the floor / ceiling slab of the selected floors (indeterminate when mixed). */
   private floorToggle(sel: Floor[], key: 'hasFloor' | 'hasCeiling', label: string) {
-    const on = sel.map(f => f[key] !== false);
+    const on = sel.map(f => (key === 'hasFloor' ? hasFloor(f) : f[key] !== false));
     const cb = h('input', {
       type: 'checkbox', checked: on.every(Boolean),
       onchange: () => this.mutate(() => sel.forEach(f => (f[key] = cb.checked))),
@@ -573,6 +586,7 @@ export class Editor {
    */
   editFloorIn(mode: 'structure' | 'floorplan' | 'floorarea', floorId: string, segId?: string) {
     const b = this.b;
+    if (mode === 'floorplan') floorId = b.floors[mainFloorIndex(b, b.floors.findIndex(f => f.id === floorId))]?.id ?? floorId; // subfloors: the main floor's plan
     let pl = mode === 'structure' ? planForFloor(b, floorId) : mode === 'floorplan' ? interiorForFloor(b, floorId) : areaForFloor(b, floorId);
     if (!pl) {
       this.begin();
@@ -680,7 +694,8 @@ export class Editor {
           + (interior ? ' Internal walls must stay inside the external walls (orange dashed).' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
         select: 'Click points or walls to select (Shift = add), or right-drag a box around them; drag one of several selected points to move them all. Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
         move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
-        stairs: 'Click inside the building to place a staircase. Select it to change size and rotation.',
+        stairs: 'Click inside the building to place a staircase: it climbs from the green dot (UP) along the arrow to the next floor, with standard steps; if its length runs out it turns back at a platform. Select it to change its width, length, direction and turn side.',
+        spiral: 'Click inside the building to place a spiral staircase: it winds up around a post from the green dot (UP) to the next floor. Select it to change its diameter and direction.',
         elevator: 'Click inside the building to place an elevator shaft.',
         carve: 'Click a shape to carve it out (no floor there); click a carved shape to give it its floor back.',
       };
@@ -737,7 +752,7 @@ export class Editor {
       body.push(
         h('div', { class: 'box-title' }, 'Tool'),
         h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('move', 'Move all (M)'),
-          interior ? toolBtn('stairs', 'Stairs') : null, interior ? toolBtn('elevator', 'Elevator') : null,
+          interior ? toolBtn('stairs', 'Stairs') : null, interior ? toolBtn('spiral', 'Spiral stairs') : null, interior ? toolBtn('elevator', 'Elevator') : null,
           pn.tool === 'draw' ? h('button', { onclick: () => pn.endChain() }, 'End chain (Enter)') : null),
         this.selectionBox(pl, interior),
         h('div', { class: 'muted small help' }, help[pn.tool]),
@@ -838,7 +853,8 @@ export class Editor {
     this.mutate(() => {
       const set = new Set(ids);
       list.forEach(o => (o.floorIds = o.floorIds.filter(id => !set.has(id))));
-      pl.floorIds = this.b.floors.map(f => f.id).filter(id => set.has(id));
+      // floor plans: subfloors (3.1 …) use their main floor's, so they are never assigned one
+      pl.floorIds = this.b.floors.filter(f => set.has(f.id) && !(this.mode === 'floorplan' && f.sub)).map(f => f.id);
     });
   }
 
@@ -967,12 +983,21 @@ export class Editor {
       });
       return h('label', {}, label, inp);
     };
+    const isStairs = ob.type === 'stairs', isSpiral = ob.type === 'spiral';
+    const lay = isStairs || isSpiral ? stairLayout(ob, this.stairRise()) : null;
     return h('div', { class: 'box' },
-      h('div', { class: 'box-title' }, ob.type === 'stairs' ? 'Staircase' : 'Elevator'),
-      h('div', { class: 'row' }, f('Width (m)', () => ob.w, v => (ob.w = v), 0.3, 50), f('Length (m)', () => ob.d, v => (ob.d = v), 0.3, 50)),
+      h('div', { class: 'box-title' }, isStairs ? 'Staircase' : isSpiral ? 'Spiral staircase' : 'Elevator'),
+      isSpiral ? f('Diameter (m)', () => ob.w, v => { ob.w = v; ob.d = v; }, 0.8, 10)
+        : h('div', { class: 'row' }, f(isStairs ? 'Width of a flight (m)' : 'Width (m)', () => ob.w, v => (ob.w = v), 0.3, 50), f(isStairs ? 'Length it may use (m)' : 'Length (m)', () => ob.d, v => (ob.d = v), 0.3, 50)),
       f('Rotation (°)', () => ob.rot, v => (ob.rot = v), -360, 360),
+      lay ? h('div', { class: 'muted small' },
+        `${lay.risers} steps of ${fmt(lay.riser * 100)} cm${isStairs ? `, ${Math.round(GOING * 100)} cm deep` : ''} up to the next floor · `
+        + (isSpiral ? `${fmt((lay.risers - 1) / SPIRAL_STEPS_PER_TURN)} turns` : `${lay.flights} flight${lay.flights === 1 ? '' : 's'}${lay.flights > 1 ? ` with ${lay.flights - 1} platform${lay.flights > 2 ? 's' : ''}` : ''} · uses ${fmt(lay.length)} m of its length`)) : null,
+      lay?.problem ? h('div', { class: 'warn' }, lay.problem) : null,
       h('div', { class: 'row' },
-        h('button', { onclick: () => this.mutate(() => (ob.rot = (ob.rot + 90) % 360)) }, 'Rotate 90°'),
+        h('button', { title: 'Turn the way up round', onclick: () => this.mutate(() => (ob.rot = (ob.rot + 90) % 360)) }, 'Rotate 90°'),
+        isStairs ? h('button', { title: 'Where it turns back after a platform', onclick: () => this.mutate(() => (ob.flip = !ob.flip)) }, ob.flip ? 'Turns back on the left' : 'Turns back on the right') : null,
+        isSpiral ? h('button', { onclick: () => this.mutate(() => (ob.flip = !ob.flip)) }, ob.flip ? 'Clockwise' : 'Anticlockwise') : null,
         h('button', { class: 'danger', onclick: () => this.planner!.deleteSelection() }, 'Delete'),
       ),
     );
