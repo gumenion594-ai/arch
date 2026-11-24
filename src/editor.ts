@@ -405,7 +405,16 @@ export class Editor {
     put(this.left, 
       h('div', { class: 'box-title' }, 'Floors'),
       h('div', { class: 'muted small' }, `${p.floors.length} floors (${p.ground} underground) · ${fmt(H)} m · base ${fmt(p.baseLength)} m (${fmt(p.baseLength ** 2)} m²)`),
-      h('div', { class: 'row' }, h('button', { onclick: () => this.insertFloor(p.floors.length) }, '+ Top floor')),
+      h('div', { class: 'row' }, h('button', { onclick: () => this.insertFloor(p.floors.length) }, '+ Top floor'),
+        h('button', {
+          title: 'Make the floors the same height, keeping the total (only the selected floors if two or more are selected)',
+          onclick: () => {
+            const list = this.selFloors.size >= 2 ? p.floors.filter(f => this.selFloors.has(f.id)) : p.floors;
+            const sum = list.reduce((a, f) => a + f.height, 0);
+            this.mutate(() => list.forEach(f => (f.height = sum / list.length)));
+            toast(`${list.length} floors now ${fmt(sum / list.length)} m each`);
+          },
+        }, this.selFloors.size >= 2 ? 'Equalize selected' : 'Equalize')),
       h('div', { class: 'floorbar-wrap' }, bar),
       this.floorSelectionBox(),
     );
