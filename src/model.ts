@@ -27,7 +27,7 @@ export interface PlanPoint {
 }
 
 /** 'door' only in floor (interior) plans; 'balustrade' = a 1 m railing of balusters. */
-export type SegKind = 'wall' | 'colonnade' | 'balustrade' | 'open' | 'door' | 'roof';
+export type SegKind = 'wall' | 'colonnade' | 'balustrade' | 'open' | 'door' | 'roof' | 'steel';
 export type ConnectMode = 'straight' | 'loft';
 
 export interface PlanSegment {
@@ -194,7 +194,25 @@ export interface Building {
 }
 
 export type ProjectKind = 'building' | 'site';
-export interface SiteItem { id: string; projectId: string; x: number; y: number }
+/** A building project placed on a site: x, y = corner of its area (m, x east, y north), z = height of its ground floor, rot = turn (°). */
+export interface SiteItem { id: string; projectId: string; x: number; y: number; z?: number; rot?: number }
+export type SiteXY = { x: number; y: number };
+/**
+ * The ground of a site: a square of `size` m centred on 0, 0, with heights every `res` m (row by row from the
+ * south-west corner, (size / res + 1)² values), and what is on it.
+ */
+export interface SiteData {
+  size: number; res: number; heights: number[];
+  roads: { id: string; points: SiteXY[]; lanes: number }[];
+  gravel: { id: string; points: SiteXY[] }[];
+  trees: { id: string; x: number; y: number; kind: 'round' | 'conifer'; size: number }[];
+  models: { id: string; designId: string; x: number; y: number; z?: number; rot: number; scale: number }[];
+  water: { id: string; x: number; y: number; w: number; d: number; level: number }[];
+}
+export function newSiteData(size = 200, res = 2): SiteData {
+  const n = Math.round(size / res) + 1;
+  return { size, res, heights: new Array(n * n).fill(0), roads: [], gravel: [], trees: [], models: [], water: [] };
+}
 
 export interface Project {
   id: string;
@@ -208,6 +226,8 @@ export interface Project {
   designs: Design[]; // imported 3D models (the library)
   /** Designs: imported 3D models arranged around a reference shape (a window, a column, a strip of wall…). */
   decos: DecoDesign[];
+  /** Site projects: the ground and what is on it. */
+  site?: SiteData;
 }
 
 /** What a design decorates. */
@@ -385,6 +405,7 @@ export function normalize(p: Project): Project {
   p.kind ??= 'building';
   p.designs ??= [];
   p.decos ??= [];
+  if (p.kind === 'site') p.site ??= newSiteData();
   for (const b of p.buildings) {
     const ob = b as any;
     b.ground ??= 0;
@@ -473,7 +494,7 @@ export const segConnectSmooth = (pl: StructurePlan, s: PlanSegment) => s.connect
 export const segSmoothSpan = (pl: StructurePlan, s: PlanSegment) => s.smoothSpan ?? pl.smoothSpan;
 export const segColT = (pl: StructurePlan, s: PlanSegment) => s.columnThickness ?? pl.wallThickness;
 /** Material of a segment: its own, else roofs are metal and the rest take the plan's (concrete by default). */
-export const segMaterial = (pl: StructurePlan, s: PlanSegment) => s.material ?? (segKind(s) === 'roof' ? 'metal' : pl.material);
+export const segMaterial = (pl: StructurePlan, s: PlanSegment) => s.material ?? (segKind(s) === 'roof' ? 'metal' : segKind(s) === 'steel' ? 'steel' : pl.material);
 export const segDivLen = (b: Building, s: PlanSegment) => s.divLen ?? b.divLen;
 
 /** Floor label ("5", "5.1") -> floor index, or null. */

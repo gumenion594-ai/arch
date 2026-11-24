@@ -1113,7 +1113,7 @@ export class Editor {
     const kind = common(segKind);
     const kindBtn = (k: SegKind, label: string) => h('button', { class: kind === k ? 'tab active' : 'tab', onclick: () => setAll(s => (s.kind = k)) }, label);
     wrap.append(h('div', { class: 'box-title' }, 'Type'), h('div', { class: 'row' },
-      kindBtn('wall', 'Wall'), interior ? kindBtn('door', 'Door') : null, interior ? null : kindBtn('roof', 'Roof'), kindBtn('colonnade', 'Colonnade'), kindBtn('balustrade', 'Balusters'), kindBtn('open', 'Open')));
+      kindBtn('wall', 'Wall'), interior ? kindBtn('door', 'Door') : null, interior ? null : kindBtn('roof', 'Roof'), kindBtn('steel', 'Steel frame'), kindBtn('colonnade', 'Colonnade'), kindBtn('balustrade', 'Balusters'), kindBtn('open', 'Open')));
     if (kind === 'wall' || kind === 'colonnade') {
       const dl = common(s => s.divLen ?? null);
       const dIn = h('input', {

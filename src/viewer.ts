@@ -10,7 +10,16 @@ import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, 
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
 
-export interface Scene3D { id: string; buildings: Building[]; textures: Texture[]; designs?: Design[]; decos?: DecoDesign[] }
+export interface Scene3D {
+  id: string; buildings: Building[]; textures: Texture[]; designs?: Design[]; decos?: DecoDesign[];
+  /** Sites: the ground and what is on it (built by the site editor), shown instead of the plain ground plane. */
+  extra?: THREE.Object3D;
+  /** Sites: each building's height above zero and turn (degrees, about the middle of its area). */
+  poses?: Record<string, { y: number; rot: number }>;
+  /** Sites: the area the camera frames (else the buildings'), and a fixed key so moving buildings does not reframe. */
+  frameBox?: { x0: number; x1: number; z0: number; z1: number; y1: number };
+  frameKey?: string;
+}
 export interface ViewOpts {
   activeId: string | null; // building drawn bright ('*' or null = all)
   mode: ViewMode;
@@ -25,7 +34,7 @@ export class Viewer {
   scene = new THREE.Scene();
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
-  private content = new THREE.Group();
+  content = new THREE.Group();
   private ro: ResizeObserver;
   private disposed = false;
   private frameKey = '';
@@ -161,6 +170,7 @@ export class Viewer {
   }
 
   private bounds(s: Scene3D) {
+    if (s.frameBox) return { ...s.frameBox, y0: 0 };
     let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, y0 = 0, y1 = 0;
     for (const b of s.buildings) {
       x0 = Math.min(x0, b.x); x1 = Math.max(x1, b.x + b.baseLength);
@@ -209,12 +219,25 @@ export class Viewer {
     if (this.walk) o = { ...o, showArea: false, selection: undefined }; // at eye level the area box is just clutter
     // first person: green grass and a blue sky (no shadows); the editing views keep the dark background
     (this.scene.background as THREE.Color).set(this.walk ? 0x8ec5ee : 0x232323);
-    const key = s.id + ':' + s.buildings.map(b => b.id + b.x + ',' + b.y).join(';');
+    const key = s.frameKey ?? s.id + ':' + s.buildings.map(b => b.id + b.x + ',' + b.y).join(';');
     if (key !== this.frameKey) { this.frame(s); this.frameKey = key; }
     const B = this.bounds(s);
     const span = Math.max(B.x1 - B.x0, B.z1 - B.z0, 1);
     const underground = s.buildings.some(b => b.ground > 0);
 
+    if (s.extra) {
+      // a site's own ground (terrain, roads, trees, water…), and a far plane of grass under it while walking
+      this.content.add(s.extra);
+      if (this.walk) {
+        const far = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshStandardMaterial({ color: 0x5f8f3e, roughness: 1 }));
+        far.rotation.x = -Math.PI / 2; far.position.y = -0.6; far.userData.ground = true;
+        this.content.add(far);
+      }
+      this.stats = { windowCount: 0, windowArea: 0, windowSkipped: 0 };
+      for (const b of s.buildings) this.addBuilding(s, b, !o.activeId || o.activeId === '*' || b.id === o.activeId, o);
+      if (this.walk) this.content.traverse(x => { if ((x as THREE.Line).isLine) x.visible = false; });
+      return;
+    }
     // ground plane (see-through when there are underground floors)
     const g = new THREE.Mesh(
       new THREE.PlaneGeometry(this.walk ? Math.max(span * 6, 3000) : span * 6, this.walk ? Math.max(span * 6, 3000) : span * 6), // walking: grass to the horizon
@@ -235,7 +258,16 @@ export class Viewer {
     const L = b.baseLength, N = b.floors.length;
     const grp = new THREE.Group();
     grp.userData.buildingId = b.id;
-    this.content.add(grp);
+    const pose = s.poses?.[b.id];
+    if (pose) {
+      // sites: raised / lowered and turned about the middle of the building's area
+      const cx = b.x + L / 2, cz = -(b.y + L / 2), pivot = new THREE.Group();
+      pivot.position.set(cx, pose.y, cz); pivot.rotation.y = (pose.rot * Math.PI) / 180;
+      grp.position.set(-cx, 0, -cz);
+      pivot.add(grp);
+      pivot.userData.buildingPivot = b.id;
+      this.content.add(pivot);
+    } else this.content.add(grp);
     const sel = active ? o.selection ?? emptySelection() : emptySelection();
     const floorSel = (i: number) => i >= 0 && i < N && sel.floors.has(b.floors[i].id);
 
@@ -439,6 +471,7 @@ export class Viewer {
       if (!m.isMesh) return;
       const mat = m.material as THREE.Material | THREE.Material[];
       if (Array.isArray(mat) ? mat.every(x => !x.visible) : !mat.visible) return;
+      if (m.userData.passThrough) return; // e.g. water: you can walk through it (and fall in)
       out.push(m);
     });
     return out;

@@ -410,6 +410,32 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           rows = rows.map((row, r) => ({ poly: ext.map((e, j) => ({ x: e.x + (rR[j].x - e.x) * (r / R), y: e.y + (rR[j].y - e.y) * (r / R) })), params: row.params }));
         }
 
+        if (kind === 'steel') {
+          // a steel frame instead of a wall: I-beams up every division border and the middle of every division,
+          // and along the bottom and top, all following the segment's shape (curved, sloped, lofted)
+          const fs = interior ? 0 : faceSide(plan, seg), B = 0.2;
+          const offs = offsets(plan, seg, bottom, B / 2 / L).map(v => (!interior && fs !== -1 ? { x: -v.x, y: -v.y } : v));
+          const frame = new WallSolid(rows, offs, polyParams(bottom), y0 + (slabs[i].floor > 0 ? slabs[i].floor : 0), y1, W, L, 1, 1, B);
+          if (fs !== 0 && !loft) frame.shift = -1; // inside the line, like walls
+          const mat = selected ? mats.selected : segMat(seg, material);
+          const us = new Set<number>();
+          borders.forEach((b, k) => { us.add(b); if (k + 1 < borders.length) us.add((b + borders[k + 1]) / 2); });
+          const steps = Math.max(2, rows.length - 1) * (loft ? 4 : 1);
+          for (const u of us) {
+            const pts = Array.from({ length: steps + 1 }, (_, k) => frame.at(clamp01(u), k / steps, 0));
+            for (let k = 0; k < steps; k++) add(steelBeam(pts[k], pts[k + 1], frame.frame(clamp01(u), (k + 0.5) / steps).along, B), mat, pick, { cat: 'col', material });
+          }
+          const ps = [...new Set([...frame.params, ...borders])].sort((a, c) => a - c);
+          for (const v of [0, 1]) {
+            const yv = v === 0 ? 0.0001 : 0.9999;
+            for (let k = 0; k + 1 < ps.length; k++) {
+              const a = frame.at(ps[k], yv, 0), c = frame.at(ps[k + 1], yv, 0);
+              add(steelBeam(a, c, new THREE.Vector3(0, 1, 0), B), mat, pick, { cat: 'col', material });
+            }
+          }
+          continue;
+        }
+
         if (kind === 'wall' || kind === 'door' || kind === 'roof') {
           // +1 side of the wall = outside of the building
           // external walls stand inside the line (outer face on it, flush with floors and ceilings);
@@ -1422,6 +1448,27 @@ function column(a: THREE.Vector3, b: THREE.Vector3, t: number, wall: V2[] | null
     q.multiply(spin);
   }
   geo.applyQuaternion(q);
+  geo.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+  return geo;
+}
+
+/** An I-beam from a to b (flanges facing `side`, across the beam), b × b in section. */
+function steelBeam(a: THREE.Vector3, b: THREE.Vector3, side: THREE.Vector3, t: number): THREE.BufferGeometry {
+  const len = a.distanceTo(b);
+  if (len < 1e-4) return new THREE.BufferGeometry();
+  const y = new THREE.Vector3().subVectors(b, a).normalize();
+  let x = side.clone().addScaledVector(y, -side.dot(y));
+  if (x.lengthSq() < 1e-8) x = Math.abs(y.y) < 0.9 ? new THREE.Vector3(0, 1, 0).cross(y) : new THREE.Vector3(1, 0, 0);
+  x.normalize();
+  const z = new THREE.Vector3().crossVectors(x, y).normalize();
+  const f = 0.022, web = 0.014;
+  const parts = [
+    new THREE.BoxGeometry(t, len, f).translate(0, 0, t / 2 - f / 2),
+    new THREE.BoxGeometry(t, len, f).translate(0, 0, -t / 2 + f / 2),
+    new THREE.BoxGeometry(web, len, t - 2 * f),
+  ].map(g => { const n = g.toNonIndexed(); n.deleteAttribute('uv'); return n; });
+  const geo = mergeGeometries(parts, false)!;
+  geo.applyMatrix4(new THREE.Matrix4().makeBasis(x, y, z));
   geo.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
   return geo;
 }

@@ -51,6 +51,15 @@ function draw(key: string): HTMLCanvasElement {
   } else if (key === 'timber') {
     g.fillStyle = grey(225); g.fillRect(0, 0, PX, PX);
     for (let y = 0; y < PX; y += 3) { g.fillStyle = `rgba(120,120,120,${0.05 + r() * 0.12})`; g.fillRect(0, y + Math.sin(y * 0.05) * 3, PX, 1); }
+  } else if (key === 'asphalt') {
+    g.fillStyle = grey(200); g.fillRect(0, 0, PX, PX);
+    noise(140, 2); noise(80, 1);
+  } else if (key === 'gravel') {
+    g.fillStyle = grey(215); g.fillRect(0, 0, PX, PX);
+    for (let i = 0; i < 2600; i++) { const v = Math.round(150 + r() * 100); g.fillStyle = grey(v); g.beginPath(); g.ellipse(r() * PX, r() * PX, 3 + r() * 6, 2 + r() * 5, r() * 3, 0, Math.PI * 2); g.fill(); }
+  } else if (key === 'grass') {
+    g.fillStyle = grey(220); g.fillRect(0, 0, PX, PX);
+    for (let i = 0; i < 9000; i++) { const v = Math.round(170 + r() * 85); g.fillStyle = `rgba(${v},${v},${v},0.6)`; g.fillRect(r() * PX, r() * PX, 1.5, 4 + r() * 5); }
   } else {
     g.fillStyle = grey(235); g.fillRect(0, 0, PX, PX);
     noise(30, 2);

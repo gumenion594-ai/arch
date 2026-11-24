@@ -649,9 +649,9 @@ export class Planner {
           g.strokeStyle = g.fillStyle; g.lineWidth = tpx; path(sp); g.stroke();
         }
       }
-      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : kind === 'balustrade' ? '#c9b8ff' : kind === 'roof' ? '#e0855a' : '#f0f0f0';
+      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : kind === 'balustrade' ? '#c9b8ff' : kind === 'roof' ? '#e0855a' : kind === 'steel' ? '#8fb3d9' : '#f0f0f0';
       g.lineWidth = sel ? 2.5 : 1.5;
-      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : kind === 'door' ? [8, 4] : kind === 'balustrade' ? [1, 3] : kind === 'roof' ? [14, 3] : []);
+      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : kind === 'door' ? [8, 4] : kind === 'balustrade' ? [1, 3] : kind === 'roof' ? [14, 3] : kind === 'steel' ? [4, 2, 1, 2] : []);
       path(sp); g.stroke();
       g.setLineDash([]);
       // division borders (by length: full divisions in the middle, shorter ones at the ends)

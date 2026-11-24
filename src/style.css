@@ -106,3 +106,8 @@ label.inline.band { font-size: 11px; gap: 2px; } label.inline.band input { width
 .sel-box { position: absolute; border: 1px dashed #ffd400; background: rgba(255, 212, 0, 0.12); pointer-events: none; z-index: 4; }
 
 .ok { background: rgba(76, 217, 100, 0.15); border: 1px solid rgba(76, 217, 100, 0.5); color: #bdf5c6; border-radius: 4px; padding: 6px 8px; font-size: 12px; }
+
+/* sites */
+.editor.with-left-only.site-walk { grid-template-columns: 1fr; grid-template-areas: "h" "c"; }
+.editor.site-walk .left { display: none; }
+.tools-grid { flex-wrap: wrap; }
