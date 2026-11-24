@@ -565,8 +565,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       // (single unconnected points build nothing: they only serve as targets for the floor below)
 
       // stairs climb to the next main floor (subfloors are part of the same floor)
-      // stairs climb to the floor above (its floor's top), whatever is there
-      const nm = i + 1;
+      // stairs set to reach the next floor climb to the next main floor (past intermediate ones), whatever is there
+      const nm = nextMainFloor(p, i);
       const yStairs = nm < N ? elevation(p, nm) + slabs[nm].floor : y1;
       if (interior) for (const ob of plan.objects) buildObject(ob, p, y0, y1, yStairs, (nm < N ? elevation(p, nm) : yTop) - yBase, mats.object, (geo: THREE.BufferGeometry) => add(geo, mats.object, { floorId: floor.id, floorIndex: i, interior: true }));
     }
@@ -972,7 +972,8 @@ function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStair
   };
   if (ob.type === 'stairs' || ob.type === 'spiral') {
     // steps (a stepped slab, open underneath) and landings, in plan coordinates; risers scaled to the real floor-to-floor height
-    const lay = stairLayout(ob, layoutRise, b.baseLength), k = (yStairs - y0) / Math.max(1e-9, layoutRise);
+    const lay = stairLayout(ob, layoutRise, b.baseLength);
+    const k = ob.type === 'stairs' && !ob.toFloor ? 1 : (yStairs - y0) / Math.max(1e-9, layoutRise); // free stairs: standard steps as drawn
     const prism = (pts: { x: number; y: number }[], top: number, t: number) => {
       const w = pts.map(q => toWorld(b, q, 0));
       const geo = new THREE.ExtrudeGeometry(new THREE.Shape(w.map(v => new THREE.Vector2(v.x, -v.z))), { depth: t, bevelEnabled: false, curveSegments: 1 });

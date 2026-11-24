@@ -5,6 +5,8 @@
 import type { PlanObject } from './model';
 
 export const RISER_MAX = 0.18; // m: steeper than this is flagged
+export const RISER_MIN = 0.14; // m: shallower than this is flagged (not steep enough)
+export const RISER_STD = 0.17; // m: step height of stairs that do not have to reach a floor
 export const GOING = 0.28; // m: tread depth the flights are divided into
 export const SPIRAL_STEPS_PER_TURN = 16;
 export const SPIRAL_POST = 0.1; // m: radius of the central post
@@ -18,6 +20,8 @@ export interface StairLayout {
   path: P[]; // the walking line, from the first step up (for the arrows)
   flights: number;
   length: number; // m along the path
+  rise: number; // m: how high they climb
+  fit: 'good' | 'steep' | 'shallow';
   problem?: string;
 }
 
@@ -44,7 +48,10 @@ function drawn(ob: PlanObject, rise: number, L: number): StairLayout {
   const runs = legs.map((g, i) => Math.max(0, g.l - (i > 0 ? half : 0) - (i < legs.length - 1 ? half : 0)));
   const steps = runs.map(r => Math.floor((r * L) / GOING + 1e-6)); // treads per flight
   const risersOf = (s: number) => (s > 0 ? s + 1 : 0); // a flight of s treads climbs s + 1 risers (onto the landing / floor)
-  const n = Math.max(1, steps.reduce((t, s) => t + risersOf(s), 0)), riser = rise / n;
+  // up to the next floor: the steps share out its height; else standard steps, as high as the path takes them
+  const n = Math.max(1, steps.reduce((t, s) => t + risersOf(s), 0));
+  if (!ob.toFloor) rise = n * RISER_STD;
+  const riser = rise / n;
   const treads: StairLayout['treads'] = [], platforms: StairLayout['platforms'] = [];
   let done = 0;
   legs.forEach((g, i) => {
@@ -62,13 +69,19 @@ function drawn(ob: PlanObject, rise: number, L: number): StairLayout {
     }
   });
   const total = legs.reduce((t, g) => t + g.l, 0) * L;
-  let problem: string | undefined;
+  let problem: string | undefined, fit: StairLayout['fit'] = 'good';
+  const treadsNow = steps.reduce((t, s) => t + s, 0);
   if (riser > RISER_MAX + 1e-6) {
-    const need = (Math.ceil(rise / RISER_MAX) - legs.length) * GOING - steps.reduce((t, s) => t + s, 0) * GOING;
-    problem = `Too steep: steps of ${Math.round(riser * 100)} cm. Make the flights about ${Math.max(0.3, need).toFixed(1)} m longer (or add a turn).`;
+    fit = 'steep';
+    const need = (Math.ceil(rise / RISER_MAX) - legs.length - treadsNow) * GOING;
+    problem = `Too steep: steps of ${Math.round(riser * 100)} cm (at most ${RISER_MAX * 100} cm). Make the flights about ${Math.max(0.3, need).toFixed(1)} m longer in all.`;
+  } else if (riser < RISER_MIN - 1e-6) {
+    fit = 'shallow';
+    const extra = treadsNow + legs.length - Math.ceil(rise / RISER_STD);
+    problem = `Not steep enough: steps of only ${Math.round(riser * 100)} cm. The flights could be about ${Math.max(0.3, extra * GOING).toFixed(1)} m shorter in all.`;
   }
   return {
-    risers: n, riser, treads, platforms, path, flights: legs.length, length: total, problem,
+    risers: n, riser, treads, platforms, path, flights: legs.length, length: total, problem, rise, fit,
     footprint: [...treads.map(t => t.pts), ...platforms.map(p => p.pts)],
   };
 }
@@ -90,7 +103,7 @@ function spiral(ob: PlanObject, rise: number, L: number): StairLayout {
   const walk = R * 0.62, path: P[] = [];
   for (let j = 0; j <= (n - 1) * 3; j++) path.push(at(walk, a0 + dir * (j / 3) * th + dir * th * 0.5));
   const circle = Array.from({ length: 32 }, (_, k) => at(R + 0.05, (k / 32) * 2 * Math.PI));
-  return { risers: n, riser, treads, platforms: [], footprint: [circle], path, flights: 1, length: ob.w,
+  return { risers: n, riser, treads, platforms: [], footprint: [circle], path, flights: 1, length: ob.w, rise, fit: 'good',
     problem: R < 0.6 ? 'Narrow: spiral stairs are usually at least 1.2 m across' : undefined };
 }
 

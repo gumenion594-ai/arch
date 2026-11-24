@@ -60,7 +60,9 @@ export interface PlanSegment {
  */
 export interface PlanObject { id: string; type: 'stairs' | 'spiral' | 'elevator'; x: number; y: number; w: number; d: number; rot: number; flip?: boolean;
   /** Stairs: the walking line drawn from the bottom step up (plan coordinates); each leg a flight, each corner a landing. */
-  path?: { x: number; y: number }[] }
+  path?: { x: number; y: number }[];
+  /** Stairs: climb exactly to the next main floor (step height worked out); else standard steps, as high as the path takes them. */
+  toFloor?: boolean }
 
 /** A point of a drawn outline or profile; s = this point's smoothness (null = the shape's). */
 export interface WinPoint { x: number; y: number; s?: number | null }
@@ -776,7 +778,7 @@ export function blockProject(name: string): Project {
       // drawn as: up a flight away from the door, across the landing, back up the second flight
       const x0s = bayX(k), x1s = bayX(k) + X(1.2), near = y0 + X(0.35 + 1.3), far = near + X(2.6);
       const path = [{ x: x0s, y: near }, { x: x0s, y: far }, { x: x1s, y: far }, { x: x1s, y: near }];
-      ip.objects.push({ id: uid(), type: 'stairs', x: x0s, y: near, w: 1.2, d: 6.4, rot: 0, path });
+      ip.objects.push({ id: uid(), type: 'stairs', x: x0s, y: near, w: 1.2, d: 6.4, rot: 0, path, toFloor: true });
     }
     b.interiorPlans.push(ip);
     return ip;

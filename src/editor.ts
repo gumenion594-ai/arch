@@ -212,7 +212,7 @@ export class Editor {
     const pl = this.plan(), b = this.b;
     const i = b.floors.findIndex(f => pl?.floorIds.includes(f.id));
     if (i < 0) return 3;
-    const nm = nextMainFloor(b, i);
+    const nm = nextMainFloor(b, i); // past intermediate floors (3.1 …)
     return elevation(b, Math.min(nm, b.floors.length)) - elevation(b, i);
   }
   /** Floor of the active floor-area plan: the selected floor if it uses it, else its first floor. */
@@ -1045,10 +1045,14 @@ export class Editor {
         : isStairs ? f('Width (m)', () => ob.w, v => (ob.w = v), 0.5, 20)
         : h('div', { class: 'row' }, f('Width (m)', () => ob.w, v => (ob.w = v), 0.3, 50), f('Length (m)', () => ob.d, v => (ob.d = v), 0.3, 50)),
       isStairs ? h('div', { class: 'row' }, ...flights) : f('Rotation (°)', () => ob.rot, v => (ob.rot = v), -360, 360),
+      isStairs ? h('label', { class: 'chk', title: 'Climb exactly to the next floor (past intermediate floors like 3.1): the step height is worked out from the length you drew' },
+        (() => { const cb = h('input', { type: 'checkbox', checked: !!ob.toFloor, onchange: () => this.mutate(() => (ob.toFloor = cb.checked)) }) as HTMLInputElement; return cb; })(),
+        'Up to the next floor') : null,
       lay ? h('div', { class: 'muted small' },
-        `${lay.risers} steps of ${fmt(lay.riser * 100)} cm up to the floor above · `
+        `${lay.risers} steps of ${fmt(lay.riser * 100)} cm · climbs ${fmt(lay.rise)} m${isStairs && !ob.toFloor ? ' (standard steps; tick “Up to the next floor” to reach it)' : ' to the next floor'} · `
         + (isSpiral ? `${fmt((lay.risers - 1) / SPIRAL_STEPS_PER_TURN)} turns` : `${lay.flights} flight${lay.flights === 1 ? '' : 's'}${lay.flights > 1 ? ` and ${lay.flights - 1} landing${lay.flights > 2 ? 's' : ''}` : ''}, ${fmt(lay.length)} m in all. The arrows show the way up.`)) : null,
-      lay?.problem ? h('div', { class: 'warn' }, lay.problem) : null,
+      lay && isStairs && ob.toFloor ? h('div', { class: lay.fit === 'good' ? 'ok' : 'warn' }, lay.fit === 'good' ? `Good: comfortable steps of ${fmt(lay.riser * 100)} cm.` : lay.problem ?? '') : null,
+      lay?.problem && !(isStairs && ob.toFloor) ? h('div', { class: 'warn' }, lay.problem) : null,
       h('div', { class: 'row' },
         h('button', {
           title: 'Turn it a quarter round (about its first step)',
