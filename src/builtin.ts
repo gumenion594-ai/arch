@@ -108,6 +108,117 @@ export function ionicColumn(): THREE.Object3D {
   return g;
 }
 
-export const BUILTIN_DESIGNS: Record<string, { name: string; category: 'column'; make: () => THREE.Object3D }> = {
+// ---------------------------------------------------------------- tall round-arched window (from a photo)
+// Made around the "Tall arched window" shape: 1.4 × 3.5 m, semicircular head (spring at 80 % of the height).
+// Reference frame of an opening design: x across, y up (centred on the shape), z out of the wall; z = 0 is the
+// outside face of the wall (the wall is behind it), so the frame sits a little back inside the opening.
+export const ARCH_WIN = { w: 1.4, h: 3.5 };
+const AW = ARCH_WIN.w, AH = ARCH_WIN.h, AR = AW / 2, ACY = AH / 2 - AR; // arch radius and centre height
+
+/** Outline of a round-headed shape: straight sides from y0 up to the springing at cy, then a half circle of radius r. */
+function archShape(cx: number, r: number, y0: number, cy: number, segs = 32): THREE.Shape {
+  const sh = new THREE.Shape();
+  sh.moveTo(cx - r, y0); sh.lineTo(cx + r, y0); sh.lineTo(cx + r, cy);
+  sh.absarc(cx, cy, r, 0, Math.PI, false);
+  sh.lineTo(cx - r, y0);
+  void segs;
+  return sh;
+}
+function archPath(cx: number, r: number, y0: number, cy: number): THREE.Path {
+  const p = new THREE.Path();
+  p.moveTo(cx - r, y0); p.lineTo(cx + r, y0); p.lineTo(cx + r, cy);
+  p.absarc(cx, cy, r, 0, Math.PI, false);
+  p.lineTo(cx - r, y0);
+  return p;
+}
+
+/** The wooden window: frame, two casements with glazing bars, transom with dentils, two small arched lights and a round light, glass. */
+export function archedWindowFrame(): THREE.Object3D {
+  const g = new THREE.Group();
+  const wood = new THREE.MeshStandardMaterial({ color: 0x6e4a2c, roughness: 0.7 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x9fb4c8, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
+  const zBack = -0.2, D = 0.12; // the frame is 12 cm deep, set 8 cm back from the face
+  const extrude = (sh: THREE.Shape, depth = D, z = zBack, mat: THREE.Material = wood) => {
+    const m = new THREE.Mesh(new THREE.ExtrudeGeometry(sh, { depth, bevelEnabled: false, curveSegments: 24 }), mat);
+    m.position.z = z; g.add(m); return m;
+  };
+  const box = (x0: number, x1: number, y0: number, y1: number, depth = D, z = zBack) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, depth), wood);
+    m.position.set((x0 + x1) / 2, (y0 + y1) / 2, z + depth / 2); g.add(m);
+  };
+  const ring = (outer: THREE.Shape, inner: THREE.Path, depth = D, z = zBack) => { outer.holes.push(inner); extrude(outer, depth, z); };
+  const fw = 0.07, y0 = -AH / 2;
+  // outer frame (follows the opening)
+  ring(archShape(0, AR, y0, ACY), archPath(0, AR - fw, y0 + fw, ACY));
+  // transom with a band of dentils, at 61.5 % of the height
+  const yt = y0 + 0.615 * AH, tb = 0.1;
+  box(-AR + fw, AR - fw, yt - tb / 2, yt + tb / 2, D + 0.02, zBack);
+  for (let x = -AR + fw + 0.04; x < AR - fw - 0.03; x += 0.06) box(x, x + 0.03, yt - 0.035, yt + 0.005, 0.025, zBack + D + 0.02);
+  // two casements below: a sash frame each, a mullion between, glazing bars (three panes left, two right, as in the photo)
+  const sx = 0.035, ib = y0 + fw, it = yt - tb / 2;
+  box(-sx, sx, ib, it); // mullion
+  for (const [a, b] of [[-AR + fw, -sx], [sx, AR - fw]]) {
+    const sh = new THREE.Shape([new THREE.Vector2(a, ib), new THREE.Vector2(b, ib), new THREE.Vector2(b, it), new THREE.Vector2(a, it)]);
+    sh.holes.push(new THREE.Path([new THREE.Vector2(a + 0.05, ib + 0.05), new THREE.Vector2(a + 0.05, it - 0.05), new THREE.Vector2(b - 0.05, it - 0.05), new THREE.Vector2(b - 0.05, ib + 0.05)]));
+    extrude(sh, D - 0.02, zBack + 0.01);
+  }
+  const bar = (a: number, b: number, f: number) => box(a, b, y0 + f * AH - 0.02, y0 + f * AH + 0.02, D - 0.04, zBack + 0.02);
+  bar(-AR + fw, -sx, 0.43); bar(-AR + fw, -sx, 0.21); bar(sx, AR - fw, 0.43);
+  // above the transom: a mullion up to the round light, two small round-arched lights and the round light
+  const yu = yt + tb / 2, lr = 0.22, lcx = 0.3, lspring = yu + 0.36;
+  box(-sx, sx, yu, lspring + lr + 0.05);
+  for (const cx of [-lcx, lcx]) ring(archShape(cx, lr + 0.04, yu, lspring), archPath(cx, lr - 0.01, yu + 0.05, lspring), D - 0.02, zBack + 0.01);
+  const ccy = ACY + 0.3, cr = 0.21;
+  const circ = new THREE.Shape(); circ.absarc(0, ccy, cr + 0.045, 0, Math.PI * 2, false);
+  const hole = new THREE.Path(); hole.absarc(0, ccy, cr, 0, Math.PI * 2, true);
+  circ.holes.push(hole); extrude(circ, D - 0.02, zBack + 0.01);
+  // glass, in the middle of the frame
+  const pane = new THREE.Mesh(new THREE.ShapeGeometry(archShape(0, AR - fw, y0 + fw, ACY), 24), glass);
+  pane.position.z = zBack + D / 2; g.add(pane);
+  return g;
+}
+
+/** The stone surround: an arch of voussoirs with an outer moulding, impost blocks, panelled side strips and a sill. */
+export function archedWindowSurround(): THREE.Object3D {
+  const g = new THREE.Group();
+  const stone = new THREE.MeshStandardMaterial({ color: 0xdcd6ca, roughness: 0.85 });
+  const extrude = (sh: THREE.Shape, depth: number) => { const m = new THREE.Mesh(new THREE.ExtrudeGeometry(sh, { depth, bevelEnabled: false, curveSegments: 6 }), stone); g.add(m); return m; };
+  const box = (x0: number, x1: number, y0: number, y1: number, depth: number) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, depth), stone);
+    m.position.set((x0 + x1) / 2, (y0 + y1) / 2, depth / 2); g.add(m);
+  };
+  const y0 = -AH / 2, ri = AR + 0.04, ro = AR + 0.3;
+  // the arch: 13 voussoirs with thin joints between them
+  const n = 13, gap = 0.006;
+  for (let k = 0; k < n; k++) {
+    const a0 = (k / n) * Math.PI + gap, a1 = ((k + 1) / n) * Math.PI - gap;
+    const sh = new THREE.Shape();
+    sh.moveTo(ri * Math.cos(a0), ACY + ri * Math.sin(a0));
+    sh.absarc(0, ACY, ro, a0, a1, false);
+    sh.lineTo(ri * Math.cos(a1), ACY + ri * Math.sin(a1));
+    sh.absarc(0, ACY, ri, a1, a0, true);
+    extrude(sh, 0.07);
+  }
+  // outer moulding round the arch, standing a little further out
+  const mo = new THREE.Shape(); mo.absarc(0, ACY, ro + 0.07, 0, Math.PI, false); mo.absarc(0, ACY, ro, Math.PI, 0, true);
+  extrude(mo, 0.1);
+  // impost blocks at the springing, and the side strips below them (a raised frame round a recessed panel)
+  const xi = ri, xo = ro + 0.07, yImp = ACY - 0.13;
+  for (const s of [-1, 1]) {
+    const [a, b] = s < 0 ? [-xo - 0.04, -xi + 0.02] : [xi - 0.02, xo + 0.04];
+    box(a, b, yImp, ACY, 0.12);
+    const [c, d] = s < 0 ? [-xo, -xi] : [xi, xo];
+    box(c, c + 0.05, y0, yImp, 0.07); box(d - 0.05, d, y0, yImp, 0.07);
+    box(c, d, y0, y0 + 0.05, 0.07); box(c, d, yImp - 0.05, yImp, 0.07);
+    box(c + 0.05, d - 0.05, y0 + 0.05, yImp - 0.05, 0.03);
+  }
+  // sill
+  box(-xo - 0.1, xo + 0.1, y0 - 0.1, y0, 0.14);
+  return g;
+}
+
+export const BUILTIN_DESIGNS: Record<string, { name: string; category: 'column' | 'frame' | 'surround'; make: () => THREE.Object3D }> = {
   ionic: { name: 'Ionic column', category: 'column', make: ionicColumn },
+  archFrame: { name: 'Arched window frame', category: 'frame', make: archedWindowFrame },
+  archSurround: { name: 'Arched window surround', category: 'surround', make: archedWindowSurround },
 };

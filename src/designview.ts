@@ -3,10 +3,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
-import { Building, DecoDesign, DecoPart, Design, PILASTER_REF_H } from './model';
+import { Building, DecoDesign, DecoPart, Design } from './model';
 import { designObject } from './assets';
 import { REF_WALL, decoRef, partObject } from './deco';
-import { BALUSTER, CORNICE, pilasterGeometry } from './build3d';
+import { BALUSTER, CORNICE } from './build3d';
 import { smoothClosed } from './geometry';
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale';
@@ -177,8 +177,11 @@ function referenceShape(deco: DecoDesign, b: Building): THREE.Object3D {
       break;
     }
     case 'pilaster': {
-      const s = b.pilasterShapes.find(x => x.id === deco.shapeId) ?? b.pilasterShapes[0];
-      if (s) add(pilasterGeometry(s, new THREE.Vector3(0, 0, -R.d / 2), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 1), -PILASTER_REF_H / 2, PILASTER_REF_H), planeMat);
+      // a plain rectangular column against the wall; the base and top bands keep their size on the building
+      const bH = (deco.base ?? 0.12) * R.h, tH = (deco.top ?? 0.12) * R.h;
+      add(new THREE.BoxGeometry(R.w, bH, R.d).translate(0, -R.h / 2 + bH / 2, 0), planeMat);
+      add(new THREE.BoxGeometry(R.w * 0.9, R.h - bH - tH, R.d * 0.9).translate(0, (bH - tH) / 2, -R.d * 0.05));
+      add(new THREE.BoxGeometry(R.w, tH, R.d).translate(0, R.h / 2 - tH / 2, 0), planeMat);
       wallBehind(R.w + 1.5, R.h, -R.d / 2);
       break;
     }
@@ -198,7 +201,13 @@ function referenceShape(deco: DecoDesign, b: Building): THREE.Object3D {
       break;
     }
     case 'wall': add(new THREE.BoxGeometry(R.w, R.h, R.d), planeMat); break;
-    case 'baluster': add(new THREE.LatheGeometry(BALUSTER, 16).translate(0, -R.h / 2, 0), planeMat); break;
+    case 'baluster': {
+      // a 1 m section of railing: plinth, four balusters, handrail (repeated along the railing on the building)
+      add(new THREE.BoxGeometry(R.w, 0.12, R.d).translate(0, -R.h / 2 + 0.06, 0), planeMat);
+      add(new THREE.BoxGeometry(R.w, 0.08, R.d * 0.9).translate(0, R.h / 2 - 0.04, 0), planeMat);
+      for (const x of [-0.375, -0.125, 0.125, 0.375]) add(new THREE.LatheGeometry(BALUSTER, 16).translate(x, -R.h / 2 + 0.12, 0));
+      break;
+    }
   }
   return g;
 }

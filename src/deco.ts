@@ -20,19 +20,16 @@ export function decoRef(deco: { type: DecoType; shapeId?: string | null }, b: Bu
       const s = b.balconyShapes.find(x => x.id === deco.shapeId) ?? b.balconyShapes[0];
       return { w: s?.w ?? 2.4, h: s?.thickness ?? 0.2, d: s?.d ?? 1.1 };
     }
-    case 'pilaster': {
-      const s = b.pilasterShapes.find(x => x.id === deco.shapeId) ?? b.pilasterShapes[0];
-      return { w: s?.w ?? 0.5, h: PILASTER_REF_H, d: s?.d ?? 0.12 };
-    }
+    case 'pilaster': return { w: 0.5, h: PILASTER_REF_H, d: 0.15 }; // a plain rectangular column against the wall
     case 'column': return { w: 0.4, h: 3, d: 0.4 };
     case 'cornice': return { w: 3, h: 0.32, d: 0.34 };
     case 'wall': return { w: 3, h: 3, d: REF_WALL };
-    case 'baluster': return { w: 0.13, h: 0.8, d: 0.13 };
+    case 'baluster': return { w: 1, h: 1, d: 0.2 }; // a 1 m section of railing (plinth, balusters, handrail), repeated along it
   }
 }
 /** Shape kinds a design type is made on (null: no choice of shape). */
-export const decoShapeKind = (t: DecoType): 'opening' | 'niche' | 'balcony' | 'pilaster' | 'wall' | null =>
-  t === 'opening' || t === 'niche' || t === 'balcony' || t === 'pilaster' || t === 'wall' ? t : null;
+export const decoShapeKind = (t: DecoType): 'opening' | 'niche' | 'balcony' | null =>
+  t === 'opening' || t === 'niche' || t === 'balcony' ? t : null;
 
 const rad = (d: number) => (d * Math.PI) / 180;
 
@@ -68,6 +65,7 @@ export function decoObject(deco: DecoDesign, b: Building, models: Design[], onLo
   root.add(holder);
   root.userData.size = new THREE.Vector3(R.w, R.h, R.d);
   if (deco.type === 'column' || deco.type === 'pilaster') { root.userData.baseFrac = deco.base ?? 0.12; root.userData.topFrac = deco.top ?? 0.12; }
+  root.userData.decoType = deco.type;
   root.updateMatrixWorld(true);
   return root;
 }

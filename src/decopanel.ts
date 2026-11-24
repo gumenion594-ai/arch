@@ -17,16 +17,15 @@ function shapesFor(ed: Editor, t: DecoType): { id: string; name: string }[] | nu
   const b = ed.b;
   if (t === 'opening' || t === 'niche') return b.openingShapes.filter(s => s.kind === t);
   if (t === 'balcony') return b.balconyShapes;
-  if (t === 'pilaster') return b.pilasterShapes;
   return null;
 }
 
 /** Where a design is used, and how to use it everywhere it fits. */
 function usage(ed: Editor, d: DecoDesign) {
   const b = ed.b, segs = [...b.plans, ...b.interiorPlans].flatMap(pl => pl.segments);
-  const places = b.placements.filter(x => x.type === d.type && (d.type === 'cornice' || !d.shapeId || x.shapeId === d.shapeId));
+  const places = b.placements.filter(x => x.type === d.type && (d.type === 'cornice' || d.type === 'pilaster' || !d.shapeId || x.shapeId === d.shapeId));
   switch (d.type) {
-    case 'opening': case 'niche': case 'balcony': case 'pilaster': case 'cornice':
+    case 'opening': case 'niche': case 'balcony': case 'pilaster': case 'cornice': // (pilasters, cornices: every one)
       return { used: b.placements.filter(x => x.designId === d.id).length, all: () => places.forEach(x => (x.designId = d.id)), none: () => b.placements.forEach(x => { if (x.designId === d.id) x.designId = null; }) };
     case 'column': {
       const list = segs.filter(s => s.kind === 'colonnade');
@@ -86,14 +85,14 @@ export function renderDecoPanel(ed: Editor) {
     cur && (t === 'column' || t === 'pilaster') ? h('div', { class: 'row' },
       pctField(ed, 'Base (% of height)', cur.base ?? 0.12, v => (cur.base = v)),
       pctField(ed, 'Top (% of height)', cur.top ?? 0.12, v => (cur.top = v))) : null,
-    cur && R ? h('div', { class: 'muted small' }, `Reference: ${fmt(R.w)} × ${fmt(R.h)} m${t === 'opening' || t === 'niche' ? ' (the blue plane is the outside face of the opening)' : ''}. The orange dashed box is stretched onto the real ${ONE[t]} in the Detailed view; models keep their place around it.`) : null,
+    cur && R ? h('div', { class: 'muted small' }, `Reference: ${fmt(R.w)} × ${fmt(R.h)} m${t === 'opening' || t === 'niche' ? ' (the blue plane is the outside face of the opening)' : ''}. The orange dashed box is stretched onto ${t === 'baluster' ? 'each section of a railing (about 1 m, evenly spaced)' : `the real ${ONE[t]}`} in the Detailed view; models keep their place around it.`) : null,
     cur ? partsBox(ed, cur, part) : null,
     cur && part && view ? partBox(ed, cur, part) : null,
     cur && use ? h('div', { class: 'box' },
       h('div', { class: 'box-title' }, `Used ${use.used}×`),
       h('div', { class: 'row' },
         h('button', { onclick: () => ed.mutate(() => use.all()), title: 'Put this design on every one that fits in this building' },
-          t === 'opening' || t === 'niche' || t === 'balcony' || t === 'pilaster' ? `Use on every ${ONE[t]} with this shape` : `Use on every ${ONE[t]}`),
+          t === 'opening' || t === 'niche' || t === 'balcony' ? `Use on every ${ONE[t]} with this shape` : t === 'baluster' ? 'Use on every railing' : `Use on every ${ONE[t]}`),
         h('button', { disabled: !use.used, onclick: () => ed.mutate(() => use.none()) }, 'Stop using')),
       h('div', { class: 'muted small' }, t === 'wall' ? 'Wall designs go on every division of the walls that use them (the structure plan’s walls, all floors using it).' : 'Or pick it on single elements: select them in the 3D view (or walls in the Structure tab).')) : null,
     libraryBox(ed, cur),

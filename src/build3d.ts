@@ -655,12 +655,22 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
   /** A simple 1 m railing along a polyline: bottom rail, top rail and turned balusters. */
   function balusters(path: THREE.Vector3[], designId: string | null | undefined, mat: THREE.Material, pick: PickInfo) {
+    // a railing design (Design tab): 1 m sections of railing, stretched to fit each run evenly
+    const section = o.detailed && designId && mats.design?.(designId)?.userData.decoType === 'baluster';
     for (let j = 0; j + 1 < path.length; j++) {
       const a = path[j], c = path[j + 1];
       const len = a.distanceTo(c);
       if (len < 1e-3) continue;
       const along = new THREE.Vector3().subVectors(c, a).normalize();
       const up = new THREE.Vector3(0, 1, 0), out = new THREE.Vector3().crossVectors(along, up).normalize();
+      if (section) {
+        const n = Math.max(1, Math.round(len));
+        for (let q = 0; q < n; q++) {
+          const m = a.clone().lerp(c, (q + 0.5) / n); m.y = a.y + 0.5;
+          designAt(designId, m, along, up, out, len / n, 1, 0.2, null, pick);
+        }
+        continue;
+      }
       const rail = (h: number, w: number, y: number) => {
         const geo = new THREE.BoxGeometry(len, h, w);
         geo.applyMatrix4(new THREE.Matrix4().makeBasis(along, up, out));

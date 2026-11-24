@@ -11,7 +11,7 @@ interface Opts {
   onCreate(spec: BuildingSpec, name: string, template: Template): void;
 }
 /** Starting point of a new building project. */
-export type Template = 'none' | 'villa' | 'block';
+export type Template = 'none' | 'villa' | 'block' | 'house';
 
 export function buildingDialog(o: Opts) {
   type Combo = 'nf' | 'nt' | 'ft';
@@ -20,6 +20,7 @@ export function buildingDialog(o: Opts) {
     h('option', { value: 'none' }, 'None'),
     h('option', { value: 'villa' }, 'Villa'),
     h('option', { value: 'block' }, '5-storey block'),
+    h('option', { value: 'house' }, 'Small house (arched windows)'),
   );
   const comboSel = h('select', {},
     h('option', { value: 'nf' }, 'Number of floors + floor height'),
@@ -45,7 +46,7 @@ export function buildingDialog(o: Opts) {
     // a template brings its own size: the size fields only matter for an empty building
     const tpl = tplSel.value !== 'none';
     sizeRows.forEach(el => (el.style.display = tpl ? 'none' : ''));
-    if (tpl) { [rowN, rowF, rowT].forEach(r => (r.style.display = 'none')); out.innerHTML = ''; out.append(h('div', {}, tplSel.value === 'villa' ? 'Villa: 3 floors, 11 m tall, 24 m base; porch with Ionic columns, balcony, pilasters, cornice, hip roof.' : '5-storey panel block: 60 × 12 m, 5 identical floors × 2.8 m = 14 m, 64 m base; rows of windows, 3 entrances with stairwells, balconies, flat roof.')); result = { n: 0, f: 0, L: 0, u: 0 }; okBtn.disabled = !name.value.trim(); return; }
+    if (tpl) { [rowN, rowF, rowT].forEach(r => (r.style.display = 'none')); out.innerHTML = ''; out.append(h('div', {}, tplSel.value === 'villa' ? 'Villa: 3 floors, 11 m tall, 24 m base; porch with Ionic columns, balcony, pilasters, cornice, hip roof.' : tplSel.value === 'house' ? 'Small house: 12 × 9 m, two 4.6 m storeys and a hip roof; tall round-arched windows with a wooden frame and stone surround (the “Arched window” design, Design tab).' : '5-storey panel block: 60 × 12 m, 5 identical floors × 2.8 m = 14 m, 64 m base; rows of windows, 3 entrances with stairwells, balconies, flat roof.')); result = { n: 0, f: 0, L: 0, u: 0 }; okBtn.disabled = !name.value.trim(); return; }
     const combo = comboSel.value as Combo, baseMode = baseSel.value;
     rowN.style.display = combo === 'ft' ? 'none' : '';
     rowF.style.display = combo === 'nt' ? 'none' : '';
