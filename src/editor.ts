@@ -11,7 +11,7 @@ import { GOING, SPIRAL_STEPS_PER_TURN, stairLayout } from './stairs';
 import { renderDecoPanel } from './decopanel';
 import { ShapeEditor, ShapeTool } from './shapeeditor';
 import { DesignMode, PickMode, onBoxPick, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
-import { V2, enclosedFaces, planValid, sampleSeg, signedArea } from './geometry';
+import { V2, enclosedFaces, planarize, planValid, sampleSeg, signedArea } from './geometry';
 import { Selection, areaForFloor, autoFloorAreas, interiorForFloor, loftPointTarget } from './build3d';
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
@@ -195,6 +195,7 @@ export class Editor {
         toast,
         selectionChanged: () => this.renderRight(),
         area: m === 'floorarea',
+        freeLines: m === 'structure',
         stairRise: () => this.stairRise(),
         snapPlans: () => this.areaRefs(),
       });
@@ -702,6 +703,7 @@ export class Editor {
       const toolBtn = (t: Tool, label: string) => h('button', { class: pn.tool === t ? 'tab active' : 'tab', onclick: () => this.setTool(t) }, label);
       const help: Record<Tool, string> = {
         draw: 'Click to add points; each new point connects to the previous one. Click an existing point to connect to it (closing a loop) and continue from there. Enter, Space or Esc ends the chain: the next point starts a new, unconnected one. A point with no walls (orange ring) builds nothing; delete stray ones in Select mode.'
+          + (interior ? '' : ' Walls may cross: a point is made where they do, splitting both.')
           + (interior ? ' Internal walls must stay inside the external walls (orange dashed).' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
         select: 'Click points or walls to select (Shift = add), or right-drag a box around them; drag one of several selected points to move them all. Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
         move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
@@ -823,7 +825,37 @@ export class Editor {
           },
         }, 'Delete'),
       ),
+      list.length > 1 && pl ? this.mergeRow(pl, list) : null,
       ...body.filter(Boolean) as Node[],
+    );
+  }
+
+  /** Merge another plan into this one: its points and lines join this drawing (crossings become points), its floors use this plan. */
+  private mergeRow(pl: StructurePlan, list: StructurePlan[]) {
+    const others = list.filter(x => x !== pl);
+    const sel = h('select', {}, ...others.map(x => h('option', { value: x.id }, x.name)));
+    return h('div', { class: 'row' },
+      h('span', { class: 'muted small' }, 'Merge'), sel,
+      h('button', {
+        title: 'Its points and lines join this plan (where lines cross, a point is made); its floors then use this plan, and it is deleted',
+        onclick: async () => {
+          const o = others.find(x => x.id === sel.value);
+          if (!o || !(await askConfirm(`Merge “${o.name}” into “${pl.name}”? Its drawing joins this plan, its floors use this plan, and “${o.name}” is deleted.`, 'Merge'))) return;
+          this.mutate(() => {
+            const b = this.b;
+            for (const q of o.points) pl.points.push({ ...q, n: pl.nextN++ });
+            pl.segments.push(...o.segments.map(sg => ({ ...sg })));
+            pl.objects.push(...o.objects.map(x => ({ ...x })));
+            if (o.carved?.length) pl.carved = [...(pl.carved ?? []), ...o.carved];
+            pl.floorIds = b.floors.map(f => f.id).filter(id => pl.floorIds.includes(id) || o.floorIds.includes(id));
+            if (b.topPlanId === o.id) b.topPlanId = pl.id;
+            list.splice(list.indexOf(o), 1);
+            planarize(pl, uid);
+          });
+          this.planner?.prune();
+          toast(`Merged “${o.name}” into “${pl.name}”`);
+        },
+      }, 'into this plan'),
     );
   }
 
@@ -969,8 +1001,9 @@ export class Editor {
             const v = num(inp.value);
             if (!(v >= 0 && v <= 1)) { toast('Coordinates are between 0 and 1'); return this.refresh(); }
             const np = { x: pt.x, y: pt.y, [axis]: v };
-            if (!validMove(pl, pt.id, np)) { toast('That would make walls cross'); return this.refresh(); }
-            this.mutate(() => (pt[axis] = v));
+            const free = this.mode !== 'floorplan'; // structure / floor areas: crossings become points
+            if (!free && !validMove(pl, pt.id, np)) { toast('That would make walls cross'); return this.refresh(); }
+            this.mutate(() => { pt[axis] = v; if (free) planarize(pl, uid); });
           },
         });
         return h('label', {}, axis, inp);
@@ -1045,8 +1078,9 @@ export class Editor {
           const k = v / len;
           const nb = { x: A.x + (B.x - A.x) * k, y: A.y + (B.y - A.y) * k };
           if (nb.x < -1e-9 || nb.x > 1 + 1e-9 || nb.y < -1e-9 || nb.y > 1 + 1e-9) { toast('That length would leave the building area'); return this.refresh(); }
-          if (!validMove(pl, B.id, nb)) { toast('That length would make walls cross'); return this.refresh(); }
-          this.mutate(() => { B.x = clamp(nb.x, 0, 1); B.y = clamp(nb.y, 0, 1); });
+          const free = this.mode !== 'floorplan';
+          if (!free && !validMove(pl, B.id, nb)) { toast('That length would make walls cross'); return this.refresh(); }
+          this.mutate(() => { B.x = clamp(nb.x, 0, 1); B.y = clamp(nb.y, 0, 1); if (free) planarize(pl, uid); });
         },
       });
       wrap.append(

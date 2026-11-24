@@ -23,6 +23,8 @@ export interface PlannerHost {
   area?: boolean;
   /** Plans whose points and lines new points snap to (e.g. the walls of the floor). */
   snapPlans?(): StructurePlan[];
+  /** Lines may cross (a point is made where they do), as in floor-area plans; used for structure plans. */
+  freeLines?: boolean;
   /** Floor plans: how high stairs climb here (to the next main floor), for their layout. */
   stairRise?(): number;
 }
@@ -122,10 +124,14 @@ export class Planner {
     if (this.selObj && !plan?.objects.some(o => o.id === this.selObj)) this.selObj = null;
   }
 
+  /** After a change made outside the planner (e.g. merging plans): split crossing lines. */
+  tidy() { const plan = this.h.getPlan(); if (plan) this.settle(plan); }
   resetView() { this.zoom = 1; this.pan = { x: 0, y: 0 }; this.draw(); }
-  /** Area plans: split lines where they cross / touch, then the host commits. */
+  /** Lines may cross here (floor areas, structure): they are split where they do. */
+  private get free() { return !!(this.h.area || this.h.freeLines); }
+  /** Split lines where they cross / touch (a point at each crossing), then the host commits. */
   private settle(plan: StructurePlan) {
-    if (!this.h.area) return;
+    if (!this.free) return;
     const remap = planarize(plan, uid);
     const fix = (id: string) => { while (remap.has(id)) id = remap.get(id)!; return id; };
     if (this.head) this.head = fix(this.head);
@@ -241,7 +247,7 @@ export class Planner {
     if (this.tool === 'draw') {
       if (pt) {
         if (this.head && this.head !== pt.id && !plan.segments.some(s => (s.a === this.head && s.b === pt.id) || (s.b === this.head && s.a === pt.id))) {
-          if (!this.h.area && !planValid(plan, undefined, [[this.head, pt.id]])) return this.h.toast('That wall would cross an existing wall');
+          if (!this.free && !planValid(plan, undefined, [[this.head, pt.id]])) return this.h.toast('That wall would cross an existing wall');
           if (!this.okSeg(plan.points.find(q => q.id === this.head)!, pt)) return this.h.toast('Internal walls must stay inside the external walls');
           this.h.begin();
           plan.segments.push({ id: uid(), a: this.head, b: pt.id });
@@ -260,7 +266,7 @@ export class Planner {
       if (this.head && !this.okSeg(plan.points.find(q => q.id === this.head)!, p)) return this.h.toast('Internal walls must stay inside the external walls');
       const np: PlanPoint = { id: uid(), n: plan.nextN, x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
       const test: StructurePlan = { ...plan, points: [...plan.points, np] };
-      if (!this.h.area && !planValid(test, undefined, this.head ? [[this.head, np.id]] : [])) return this.h.toast('That wall would cross an existing wall');
+      if (!this.free && !planValid(test, undefined, this.head ? [[this.head, np.id]] : [])) return this.h.toast('That wall would cross an existing wall');
       this.h.begin();
       plan.nextN++;
       plan.points.push(np);
@@ -358,7 +364,7 @@ export class Planner {
         const moved = plan.points.filter(q => this.selPoints.has(q.id));
         const ov = new Map(moved.map(q => [q.id, { x: q.x + dx, y: q.y + dy }]));
         const okAll = [...ov.values()].every(q => q.x >= 0 && q.x <= 1 && q.y >= 0 && q.y <= 1)
-          && (this.h.area || (planValid(plan, ov) && moved.every(q => this.okPointWithWalls(plan, q.id, ov.get(q.id)!))));
+          && (this.free || planValid(plan, ov)) && (this.h.area || moved.every(q => this.okPointWithWalls(plan, q.id, ov.get(q.id)!)));
         if (okAll) {
           if (!this.drag.began) { this.h.begin(); this.drag.began = true; }
           for (const q of moved) { const o = ov.get(q.id)!; q.x = o.x; q.y = o.y; }
@@ -368,7 +374,7 @@ export class Planner {
         this.draw();
         return;
       }
-      if (this.h.area || (planValid(plan, new Map([[pt.id, np]])) && this.okPointWithWalls(plan, pt.id, np))) {
+      if ((this.free || planValid(plan, new Map([[pt.id, np]]))) && (this.h.area || this.okPointWithWalls(plan, pt.id, np))) {
         if (!this.drag.began) { this.h.begin(); this.drag.began = true; }
         pt.x = np.x; pt.y = np.y;
         this.drag.moved = true;
@@ -459,7 +465,7 @@ export class Planner {
     if (!plan || !pr) return this.h.toast('Select two walls that meet at a point');
     const np = alignMiddle(pr.A, pr.M, pr.C, kind);
     if (np.x < 0 || np.x > 1 || np.y < 0 || np.y > 1) return this.h.toast('That would put the point outside the building area');
-    if (!this.h.area && (!planValid(plan, new Map([[pr.M.id, np]])) || !this.okPointWithWalls(plan, pr.M.id, np))) return this.h.toast('That would make walls cross');
+    if (!this.h.area && ((!this.free && !planValid(plan, new Map([[pr.M.id, np]]))) || !this.okPointWithWalls(plan, pr.M.id, np))) return this.h.toast('That would make walls cross');
     this.h.begin();
     pr.M.x = np.x; pr.M.y = np.y;
     this.settle(plan);
