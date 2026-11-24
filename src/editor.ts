@@ -401,23 +401,11 @@ export class Editor {
     }
     bar.append(h('div', { class: 'gline', style: `bottom:${(floorBase(p, p.ground) / H) * 100}%` }, h('span', {}, 'ground')));
 
-    const eqIn = h('input', { type: 'number', step: 0.1, value: fmt(H) });
     this.left.innerHTML = '';
     put(this.left, 
       h('div', { class: 'box-title' }, 'Floors'),
       h('div', { class: 'muted small' }, `${p.floors.length} floors (${p.ground} underground) · ${fmt(H)} m · base ${fmt(p.baseLength)} m (${fmt(p.baseLength ** 2)} m²)`),
       h('div', { class: 'row' }, h('button', { onclick: () => this.insertFloor(p.floors.length) }, '+ Top floor')),
-      h('div', { class: 'row eq' },
-        h('label', {}, 'Total height (m)', eqIn),
-        h('button', {
-          title: 'Make all floors the same height so they add up to this total',
-          onclick: () => {
-            const v = num(eqIn.value);
-            if (!(v > 0) || v > MAX_M) return toast('Total height must be between 0 and 10 000 m');
-            this.mutate(() => p.floors.forEach(f => (f.height = v / p.floors.length)));
-          },
-        }, 'Equalize'),
-      ),
       h('div', { class: 'floorbar-wrap' }, bar),
       this.floorSelectionBox(),
     );
