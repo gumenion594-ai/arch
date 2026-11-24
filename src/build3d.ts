@@ -245,8 +245,11 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
   // ---------- walls / columns per floor ----------
   const segMat = (seg: PlanSegment, material: string, column = false) => {
+    // Structural view: only the colour. Detailed view: texture, else a chosen material, else the colour, else the plan's material
     const tex = o.detailed && seg.texture ? mats.tex(seg.texture) : null;
-    return tex ?? (seg.color ? mats.color(seg.color) : column ? mats.column(material) : mats.wall(o.detailed ? material : 'structural'));
+    if (tex) return tex;
+    if (o.detailed && seg.material) return column ? mats.column(material) : mats.wall(material);
+    return seg.color ? mats.color(seg.color) : column ? mats.column(material) : mats.wall(o.detailed ? material : 'structural');
   };
   const placeMat = (pl: Placement, fallback: THREE.Material) => {
     if (sel.elements.has(pl.id)) return mats.selected;
@@ -258,6 +261,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     if (!o.detailed || !id || !mats.design) return false;
     const src = mats.design(id);
     if (!src) return false;
+    if (src.userData.decoType && recolor !== mats.selected) recolor = null; // a design keeps its parts' own looks (only the selection highlight replaces them)
     const obj = sliced ? fitDesignSliced(src, c, along, up, out, w, h, d) : fitDesign(src, c, along, up, out, w, h, d);
     obj.traverse(x => {
       const m = x as THREE.Mesh;

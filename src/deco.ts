@@ -1,6 +1,6 @@
 // Designs (decos): imported 3D models arranged around a reference shape. Shared by the Design editor and the builder.
 import * as THREE from 'three';
-import { Building, DecoDesign, DecoType, Design, PILASTER_REF_H } from './model';
+import { Building, DecoDesign, DecoPart, DecoType, Design, PILASTER_REF_H } from './model';
 import { designObject } from './assets';
 
 /**
@@ -48,7 +48,20 @@ export function partObject(src: THREE.Object3D, part: { pos: number[]; rot: numb
  * origin, so fitDesign / fitDesignSliced map the reference shape onto the real element (parts outside the box
  * keep their place relative to it). null while nothing of it is loaded.
  */
-export function decoObject(deco: DecoDesign, b: Building, models: Design[], onLoad: () => void): THREE.Object3D | null {
+/** A part's look: texture > material > colour (null: keep the model's own). */
+export type PartLook = (part: DecoPart) => THREE.Material | null;
+export function applyLook(obj: THREE.Object3D, mat: THREE.Material | null) {
+  if (!mat) return;
+  // solid surfaces only: glass (see-through materials) stays glass
+  obj.traverse(o => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const was = m.material as THREE.Material | THREE.Material[];
+    if (Array.isArray(was) ? was.some(x => x.transparent && x.opacity < 0.9) : was.transparent && was.opacity < 0.9) return;
+    m.material = mat;
+  });
+}
+export function decoObject(deco: DecoDesign, b: Building, models: Design[], onLoad: () => void, look?: PartLook): THREE.Object3D | null {
   const R = decoRef(deco, b);
   const holder = new THREE.Group();
   holder.scale.set(1 / R.w, 1 / R.h, 1 / R.d);
@@ -57,7 +70,9 @@ export function decoObject(deco: DecoDesign, b: Building, models: Design[], onLo
     const m = models.find(x => x.id === part.modelId);
     const src = m ? designObject(m, onLoad) : null;
     if (!src) continue;
-    holder.add(partObject(src, part));
+    const po = partObject(src, part);
+    applyLook(po, look?.(part) ?? null);
+    holder.add(po);
     any = true;
   }
   if (!any) return null;

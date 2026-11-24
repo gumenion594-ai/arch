@@ -209,7 +209,11 @@ export const DECO_TYPES: Record<DecoType, string> = {
   opening: 'Openings', niche: 'Niches', balcony: 'Balconies', pilaster: 'Pilasters', column: 'Columns', cornice: 'Cornices', wall: 'Walls', baluster: 'Balusters',
 };
 /** One imported model placed in a design: centre (m), rotation (degrees) and size (m), in the reference shape's frame. */
-export interface DecoPart { id: string; modelId: string; pos: [number, number, number]; rot: [number, number, number]; size: [number, number, number] }
+export interface DecoPart {
+  id: string; modelId: string; pos: [number, number, number]; rot: [number, number, number]; size: [number, number, number];
+  /** Its look (Detailed view): a texture wins, then a material, then a colour; none = the model's own colours. */
+  color?: string | null; material?: string | null; texture?: string | null;
+}
 /**
  * A design. Its parts sit around the reference shape (shapeId: the opening / niche / balcony / pilaster / wall shape it
  * was made on); on the building, the whole arrangement stretches from the reference size to the real element.

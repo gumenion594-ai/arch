@@ -3,15 +3,15 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
-import { Building, DecoDesign, DecoPart, Design } from './model';
+import { Building, DecoDesign, DecoPart, Design, MATERIALS, Texture } from './model';
 import { designObject } from './assets';
-import { REF_WALL, decoRef, partObject } from './deco';
+import { REF_WALL, applyLook, decoRef, partObject } from './deco';
 import { BALUSTER, CORNICE } from './build3d';
 import { smoothClosed } from './geometry';
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale';
 export interface DesignViewHost {
-  select(partId: string | null): void;
+  select(partId: string | null, add: boolean): void; // add: Shift-click (several parts)
   begin(): void; // before a gizmo drag (undo)
   commit(): void; // after it
   live(): void; // while dragging (update number fields)
@@ -35,6 +35,25 @@ export class DesignView {
   private disposed = false;
   private ro: ResizeObserver;
   selected: string | null = null;
+  /** Other selected parts (Shift), outlined. */
+  also = new Set<string>();
+  private outlines = new THREE.Group();
+  private texCache = new Map<string, THREE.Texture>();
+  private textures: Texture[] = [];
+  /** A part's look: texture > material > colour (null: the model's own). */
+  private look(part: DecoPart): THREE.Material | null {
+    if (part.texture) {
+      const t = this.textures.find(x => x.id === part.texture);
+      if (t) {
+        let tex = this.texCache.get(t.id);
+        if (!tex) { tex = new THREE.TextureLoader().load(t.data); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.colorSpace = THREE.SRGBColorSpace; this.texCache.set(t.id, tex); }
+        return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, side: THREE.DoubleSide });
+      }
+    }
+    if (part.material) return new THREE.MeshStandardMaterial({ color: MATERIALS[part.material]?.color ?? 0xd8d2c4, roughness: 0.85, side: THREE.DoubleSide, transparent: part.material === 'glass', opacity: part.material === 'glass' ? 0.45 : 1 });
+    if (part.color) return new THREE.MeshStandardMaterial({ color: new THREE.Color(part.color), roughness: 0.85, side: THREE.DoubleSide });
+    return null;
+  }
   private down: { x: number; y: number } | null = null;
 
   constructor(private host: HTMLElement, private h: DesignViewHost) {
@@ -45,7 +64,7 @@ export class DesignView {
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.3); sun.position.set(3, 5, 6); this.scene.add(sun);
     const grid = new THREE.GridHelper(10, 20, 0x555555, 0x383838); grid.position.y = -0.001; this.scene.add(grid);
-    this.scene.add(this.ref, this.parts);
+    this.scene.add(this.ref, this.parts, this.outlines);
     this.orbit = new OrbitControls(this.camera, this.renderer.domElement);
     this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
     this.scene.add(this.gizmo.getHelper());
@@ -59,7 +78,7 @@ export class DesignView {
     el.addEventListener('pointerup', e => {
       const d = this.down; this.down = null;
       if (!d || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4 || this.gizmo.dragging || this.gizmo.axis) return;
-      this.h.select(this.pick(e));
+      this.h.select(this.pick(e), e.shiftKey || e.ctrlKey || e.metaKey);
     });
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(host);
@@ -85,8 +104,9 @@ export class DesignView {
   get mode(): GizmoMode { return this.gizmo.getMode() as GizmoMode; }
 
   /** Show a design (null: only an empty stage). Keeps the camera unless it is another design. */
-  set(deco: DecoDesign | null, b: Building, models: Design[], onLoad: () => void) {
+  set(deco: DecoDesign | null, b: Building, models: Design[], onLoad: () => void, textures: Texture[] = []) {
     this.deco = deco;
+    this.textures = textures;
     this.gizmo.detach();
     this.ref.clear(); this.parts.clear();
     if (!deco) return;
@@ -100,6 +120,7 @@ export class DesignView {
       const m = models.find(x => x.id === part.modelId);
       const src = m ? designObject(m, onLoad) : null;
       const g = src ? partObject(src, part) : placeholder(part);
+      if (src) applyLook(g, this.look(part));
       g.userData.partId = part.id;
       this.parts.add(g);
     }
@@ -116,10 +137,21 @@ export class DesignView {
     }
     if (this.selected) this.select(this.selected);
   }
-  select(id: string | null) {
+  select(id: string | null, also: Iterable<string> = []) {
     this.selected = id;
+    this.also = new Set([...also].filter(x => x !== id));
     const g = this.parts.children.find(c => c.userData.partId === id);
     if (g) this.gizmo.attach(g); else this.gizmo.detach();
+    // the other selected parts: yellow boxes
+    this.outlines.clear();
+    this.parts.updateMatrixWorld(true);
+    this.outlines.position.copy(this.parts.position);
+    for (const c of this.parts.children) {
+      if (!this.also.has(c.userData.partId)) continue;
+      const box = new THREE.BoxHelper(c, 0xffd400);
+      box.position.sub(this.parts.position);
+      this.outlines.add(box);
+    }
   }
   private pick(e: PointerEvent): string | null {
     const r = this.renderer.domElement.getBoundingClientRect();

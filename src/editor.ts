@@ -102,7 +102,7 @@ export class Editor {
     this.renderRight();
     this.planner?.draw();
     this.shapeEds.forEach(e => e.draw());
-    if (this.mode === 'decos') { this.decoView?.set(this.deco(), this.b, this.p.designs, () => this.refresh()); this.decoView?.select(this.decoPart); }
+    if (this.mode === 'decos') { this.decoView?.set(this.deco(), this.b, this.p.designs, () => this.refresh(), this.p.textures); this.decoView?.select(this.decoPart, this.decoSel); }
   }
 
   /** Design tab: the 3D editor, the design type shown, the design open (per type) and its selected part. */
@@ -110,6 +110,15 @@ export class Editor {
   decoType: DecoType = 'opening';
   activeDeco: Partial<Record<DecoType, string>> = {};
   decoPart: string | null = null;
+  /** All selected parts (Shift adds); decoPart is the one the gizmo moves. */
+  decoSel = new Set<string>();
+  selectPart(id: string | null, add = false) {
+    if (!add) this.decoSel.clear();
+    if (id) { if (add && this.decoSel.has(id) && this.decoSel.size > 1) { this.decoSel.delete(id); id = [...this.decoSel][0]; } else this.decoSel.add(id); }
+    this.decoPart = id;
+    this.decoView?.select(id, this.decoSel);
+    this.renderRight();
+  }
   deco(): DecoDesign | null {
     const list = this.p.decos.filter(d => d.type === this.decoType);
     return list.find(d => d.id === this.activeDeco[this.decoType]) ?? list[0] ?? null;
@@ -165,7 +174,7 @@ export class Editor {
       };
     } else if (m === 'decos') {
       this.decoView = new DesignView(this.center, {
-        select: id => { this.decoPart = id; this.decoView?.select(id); this.renderRight(); },
+        select: (id, add) => this.selectPart(id, add),
         begin: () => this.begin(), commit: () => this.commit(), live: () => this.renderRight(),
       });
     } else if (isDesign(m)) {
@@ -270,8 +279,13 @@ export class Editor {
       // gizmo: W move, E rotate, R scale; Delete removes the selected part
       const k = e.key.toLowerCase();
       if (k === 'w' || k === 'e' || k === 'r') { this.decoView.setMode(k === 'w' ? 'translate' : k === 'e' ? 'rotate' : 'scale'); this.renderRight(); }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && this.decoPart) { e.preventDefault(); const d = this.deco(); if (d) this.mutate(() => (d.parts = d.parts.filter(x => x.id !== this.decoPart))); this.decoPart = null; }
-      if (e.key === 'Escape') { this.decoPart = null; this.decoView.select(null); this.renderRight(); }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && this.decoPart) {
+        e.preventDefault();
+        const d = this.deco(), gone = new Set([...this.decoSel, this.decoPart]);
+        if (d) this.mutate(() => (d.parts = d.parts.filter(x => !gone.has(x.id))));
+        this.selectPart(null);
+      }
+      if (e.key === 'Escape') this.selectPart(null);
       return;
     }
     if (!this.planner) return;
@@ -904,10 +918,10 @@ export class Editor {
     return h('label', { title: 'Across: the curve flows through the outlines of the floors below and above (one smooth surface over many floors). Between 2: each floor curves on its own.' }, 'Smoothness applies', sel);
   }
 
-  materialField(val: string | null | 'mixed', set: (v: string | null) => void, allowDefault: boolean) {
+  materialField(val: string | null | 'mixed', set: (v: string | null) => void, allowDefault: boolean, defaultLabel = 'Plan default') {
     const s = h('select', { onchange: () => this.mutate(() => set(s.value === '' ? null : s.value)) },
       val === 'mixed' ? h('option', { value: 'mixed', disabled: true }, 'mixed') : null,
-      allowDefault ? h('option', { value: '' }, 'Plan default') : null,
+      allowDefault ? h('option', { value: '' }, defaultLabel) : null,
       ...Object.entries(MATERIALS).map(([k, m]) => h('option', { value: k }, `${m.name} (${m.density} kg/m³)`)),
     );
     s.value = val ?? '';

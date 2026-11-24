@@ -3,15 +3,15 @@ import * as THREE from 'three';
 import { DecoDesign, Design, Floor, OpeningShape, PlanPoint, PlanSegment, Project, createProject, newPlan, uid } from './model';
 import { ARCH_WIN, BUILTIN_DESIGNS } from './builtin';
 
-/** The "Tall arched window" shape: 1.4 × 3.5 m with a semicircular head (spring at 80 % of the height). */
-export function tallArchedWindow(): OpeningShape {
+/** The "Tall arched window" shape: 1.4 × 3.5 m with a semicircular head (spring at 80 % of the height); smaller ones keep the proportions. */
+export function tallArchedWindow(w = ARCH_WIN.w, name = 'Tall arched window'): OpeningShape {
   const spring = 1 - ARCH_WIN.w / 2 / ARCH_WIN.h; // 0.8
   const arc = Array.from({ length: 15 }, (_, k) => {
     const t = ((k + 1) / 16) * Math.PI;
     return { x: 0.5 + 0.5 * Math.cos(t), y: spring + (ARCH_WIN.w / 2 / ARCH_WIN.h) * Math.sin(t) };
   });
   return {
-    id: uid(), name: 'Tall arched window', kind: 'opening', smooth: 0, w: ARCH_WIN.w, h: ARCH_WIN.h, anchor: 'center',
+    id: uid(), name, kind: 'opening', smooth: 0, w, h: (w * ARCH_WIN.h) / ARCH_WIN.w, anchor: 'center',
     outlines: [[{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: spring }, ...arc, { x: 0, y: spring }]],
   };
 }
@@ -22,6 +22,37 @@ function partFor(key: string, modelId: string) {
   const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
   const r = (v: number) => Math.round(v * 1000) / 1000;
   return { id: uid(), modelId, pos: [r(c.x), r(c.y), r(c.z)] as [number, number, number], rot: [0, 0, 0] as [number, number, number], size: [r(s.x), r(s.y), r(s.z)] as [number, number, number] };
+}
+
+/** The arched window design (built-in frame + surround on the Tall arched window shape), added to a project. */
+export function addArchedWindowDesign(p: Project): { shape: OpeningShape; deco: DecoDesign } {
+  const b = p.buildings[0];
+  const shape = tallArchedWindow();
+  b.openingShapes.push(shape);
+  const frame: Design = { id: uid(), name: BUILTIN_DESIGNS.archFrame.name, category: 'frame', format: 'builtin', builtin: 'archFrame' };
+  const surround: Design = { id: uid(), name: BUILTIN_DESIGNS.archSurround.name, category: 'surround', format: 'builtin', builtin: 'archSurround' };
+  p.designs.push(frame, surround);
+  const deco: DecoDesign = { id: uid(), name: 'Arched window', type: 'opening', shapeId: shape.id, parts: [partFor('archFrame', frame.id), partFor('archSurround', surround.id)] };
+  p.decos.push(deco);
+  return { shape, deco };
+}
+
+/**
+ * The villa template with the arched windows: same proportions as the design (so the arch stays round),
+ * 1.3 × 3.25 m on the ground floor and 1.0 × 2.5 m upstairs (a little lower, clear of the cornice).
+ */
+export function dressVilla(p: Project): Project {
+  const b = p.buildings[0];
+  const { deco } = addArchedWindowDesign(p);
+  const ground = tallArchedWindow(1.3, 'Arched window, ground floor'), upper = tallArchedWindow(1.0, 'Arched window, upper floor');
+  b.openingShapes.push(ground, upper);
+  const name = (id?: string | null) => b.openingShapes.find(s => s.id === id)?.name;
+  for (const pl of b.placements) {
+    if (pl.type !== 'opening') continue;
+    if (name(pl.shapeId) === 'Arched window') { pl.shapeId = ground.id; pl.designId = deco.id; }
+    else if (name(pl.shapeId) === 'Window') { pl.shapeId = upper.id; pl.designId = deco.id; pl.dy = -0.15; }
+  }
+  return p;
 }
 
 /**
@@ -60,13 +91,7 @@ export function houseProject(name: string): Project {
   b.divLen = 3; // 12 m and 9 m walls: 4 and 3 bays of 3 m
 
   // the window shape, the two built-in models and the design that puts them together
-  const win = tallArchedWindow();
-  b.openingShapes.push(win);
-  const frame: Design = { id: uid(), name: BUILTIN_DESIGNS.archFrame.name, category: 'frame', format: 'builtin', builtin: 'archFrame' };
-  const surround: Design = { id: uid(), name: BUILTIN_DESIGNS.archSurround.name, category: 'surround', format: 'builtin', builtin: 'archSurround' };
-  p.designs.push(frame, surround);
-  const deco: DecoDesign = { id: uid(), name: 'Arched window', type: 'opening', shapeId: win.id, parts: [partFor('archFrame', frame.id), partFor('archSurround', surround.id)] };
-  p.decos.push(deco);
+  const { shape: win, deco } = addArchedWindowDesign(p);
 
   const door = b.openingShapes.find(s => s.name === 'Door')!;
   door.w = 1.2; door.h = 2.6;

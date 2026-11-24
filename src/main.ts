@@ -1,7 +1,7 @@
 import './style.css';
 import { Project, createProject, createSite, deleteProject, initStorage, loadProjects, normalize, blockProject, sampleProject, saveProject, storageInfo, totalHeight, uid } from './model';
 import { getAsset, putAsset } from './assets';
-import { houseProject } from './templates';
+import { dressVilla, houseProject } from './templates';
 import { buildingDialog } from './dialogs';
 import { fmt } from './planner';
 import { Editor } from './editor';
@@ -67,7 +67,7 @@ function newProjectDialog() {
   buildingDialog({
     title: 'New building project', nameLabel: 'Project name', defaultName: 'Untitled building',
     onCreate: (spec, name, template) => {
-      const p = template === 'villa' ? sampleProject() : template === 'block' ? blockProject(name) : template === 'house' ? houseProject(name) : createProject(name, { ...spec, name });
+      const p = template === 'villa' ? dressVilla(sampleProject()) : template === 'block' ? blockProject(name) : template === 'house' ? houseProject(name) : createProject(name, { ...spec, name });
       p.name = name; p.buildings[0].name = name;
       saveProject(p); openProject(p.id);
     },

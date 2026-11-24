@@ -316,7 +316,8 @@ export class Viewer {
       design: id => {
         // a design (imported models arranged around a shape), or a single imported model (older projects)
         const deco = id ? s.decos?.find(x => x.id === id) : undefined;
-        if (deco) return decoObject(deco, b, s.designs ?? [], () => this.onTexture?.());
+        if (deco) return decoObject(deco, b, s.designs ?? [], () => this.onTexture?.(),
+          part => (part.texture ? mats.tex(part.texture) : null) ?? (part.material ? mats.wall(part.material) : part.color ? mats.color(part.color) : null));
         const d = id ? s.designs?.find(x => x.id === id) : undefined;
         const obj = d ? designObject(d, () => this.onTexture?.()) : null;
         if (obj && d) { obj.userData.baseFracOverride = d.baseFrac ?? undefined; obj.userData.topFracOverride = d.topFrac ?? undefined; }

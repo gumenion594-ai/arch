@@ -1,7 +1,7 @@
 // Design tab, right panel: design types, the designs of a type, the reference shape, the placed models
 // (position / rotation / size) and the library of imported 3D models.
 import type { Editor } from './editor';
-import { DECO_TYPES, DecoDesign, DecoPart, DecoType, Design, DesignCategory, uid } from './model';
+import { DECO_TYPES, DecoDesign, DecoPart, DecoType, Design, DesignCategory, MATERIALS, uid } from './model';
 import { decoRef } from './deco';
 import { formatOf, importDesignFile, deleteAsset } from './assets';
 import { BUILTIN_DESIGNS } from './builtin';
@@ -47,8 +47,8 @@ export function renderDecoPanel(ed: Editor) {
   const list = p.decos.filter(d => d.type === t);
   const cur = ed.deco();
   const view = ed.decoView;
-  const select = (id: string | null) => { if (id) ed.activeDeco[t] = id; ed.decoPart = null; ed.refresh(); };
-  const typeBtn = (k: DecoType) => h('button', { class: t === k ? 'tab active' : 'tab', onclick: () => { ed.decoType = k; ed.decoPart = null; ed.refresh(); } }, DECO_TYPES[k]);
+  const select = (id: string | null) => { if (id) ed.activeDeco[t] = id; ed.decoPart = null; ed.decoSel.clear(); ed.refresh(); };
+  const typeBtn = (k: DecoType) => h('button', { class: t === k ? 'tab active' : 'tab', onclick: () => { ed.decoType = k; ed.decoPart = null; ed.decoSel.clear(); ed.refresh(); } }, DECO_TYPES[k]);
   const create = async () => {
     const name = await askText(`Name the new ${ONE[t]} design`, `${ONE[t][0].toUpperCase() + ONE[t].slice(1)} design ${list.length + 1}`);
     if (!name?.trim()) return;
@@ -87,6 +87,7 @@ export function renderDecoPanel(ed: Editor) {
       pctField(ed, 'Top (% of height)', cur.top ?? 0.12, v => (cur.top = v))) : null,
     cur && R ? h('div', { class: 'muted small' }, `Reference: ${fmt(R.w)} × ${fmt(R.h)} m${t === 'opening' || t === 'niche' ? ' (the blue plane is the outside face of the opening)' : ''}. The orange dashed box is stretched onto ${t === 'baluster' ? 'each section of a railing (about 1 m, evenly spaced)' : `the real ${ONE[t]}`} in the Detailed view; models keep their place around it.`) : null,
     cur ? partsBox(ed, cur, part) : null,
+    cur && part ? lookBox(ed, cur.parts.filter(x => ed.decoSel.has(x.id) || x.id === part.id)) : null,
     cur && part && view ? partBox(ed, cur, part) : null,
     cur && use ? h('div', { class: 'box' },
       h('div', { class: 'box-title' }, `Used ${use.used}×`),
@@ -116,8 +117,27 @@ function partsBox(ed: Editor, cur: DecoDesign, part: DecoPart | null) {
   return h('div', { class: 'box' },
     h('div', { class: 'box-title' }, `Models in this design (${cur.parts.length})`),
     cur.parts.length ? h('div', { class: 'plans' }, ...cur.parts.map(pp => h('div', {
-      class: 'plan-row' + (pp.id === part?.id ? ' active' : ''), onclick: () => { ed.decoPart = pp.id; ed.decoView?.select(pp.id); ed.renderRight(); },
+      class: 'plan-row' + (ed.decoSel.has(pp.id) || pp.id === part?.id ? ' active' : ''), title: 'Shift-click to select several',
+      onclick: (e: MouseEvent) => ed.selectPart(pp.id, e.shiftKey || e.ctrlKey || e.metaKey),
     }, name(pp)))) : h('div', { class: 'muted small' }, 'Add models from the library below. They start the size of the shape; then move, turn and scale them into place.'),
+  );
+}
+
+/** Look of the selected models (Detailed view): a texture wins, then a material, then a colour; none = their own. */
+function lookBox(ed: Editor, parts: DecoPart[]) {
+  const same = <T>(get: (x: DecoPart) => T) => { const v = get(parts[0]); return parts.every(x => get(x) === v) ? v : 'mixed'; };
+  const col = h('input', { type: 'color', value: parts.find(x => x.color)?.color ?? '#b08860' });
+  const color = same(x => x.color ?? null), mat = same(x => x.material ?? null), tex = same(x => x.texture ?? null);
+  const shows = parts.length > 1 ? 'Shows: mixed'
+    : `Shows: ${tex ? 'its texture' : mat ? `${MATERIALS[mat as string]?.name ?? 'material'}` : color ? 'its colour' : 'the model’s own colours'}`;
+  return h('div', { class: 'box' },
+    h('div', { class: 'box-title' }, parts.length > 1 ? `Look of ${parts.length} models` : 'Look'),
+    h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Colour'), col,
+      h('button', { onclick: () => ed.mutate(() => parts.forEach(x => (x.color = col.value))) }, 'Apply'),
+      color ? h('button', { onclick: () => ed.mutate(() => parts.forEach(x => (x.color = null))) }, 'Clear') : null),
+    ed.materialField(mat as string | null | 'mixed', v => parts.forEach(x => (x.material = v)), true, 'None (colour / own)'),
+    ed.textureField('Texture', tex as string | null | 'mixed', id => parts.forEach(x => (x.texture = id))),
+    h('div', { class: 'muted small' }, `${shows}. In the Detailed view a texture wins, then a material, then a colour; with none, the model keeps its own colours. Shift-click models to set several at once.`),
   );
 }
 
@@ -145,9 +165,9 @@ function partBox(ed: Editor, cur: DecoDesign, part: DecoPart) {
     trio('Position (m)', 'pos', 0.01), trio('Rotation (°)', 'rot', 5), trio('Size (m)', 'size', 0.01),
     h('div', { class: 'row' },
       h('button', { title: 'Back to the size and place of the shape', onclick: () => ed.mutate(() => { part.pos = [0, 0, 0]; part.rot = [0, 0, 0]; part.size = [R.w, R.h, R.d]; }) }, 'Fit to the shape'),
-      h('button', { onclick: () => { const c: DecoPart = { ...JSON.parse(JSON.stringify(part)), id: uid() }; ed.mutate(() => cur.parts.push(c)); ed.decoPart = c.id; ed.refresh(); } }, 'Duplicate'),
-      h('button', { title: 'Mirror left ↔ right (a copy on the other side)', onclick: () => { const c: DecoPart = { ...JSON.parse(JSON.stringify(part)), id: uid() }; c.pos = [-part.pos[0], part.pos[1], part.pos[2]]; c.rot = [part.rot[0], -part.rot[1], -part.rot[2]]; ed.mutate(() => cur.parts.push(c)); ed.decoPart = c.id; ed.refresh(); } }, 'Mirrored copy'),
-      h('button', { class: 'danger', onclick: () => { ed.mutate(() => (cur.parts = cur.parts.filter(x => x !== part))); ed.decoPart = null; ed.refresh(); } }, 'Remove (Del)')),
+      h('button', { onclick: () => { const c: DecoPart = { ...JSON.parse(JSON.stringify(part)), id: uid() }; ed.mutate(() => cur.parts.push(c)); ed.selectPart(c.id); } }, 'Duplicate'),
+      h('button', { title: 'Mirror left ↔ right (a copy on the other side)', onclick: () => { const c: DecoPart = { ...JSON.parse(JSON.stringify(part)), id: uid() }; c.pos = [-part.pos[0], part.pos[1], part.pos[2]]; c.rot = [part.rot[0], -part.rot[1], -part.rot[2]]; ed.mutate(() => cur.parts.push(c)); ed.selectPart(c.id); } }, 'Mirrored copy'),
+      h('button', { class: 'danger', onclick: () => { const gone = new Set([...ed.decoSel, part.id]); ed.mutate(() => (cur.parts = cur.parts.filter(x => !gone.has(x.id)))); ed.selectPart(null); } }, ed.decoSel.size > 1 ? `Remove ${ed.decoSel.size} (Del)` : 'Remove (Del)')),
   );
 }
 
@@ -174,8 +194,7 @@ function libraryBox(ed: Editor, cur: DecoDesign | null) {
     const R = decoRef(cur, ed.b);
     const part: DecoPart = { id: uid(), modelId: m.id, pos: [0, 0, 0], rot: [0, 0, 0], size: [R.w, R.h, R.d] }; // starts as big as the shape, where it is
     ed.mutate(() => cur.parts.push(part));
-    ed.decoPart = part.id;
-    ed.refresh();
+    ed.selectPart(part.id);
   };
   return h('div', { class: 'box' },
     h('div', { class: 'box-title' }, `3D models (${p.designs.length})`),
