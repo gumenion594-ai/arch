@@ -14,7 +14,7 @@ export interface Report {
 export function calculate(b: Building, textures: Texture[]): Report {
   const m = new THREE.MeshBasicMaterial();
   const line = new THREE.LineBasicMaterial();
-  const mats: Mats = { wall: () => m, column: () => m, color: () => m, slab: m, object: m, deco: m, edge: line, selected: m, selLine: line, tex: () => null };
+  const mats: Mats = { wall: () => m, column: () => m, color: () => m, slab: m, object: m, deco: m, edge: line, selected: m, selLine: line, tex: () => null, look: () => m };
   const { group, stats } = buildStructure(b, { detailed: false, interior: true, mats, textures });
   const zero = (): Amount => ({ volume: 0, weight: 0 });
   const r: Report = {

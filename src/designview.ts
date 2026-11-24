@@ -6,6 +6,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { Building, DecoDesign, DecoPart, Design, MATERIALS, Texture } from './model';
 import { designObject } from './assets';
 import { REF_WALL, applyLook, decoRef, partObject } from './deco';
+import { materialLook } from './materials';
 import { BALUSTER, CORNICE } from './build3d';
 import { smoothClosed } from './geometry';
 
@@ -50,7 +51,7 @@ export class DesignView {
         return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, side: THREE.DoubleSide });
       }
     }
-    if (part.material) return new THREE.MeshStandardMaterial({ color: MATERIALS[part.material]?.color ?? 0xd8d2c4, roughness: 0.85, side: THREE.DoubleSide, transparent: part.material === 'glass', opacity: part.material === 'glass' ? 0.45 : 1 });
+    if (part.material) return materialLook(part.material, part.color); // tinted by its colour
     if (part.color) return new THREE.MeshStandardMaterial({ color: new THREE.Color(part.color), roughness: 0.85, side: THREE.DoubleSide });
     return null;
   }

@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Building, DecoDesign, Design, MATERIALS, Texture, elevation, segConnect, segKind } from './model';
 import { designObject } from './assets';
 import { decoObject } from './deco';
+import { materialLook } from './materials';
 import { enclosedFaces, sampleSeg, V2 } from './geometry';
 import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, loftPointTarget, planAtLevel, toWorld } from './build3d';
 
@@ -317,7 +318,7 @@ export class Viewer {
         // a design (imported models arranged around a shape), or a single imported model (older projects)
         const deco = id ? s.decos?.find(x => x.id === id) : undefined;
         if (deco) return decoObject(deco, b, s.designs ?? [], () => this.onTexture?.(),
-          part => (part.texture ? mats.tex(part.texture) : null) ?? (part.material ? mats.wall(part.material) : part.color ? mats.color(part.color) : null));
+          part => (part.texture ? mats.tex(part.texture) : null) ?? (part.material ? mats.look(part.material, part.color) : part.color ? mats.color(part.color) : null));
         const d = id ? s.designs?.find(x => x.id === id) : undefined;
         const obj = d ? designObject(d, () => this.onTexture?.()) : null;
         if (obj && d) { obj.userData.baseFracOverride = d.baseFrac ?? undefined; obj.userData.topFracOverride = d.topFrac ?? undefined; }
@@ -329,6 +330,7 @@ export class Viewer {
       selected: new THREE.MeshStandardMaterial({ color: 0xffd400, emissive: 0x6b5800, roughness: 0.8, side: THREE.DoubleSide }),
       selLine: new THREE.LineBasicMaterial({ color: 0xffd400 }),
       tex: id => this.texMat(s, id),
+      look: (m, c) => std('L' + m + (c ?? ''), () => materialLook(m, c)),
     };
     const { group, stats } = buildStructure(b, { detailed, interior: detailed, mats, selection: sel, textures: s.textures, upTo: active ? o.upTo : null });
     this.stats.windowCount += stats.windowCount; this.stats.windowArea += stats.windowArea; this.stats.windowSkipped += stats.windowSkipped;

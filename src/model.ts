@@ -27,7 +27,7 @@ export interface PlanPoint {
 }
 
 /** 'door' only in floor (interior) plans; 'balustrade' = a 1 m railing of balusters. */
-export type SegKind = 'wall' | 'colonnade' | 'balustrade' | 'open' | 'door';
+export type SegKind = 'wall' | 'colonnade' | 'balustrade' | 'open' | 'door' | 'roof';
 export type ConnectMode = 'straight' | 'loft';
 
 export interface PlanSegment {
@@ -58,7 +58,9 @@ export interface PlanSegment {
  * d = the length they may use (they climb away from their first step, turning back at platforms if needed;
  * flip = turn back on the left instead of the right). Spiral: w = diameter, flip = clockwise.
  */
-export interface PlanObject { id: string; type: 'stairs' | 'spiral' | 'elevator'; x: number; y: number; w: number; d: number; rot: number; flip?: boolean }
+export interface PlanObject { id: string; type: 'stairs' | 'spiral' | 'elevator'; x: number; y: number; w: number; d: number; rot: number; flip?: boolean;
+  /** Stairs: the walking line drawn from the bottom step up (plan coordinates); each leg a flight, each corner a landing. */
+  path?: { x: number; y: number }[] }
 
 /** A point of a drawn outline or profile; s = this point's smoothness (null = the shape's). */
 export interface WinPoint { x: number; y: number; s?: number | null }
@@ -128,15 +130,15 @@ export interface Placement {
   giant?: boolean; // pilaster: one continuous order through the floors above / below (one base, one capital), not one per storey
 }
 
-/** A subfloor (3.1…) only changes the structure: by default it has no floor slab of its own. */
-export const hasFloor = (f: Floor) => f.hasFloor ?? !f.sub;
+export const hasFloor = (f: Floor) => f.hasFloor !== false;
 export const hasCeiling = (f: Floor) => f.hasCeiling !== false;
 
 /** Wall materials with density in kg/m³. */
 export const MATERIALS: Record<string, { name: string; density: number; color: number }> = {
-  concrete: { name: 'Reinforced concrete', density: 2400, color: 0xbdbdbd },
+  concrete: { name: 'Concrete', density: 2400, color: 0xbdbdbd },
   brick: { name: 'Brick', density: 1800, color: 0xb87a5e },
-  stone: { name: 'Stone', density: 2600, color: 0xcfc6b4 },
+  stone: { name: 'Stone', density: 2600, color: 0xd6ccb8 },
+  metal: { name: 'Metal roofing', density: 7850, color: 0x7f8a93 },
   aerated: { name: 'Aerated concrete block', density: 600, color: 0xe2e2dc },
   timber: { name: 'Timber (CLT)', density: 480, color: 0xc9a46a },
   steel: { name: 'Steel', density: 7850, color: 0x8a96a3 },
@@ -164,6 +166,8 @@ export interface StructurePlan {
   objects: PlanObject[]; // stairs / elevators (floor plans only)
   /** Floor-area plans: marks of the enclosed shapes that are carved out (no floor there). */
   carved?: { x: number; y: number }[];
+  /** Floor plans: marks of the rooms filled solid from floor to ceiling (e.g. a solid base). */
+  filled?: { x: number; y: number }[];
 }
 
 export interface Building {
@@ -384,9 +388,9 @@ export function normalize(p: Project): Project {
     b.ground ??= 0;
     b.interiorPlans ??= [];
     b.areaPlans ??= [];
-    // floor plans are per main floor: subfloors use their main floor's
-    const subIds = new Set(b.floors.filter(f => f.sub).map(f => f.id));
-    for (const ip of b.interiorPlans) ip.floorIds = ip.floorIds.filter(id => !subIds.has(id));
+    // older projects: the top floor's walls that connected up to the Top level were its roof
+    const topFloor = b.floors[b.floors.length - 1]?.id;
+    if (b.topPlanId) for (const pl of b.plans) if (pl.connect === 'loft' && pl.floorIds.includes(topFloor ?? '') && pl.id !== b.topPlanId) pl.segments.forEach(sg => { if (!sg.kind) sg.kind = 'roof'; });
     // older per-floor masks (areas + carves) -> a floor-area plan for that floor
     for (const f of b.floors) {
       if (!f.mask) continue;
@@ -466,7 +470,8 @@ export const segConnect = (pl: StructurePlan, s: PlanSegment): ConnectMode => s.
 export const segConnectSmooth = (pl: StructurePlan, s: PlanSegment) => s.connectSmooth ?? pl.connectSmooth;
 export const segSmoothSpan = (pl: StructurePlan, s: PlanSegment) => s.smoothSpan ?? pl.smoothSpan;
 export const segColT = (pl: StructurePlan, s: PlanSegment) => s.columnThickness ?? pl.wallThickness;
-export const segMaterial = (pl: StructurePlan, s: PlanSegment) => s.material ?? pl.material;
+/** Material of a segment: its own, else roofs are metal and the rest take the plan's (concrete by default). */
+export const segMaterial = (pl: StructurePlan, s: PlanSegment) => s.material ?? (segKind(s) === 'roof' ? 'metal' : pl.material);
 export const segDivLen = (b: Building, s: PlanSegment) => s.divLen ?? b.divLen;
 
 /** Floor label ("5", "5.1") -> floor index, or null. */
@@ -652,7 +657,7 @@ export function sampleProject(): Project {
   const up = mk('Upper floor', [f1.id], 'balustrade');
   const roof = mk('Roof storey', [f2.id], null);
   roof.connect = 'loft';
-  roof.segments.forEach(s => (s.color = '#a95a40')); // terracotta roof
+  roof.segments.forEach(s => { s.kind = 'roof'; s.color = '#a95a40'; }); // terracotta-coloured roof
   const ridge = newPlan('Ridge');
   n = 1;
   ridge.points = [pt(0.36, 0.51), pt(0.64, 0.51)];
@@ -765,13 +770,27 @@ export function blockProject(name: string): Project {
       ip.segments.push({ id: uid(), a: a.id, b: c.id });
     }
     ip.nextN = m;
-    // a dog-leg stair behind each entrance: two flights of 8 steps with a half landing, climbing away from the door
-    // (3.2 m long, 2 × 1.2 m wide; the floor above gets a hole over it automatically)
-    if (withStairs) for (const k of entrances) ip.objects.push({ id: uid(), type: 'stairs', x: bayX(k), y: y0 + X(0.35 + 1.3 + 1.6), w: 1.2, d: 3.2, rot: 0 });
+    // a dog-leg stair behind each entrance: two flights of 7 treads (16 steps of 17.5 cm) with a landing between,
+    // and an opening in the floor above it (Floor areas)
+    if (withStairs) for (const k of entrances) {
+      // drawn as: up a flight away from the door, across the landing, back up the second flight
+      const x0s = bayX(k), x1s = bayX(k) + X(1.2), near = y0 + X(0.35 + 1.3), far = near + X(2.6);
+      const path = [{ x: x0s, y: near }, { x: x0s, y: far }, { x: x1s, y: far }, { x: x1s, y: near }];
+      ip.objects.push({ id: uid(), type: 'stairs', x: x0s, y: near, w: 1.2, d: 6.4, rot: 0, path });
+    }
     b.interiorPlans.push(ip);
     return ip;
   };
   inner(true, fl.slice(0, 4), 'Sections + stairs');
   inner(false, [fl[4]], 'Sections (top floor)');
+  // floors 1–4: an opening in the floor over each stairwell (the stairs from the floor below arrive in it)
+  const ap = newAreaPlan('Floors with stairwells', fl.slice(1).map(f => f.id));
+  const holes = entrances.map(k => {
+    const xa = bayX(k) - X(0.6), xb = bayX(k) + X(1.8), ya = y0 + X(0.35 + 1.3), yb = ya + X(3.2);
+    return [{ x: xa, y: ya }, { x: xb, y: ya }, { x: xb, y: yb }, { x: xa, y: yb }];
+  });
+  addLoops(ap, [[{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }], ...holes]);
+  ap.carved = holes.map(hh => ({ x: (hh[0].x + hh[2].x) / 2, y: (hh[0].y + hh[2].y) / 2 }));
+  b.areaPlans.push(ap);
   return p;
 }

@@ -2,14 +2,14 @@
 import * as THREE from 'three';
 import {
   Building, Floor, OpeningShape, Placement, PlanObject, PlanSegment, StructurePlan, Texture, WinPoint, divisionBorders, elevation, hasCeiling, hasFloor,
-  BALCONY_AT, PILASTER_REF_H, PilasterShape, mainFloorIndex, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
+  BALCONY_AT, PILASTER_REF_H, PilasterShape, mainFloorIndex, newPlan, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
 } from './model';
 import { fitDesign, fitDesignSliced } from './assets';
 import { REF_WALL } from './deco';
-import { SPIRAL_POST, localToPlan, stairLayout } from './stairs';
+import { SPIRAL_POST, stairLayout } from './stairs';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import polygonClipping, { MultiPolygon } from 'polygon-clipping';
-import { V2, areaFaces, enclosedFacesSegs, pointInPoly, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
+import { V2, areaFaces, enclosedFaces, enclosedFacesSegs, planarize, pointInPoly, smoothClosed, polyAt, polyLength, polyParams, sampleSeg, samplePath, shortestPath, signedArea } from './geometry';
 
 export type Mats = {
   wall(material: string): THREE.Material;
@@ -22,6 +22,8 @@ export type Mats = {
   selected: THREE.Material;
   selLine: THREE.LineBasicMaterial;
   tex: (id: string) => THREE.Material | null;
+  /** A material's Detailed-view look, tinted by a colour (default: the material's own). */
+  look: (material: string, color?: string | null) => THREE.Material;
   /** Loaded imported design (null while loading / in views that don't show designs). */
   design?: (id: string | null | undefined) => THREE.Object3D | null;
 };
@@ -86,6 +88,35 @@ export function autoFloorAreas(b: Building, i: number): V2[][] {
   }
   return out;
 }
+/**
+ * Rooms of a floor plan: the areas closed in by the external walls of a floor using it together with its own
+ * walls (smallest first). Each has `filled` when a fill mark lies in it.
+ */
+export function roomFaces(b: Building, ip: StructurePlan): { poly: V2[]; area: number; filled: boolean }[] {
+  const fid = b.floors.find(f => ip.floorIds.includes(f.id))?.id;
+  const ext = fid ? planForFloor(b, fid) : undefined;
+  const key = 'rooms:' + JSON.stringify([ext?.points, ext?.segments.map(s => [s.a, s.b]), ip.points, ip.segments.map(s => [s.a, s.b])]);
+  let polys = roomCache.get(key);
+  if (!polys) {
+    const tmp: StructurePlan = { ...newPlan('tmp'), points: [], segments: [] };
+    const take = (pl: StructurePlan) => {
+      for (const q of pl.points) tmp.points.push({ ...q });
+      for (const sg of pl.segments) if (segKind(sg) !== 'open') { const sp = sampleSeg(pl, sg); let prev = sg.a;
+        for (let k = 1; k < sp.length - 1; k++) { const id = `${sg.id}~${k}`; tmp.points.push({ id, n: 0, x: sp[k].x, y: sp[k].y }); tmp.segments.push({ id: `${sg.id}#${k}`, a: prev, b: id }); prev = id; }
+        tmp.segments.push({ id: `${sg.id}#e`, a: prev, b: sg.b }); }
+    };
+    if (ext) take(ext);
+    take(ip);
+    let n = 0;
+    planarize(tmp, () => `r${n++}`);
+    polys = enclosedFaces(tmp);
+    roomCache.set(key, polys);
+  }
+  return polys.map(poly => ({ poly, area: Math.abs(signedArea(poly)), filled: false })).sort((a, c) => a.area - c.area)
+    .map((f, _i, all) => ({ ...f, filled: (ip.filled ?? []).some(s => pointInPoly(s, f.poly) && all.find(g => pointInPoly(s, g.poly)) === f) }));
+}
+const roomCache = new Map<string, V2[][]>();
+
 export const areaForFloor = (b: Building, floorId: string) => b.areaPlans.find(pl => pl.floorIds.includes(floorId)) ?? null;
 /** A region of the plan: outer ring (counter-clockwise) and holes. */
 export type Region = { outer: V2[]; holes: V2[][] };
@@ -124,17 +155,7 @@ export function floorRegions(b: Building, i: number): Region[] {
   if (!f) return [];
   const ap = areaForFloor(b, f.id);
   const base = ap ? areaPlanRegions(ap) : unionRegions(autoFloorAreas(b, i));
-  const holes = stairHoles(b, i);
-  return holes.length ? regionsMinus(base, holes) : base;
-}
-/** Holes for the stairs that pass through floor i or arrive on it (from the main floor below). */
-export function stairHoles(b: Building, i: number): V2[][] {
-  if (i <= 0) return [];
-  const j = mainFloorIndex(b, i - 1), ip = interiorForFloor(b, b.floors[j].id);
-  if (!ip) return [];
-  const nm = nextMainFloor(b, j);
-  const rise = (nm < b.floors.length ? elevation(b, nm) : elevation(b, b.floors.length)) - elevation(b, j);
-  return ip.objects.filter(o => o.type === 'stairs' || o.type === 'spiral').map(o => stairLayout(o, rise).footprint.map(q => localToPlan(o, b.baseLength, q)));
+  return base; // (stairs do not cut the floor above: carve an opening in Floor areas where you want one)
 }
 function regionsMinus(base: Region[], holes: V2[][]): Region[] {
   const key = 'minus:' + JSON.stringify([base, holes]);
@@ -245,11 +266,9 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
   // ---------- walls / columns per floor ----------
   const segMat = (seg: PlanSegment, material: string, column = false) => {
-    // Structural view: only the colour. Detailed view: texture, else a chosen material, else the colour, else the plan's material
-    const tex = o.detailed && seg.texture ? mats.tex(seg.texture) : null;
-    if (tex) return tex;
-    if (o.detailed && seg.material) return column ? mats.column(material) : mats.wall(material);
-    return seg.color ? mats.color(seg.color) : column ? mats.column(material) : mats.wall(o.detailed ? material : 'structural');
+    // Structural view: only the colour. Detailed view: the material's look tinted by the colour; a texture covers everything
+    if (o.detailed) return (seg.texture ? mats.tex(seg.texture) : null) ?? mats.look(material, seg.color);
+    return seg.color ? mats.color(seg.color) : column ? mats.column(material) : mats.wall('structural');
   };
   const placeMat = (pl: Placement, fallback: THREE.Material) => {
     if (sel.elements.has(pl.id)) return mats.selected;
@@ -273,6 +292,24 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     return true;
   };
 
+  // roofs (segments of type Roof): how far the eaves run out and how steep they are, per floor
+  const OVERHANG = 0.5, ROOF_T = 0.2;
+  const roofInfo = p.floors.map((_, i) => {
+    const ext = planAtLevel(p, i), above = planAtLevel(p, i + 1);
+    if (!ext || !above || !above.points.length) return null;
+    let dmin = Infinity;
+    for (const sg of ext.segments) {
+      if (segKind(sg) !== 'roof') continue;
+      const bt = sampleSeg(ext, sg), tp = loftTarget(ext, above, sg);
+      const bm = polyAt(bt, polyParams(bt), 0.5), tm = polyAt(tp, polyParams(tp), 0.5);
+      const d = Math.hypot(tm.x - bm.x, tm.y - bm.y) * L;
+      if (d > 0.05) dmin = Math.min(dmin, d);
+    }
+    if (!isFinite(dmin)) return null;
+    const H = elevation(p, i + 1) - elevation(p, i), slope = H / dmin;
+    return { k: OVERHANG / dmin, slope, lift: (ROOF_T / 2) * Math.sqrt(1 + slope * slope) };
+  });
+
   type ColPiece = { a: THREE.Vector3; c: THREE.Vector3; ct: number; bottom: V2[]; pick: PickInfo; seg: PlanSegment; material: string; selected: boolean };
   type PilPiece = { base: THREE.Vector3; out: THREE.Vector3; along: THREE.Vector3; y0: number; y1: number; pw: number; pd: number; pl: Placement; mat: THREE.Material; pick: PickInfo; floor: number };
   const colPieces: ColPiece[] = [], pilPieces: PilPiece[] = [];
@@ -287,7 +324,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const plans: { plan: StructurePlan; interior: boolean }[] = [];
     const ext = planAtLevel(p, i);
     if (ext) plans.push({ plan: ext, interior: false });
-    const inner = o.interior && !floor.sub ? interiorForFloor(p, floor.id) : null; // subfloors: the main floor's plan runs through them
+    const inner = o.interior ? interiorForFloor(p, floor.id) : null;
     if (inner) plans.push({ plan: inner, interior: true });
 
     // footprints of the external walls (plan), for trimming internal walls
@@ -302,9 +339,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       }
     }
     for (const { plan, interior } of plans) {
-      const nmI = nextMainFloor(p, i);
       const y0 = interior ? yBase + slabs[i].floor : yBase;
-      const y1 = interior ? (nmI < N ? elevation(p, nmI) : elevation(p, N) - slabs[N - 1].ceiling) : yTop; // up to the next main floor
+      const y1 = interior ? yTop - slabs[i].ceiling : yTop;
       const above = interior ? null : planAtLevel(p, i + 1);
       let vert: Vertical | undefined;
       const rowsBySeg = new Map<string, { rows: Row[]; bottom: V2[] }>();
@@ -360,22 +396,32 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           continue;
         }
         let top = bottom;
-        const loft = !interior && segConnect(plan, seg) === 'loft' && above && above.points.length > 0;
+        // a roof rises to the plan above (whatever its connection setting)
+        const isRoof = kind === 'roof' && !interior;
+        const loft = !interior && (segConnect(plan, seg) === 'loft' || isRoof) && above && above.points.length > 0;
         if (loft) top = loftTarget(plan, above!, seg);
-        const rows = buildGrid(bottom, top, loft ? segConnectSmooth(plan, seg) : 0,
+        let rows = buildGrid(bottom, top, loft ? segConnectSmooth(plan, seg) : 0,
           loft && segSmoothSpan(plan, seg) ? (vert ??= verticalFor(p, i)) : undefined);
+        const eave = isRoof && loft ? roofInfo[i] : null;
+        if (eave) {
+          // eaves: the roof runs on past the wall line, down its own slope, by the overhang
+          const r0 = rows[0].poly, rR = rows[rows.length - 1].poly, R = rows.length - 1;
+          const ext = r0.map((q, j) => ({ x: q.x + (q.x - rR[j].x) * eave.k, y: q.y + (q.y - rR[j].y) * eave.k }));
+          rows = rows.map((row, r) => ({ poly: ext.map((e, j) => ({ x: e.x + (rR[j].x - e.x) * (r / R), y: e.y + (rR[j].y - e.y) * (r / R) })), params: row.params }));
+        }
 
-        if (kind === 'wall' || kind === 'door') {
+        if (kind === 'wall' || kind === 'door' || kind === 'roof') {
           // +1 side of the wall = outside of the building
           // external walls stand inside the line (outer face on it, flush with floors and ceilings);
           // walls not around an enclosed area, and internal walls, stay centred on it
           const fs = interior ? 0 : faceSide(plan, seg);
           const flip = !interior && fs !== -1;
-          const offs = offsets(plan, seg, bottom, plan.wallThickness / 2 / L).map(v => (flip ? { x: -v.x, y: -v.y } : v));
+          const thick = isRoof ? ROOF_T : plan.wallThickness;
+          const offs = offsets(plan, seg, bottom, thick / 2 / L).map(v => (flip ? { x: -v.x, y: -v.y } : v));
           const texInfo = seg.texture ? o.textures.find(t => t.id === seg.texture) : undefined;
-          const tileH = floor.height, tileW = texInfo ? tileH * (texInfo.w / texInfo.h) : 1;
+          const tileH = texInfo ? floor.height : 1, tileW = texInfo ? tileH * (texInfo.w / texInfo.h) : 1; // material looks: 1 tile = 1 m
           // a door segment is just the lintel above a 2.1 m opening
-          const wall = new WallSolid(rows, offs, polyParams(bottom), y0, y1, W, L, tileW, tileH, plan.wallThickness);
+          const wall = new WallSolid(rows, offs, polyParams(bottom), y0, y1, W, L, tileW, tileH, thick);
           if (fs !== 0 && !loft) wall.shift = -1; // sloped (connected) walls such as roofs stay centred: they overhang a little
           const wsh = seg.wallShape ? p.wallShapes.find(x => x.id === seg.wallShape) : undefined;
           if (wsh && wsh.profile.length) {
@@ -387,19 +433,25 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
           const toPlan = (v: THREE.Vector3): V2 => ({ x: (v.x - p.x) / L, y: (-v.z - p.y) / L });
           // (tested a little to each side of the wall's middle: a wall centred on the slab's edge still counts)
           const sides = [0, 0.5, -0.5];
-          const onSlab = !interior && slabs[i].floor > 0 && sides.some(k => floorCovers(p, i, toPlan(wall.at(0.5, 0, k))));
+          const onSlab = !interior && slabs[i].floor > 0 && (isRoof || sides.some(k => floorCovers(p, i, toPlan(wall.at(0.5, 0, k)))));
           const underRoof = !interior && slabs[i].ceiling > 0 && sides.some(k => inRegions(roofRegions(p, i), toPlan(wall.at(0.5, 1, k))));
           const yw0 = onSlab ? y0 + slabs[i].floor : y0, yw1 = underRoof ? y1 - slabs[i].ceiling : y1;
           // a door segment is just the lintel above a 2.1 m opening
           const yb = kind === 'door' ? yw0 + Math.min(2.1, (yw1 - yw0) * 0.8) : yw0;
           wall.y0 = yb; wall.y1 = yw1;
-          const wallH = yw1 - yb;
+          if (eave) {
+            // the eaves drop below the wall top by the overhang's share of the slope; the whole roof rises by half its
+            // thickness, so its underside meets the slab top at the wall line (resting on it, not cutting into it)
+            wall.y0 = yb - (yw1 - yb) * eave.k + eave.lift;
+            wall.y1 = yw1 + eave.lift;
+          }
+          const wallH = wall.y1 - wall.y0;
 
           // openings and niches: holes in u/v; big ones reach into the neighbouring divisions
           const holes: Hole[] = [];
           pick.holes = [];
           for (const pl of placements) {
-            if (pl.segId !== seg.id || (pl.type !== 'opening' && pl.type !== 'niche') || kind !== 'wall') continue;
+            if (pl.segId !== seg.id || (pl.type !== 'opening' && pl.type !== 'niche') || (kind !== 'wall' && kind !== 'roof')) continue;
             const shape = p.openingShapes.find(x => x.id === pl.shapeId);
             if (!shape || !shape.outlines.some(ol => ol.length >= 3)) continue;
             const k = Math.min(Math.max(0, pl.div ?? 0), borders.length - 2);
@@ -464,7 +516,10 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             const fd = wall.frame((borders[k] + borders[k + 1]) / 2, 0.5);
             designAt(seg.wallDesign, fd.mid, fd.along, fd.up, fd.out, (borders[k + 1] - borders[k]) * lenM, wallH, plan.wallThickness, selected ? mats.selected : null, pick);
           }
-          if (!interior) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id), yBase, yTop, yTop + (i + 1 < N ? slabs[i + 1].floor : 0));
+          // (cornices under a roof's eaves sit lower, clear of them)
+          const under = roofInfo[i + 1];
+          if (!interior && !isRoof) decorate(wall, seg, plan, borders, lenM, wallH, i, floor, placements.filter(pl => pl.segId === seg.id), yBase, yTop,
+            yTop + (i + 1 < N ? slabs[i + 1].floor : 0) - (under ? (CORNICE[1][0] + 0.02) * under.slope : 0));
         } else {
           // colonnade: columns on the division borders (+ free-standing ends)
           // columns: on the division borders, unless they have been moved / added / removed by hand
@@ -476,10 +531,42 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         }
       }
 
+      // filled rooms (floor plans): solid from the floor to the ceiling, inside the wall faces (no overlap with the walls)
+      if (interior && plan.filled?.length) {
+        const rooms = roomFaces(p, plan).filter(f => f.filled);
+        if (rooms.length) {
+          const ring = (a: V2[]) => a.map(q => [q.x, q.y] as [number, number]);
+          const bands: V2[][] = [...extBands];
+          for (const sg of plan.segments) {
+            if (segKind(sg) === 'open') continue;
+            const bt = sampleSeg(plan, sg), hw = plan.wallThickness / 2 / L;
+            for (let k = 0; k + 1 < bt.length; k++) {
+              const a = bt[k], c = bt[k + 1], d = norm({ x: c.x - a.x, y: c.y - a.y }), n = { x: -d.y * hw, y: d.x * hw };
+              const a2 = { x: a.x - d.x * hw, y: a.y - d.y * hw }, c2 = { x: c.x + d.x * hw, y: c.y + d.y * hw };
+              bands.push([{ x: a2.x + n.x, y: a2.y + n.y }, { x: c2.x + n.x, y: c2.y + n.y }, { x: c2.x - n.x, y: c2.y - n.y }, { x: a2.x - n.x, y: a2.y - n.y }]);
+            }
+          }
+          for (const room of rooms) {
+            let mp: MultiPolygon = [];
+            try { mp = bands.length ? polygonClipping.difference([ring(room.poly)], ...bands.map(bd => [ring(bd)])) : [[ring(room.poly)]]; } catch { mp = [[ring(room.poly)]]; }
+            for (const poly of mp) {
+              const toV = (r: [number, number][]) => r.slice(0, -1).map(([x, y]) => { const w = W({ x, y }, 0); return new THREE.Vector2(w.x, -w.z); });
+              const shape = new THREE.Shape(toV(poly[0]));
+              for (const hole of poly.slice(1)) shape.holes.push(new THREE.Path(toV(hole)));
+              const geo = new THREE.ExtrudeGeometry(shape, { depth: y1 - y0, bevelEnabled: false, curveSegments: 1 });
+              geo.rotateX(-Math.PI / 2);
+              geo.translate(0, y0, 0);
+              add(geo, o.detailed ? mats.look(plan.material) : mats.wall('structural'), { floorId: floor.id, floorIndex: i, interior: true }, { cat: 'int', material: plan.material });
+            }
+          }
+        }
+      }
+
       // (single unconnected points build nothing: they only serve as targets for the floor below)
 
       // stairs climb to the next main floor (subfloors are part of the same floor)
-      const nm = nextMainFloor(p, i);
+      // stairs climb to the floor above (its floor's top), whatever is there
+      const nm = i + 1;
       const yStairs = nm < N ? elevation(p, nm) + slabs[nm].floor : y1;
       if (interior) for (const ob of plan.objects) buildObject(ob, p, y0, y1, yStairs, (nm < N ? elevation(p, nm) : yTop) - yBase, mats.object, (geo: THREE.BufferGeometry) => add(geo, mats.object, { floorId: floor.id, floorIndex: i, interior: true }));
     }
@@ -884,12 +971,14 @@ function buildObject(ob: PlanObject, b: Building, y0: number, y1: number, yStair
     add(geo);
   };
   if (ob.type === 'stairs' || ob.type === 'spiral') {
-    // steps (a stepped slab, open underneath) and platforms; risers scaled to the real floor-to-floor height
-    const lay = stairLayout(ob, layoutRise), k = (yStairs - y0) / Math.max(1e-9, layoutRise);
-    const prism = (pts: [number, number][], top: number, t: number) => {
-      const geo = new THREE.ExtrudeGeometry(new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, -z))), { depth: t, bevelEnabled: false, curveSegments: 1 });
-      geo.rotateX(-Math.PI / 2); // shape (x, −z) -> local (x, z); the depth goes up
-      place(geo, 0, y0 + top * k - t, 0);
+    // steps (a stepped slab, open underneath) and landings, in plan coordinates; risers scaled to the real floor-to-floor height
+    const lay = stairLayout(ob, layoutRise, b.baseLength), k = (yStairs - y0) / Math.max(1e-9, layoutRise);
+    const prism = (pts: { x: number; y: number }[], top: number, t: number) => {
+      const w = pts.map(q => toWorld(b, q, 0));
+      const geo = new THREE.ExtrudeGeometry(new THREE.Shape(w.map(v => new THREE.Vector2(v.x, -v.z))), { depth: t, bevelEnabled: false, curveSegments: 1 });
+      geo.rotateX(-Math.PI / 2); // shape (x, −z) -> world (x, z); the depth goes up
+      geo.translate(0, y0 + top * k - t, 0);
+      add(geo);
     };
     for (const tr of lay.treads) prism(tr.pts, tr.top, lay.riser * k + 0.12);
     for (const pf of lay.platforms) prism(pf.pts, pf.top, 0.2);
@@ -1123,7 +1212,8 @@ function offsets(plan: StructurePlan, seg: PlanSegment, poly: V2[], half: number
     return perp(norm({ x: b.x - a.x, y: b.y - a.y }));
   });
   const miter = (endId: string, u: V2, nrm: V2): V2 => {
-    const others = plan.segments.filter(s => s !== seg && (s.a === endId || s.b === endId) && segKind(s) === 'wall');
+    const same = (k: string) => (k === 'roof' ? 'roof' : k === 'wall' || k === 'door' ? 'wall' : k);
+    const others = plan.segments.filter(s => s !== seg && (s.a === endId || s.b === endId) && same(segKind(s)) === same(segKind(seg)) && (segKind(s) === 'wall' || segKind(s) === 'roof'));
     if (others.length !== 1) return nrm;
     const o = others[0];
     const sp = sampleSeg(plan, o);

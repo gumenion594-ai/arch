@@ -121,7 +121,7 @@ export function houseProject(name: string): Project {
   const house = rectPlan('House', [f0, f1]);
   const roof = rectPlan('Roof storey', [f2]);
   roof.connect = 'loft';
-  roof.segments.forEach(s => (s.color = '#9c5a3c'));
+  roof.segments.forEach(s => { s.kind = 'roof'; s.color = '#9c5a3c'; });
   const ridge = newPlan('Ridge');
   n = 1;
   ridge.points = [pt(5, 8), pt(11, 8)];

@@ -1,10 +1,10 @@
 // Structure planner: 2D canvas editor for a structure plan (external walls).
 import { PlanObject, PlanPoint, PlanSegment, StructurePlan, clamp, divisionBorders, segColT, segKind, uid } from './model';
 import { columnPositions } from './build3d';
-import { localToPlan, stairLayout } from './stairs';
+import { stairLayout } from './stairs';
 import { V2, alignMiddle, areaFaces, distToSeg, enclosedFaces, enclosedFacesSegs, faceAt, planarize, planValid, pointInPoly, polyAt, polyLength, polyParams, sampleSeg } from './geometry';
 
-export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'spiral' | 'elevator' | 'carve';
+export type Tool = 'draw' | 'select' | 'move' | 'stairs' | 'spiral' | 'elevator' | 'carve' | 'fill';
 
 export interface PlannerHost {
   getPlan(): StructurePlan | null;
@@ -25,6 +25,8 @@ export interface PlannerHost {
   snapPlans?(): StructurePlan[];
   /** Lines may cross (a point is made where they do), as in floor-area plans; used for structure plans. */
   freeLines?: boolean;
+  /** Floor plans: the rooms (closed by the external and internal walls), smallest first, and which are filled solid. */
+  rooms?(): { poly: V2[]; area: number; filled: boolean }[];
   /** Floor plans: how high stairs climb here (to the next main floor), for their layout. */
   stairRise?(): number;
 }
@@ -198,7 +200,7 @@ export class Planner {
     if (this.h.allowed?.() && !pts.every(p => this.okPoint(p))) return false;
     this.h.begin();
     plan.points.forEach((p, i) => { p.x = clamp(pts[i].x, 0, 1); p.y = clamp(pts[i].y, 0, 1); });
-    plan.objects.forEach((o, i) => { o.x = objs[i].x; o.y = objs[i].y; });
+    plan.objects.forEach((o, i) => { o.x = objs[i].x; o.y = objs[i].y; if (o.path) o.path = o.path.map(q => fn(q)); });
     extra?.();
     this.h.commit();
     this.draw();
@@ -206,9 +208,24 @@ export class Planner {
   }
 
   // ---- stairs / elevators ----
-  private layout(o: PlanObject) { return stairLayout(o, this.h.stairRise?.() ?? 3); }
+  private layout(o: PlanObject) { return stairLayout(o, this.h.stairRise?.() ?? 3, this.h.baseLength()); }
+  /** Stairs being drawn: the walking line so far (from the bottom step). */
+  private stairDraft: V2[] | null = null;
+  private finishStairs() {
+    const plan = this.h.getPlan(), d = this.stairDraft;
+    this.stairDraft = null;
+    if (!plan || !d) return;
+    const path = d.filter((q, i) => i === 0 || Math.hypot(q.x - d[i - 1].x, q.y - d[i - 1].y) > 1e-4);
+    if (path.length < 2) { this.draw(); return; }
+    const L = this.h.baseLength(), total = path.slice(1).reduce((t, q, i) => t + Math.hypot(q.x - path[i].x, q.y - path[i].y), 0) * L;
+    this.h.begin();
+    const o: PlanObject = { id: uid(), type: 'stairs', x: path[0].x, y: path[0].y, w: 1.2, d: total, rot: 0, path };
+    plan.objects.push(o);
+    this.selPoints.clear(); this.selSegs.clear(); this.selObj = o.id;
+    this.h.commit(); this.h.selectionChanged(); this.draw();
+  }
   private objCorners(o: PlanObject): V2[] {
-    if (o.type === 'stairs' || o.type === 'spiral') return this.layout(o).footprint.map(q => localToPlan(o, this.h.baseLength(), q));
+    if (o.type === 'stairs' || o.type === 'spiral') { const f = this.layout(o).footprint; return f.length ? f.flat() : [{ x: o.x, y: o.y }]; }
     const L = this.h.baseLength(), r = (o.rot * Math.PI) / 180;
     const hw = o.w / 2 / L, hd = o.d / 2 / L;
     // rotation in plan space: world rotY(rot) maps local (x, z) -> plan (x, -z)
@@ -218,10 +235,19 @@ export class Planner {
     }));
   }
   private hitObj(plan: StructurePlan, p: V2): PlanObject | null {
-    for (let k = plan.objects.length - 1; k >= 0; k--) if (pointInPoly(p, this.objCorners(plan.objects[k]))) return plan.objects[k];
+    for (let k = plan.objects.length - 1; k >= 0; k--) {
+      const o = plan.objects[k];
+      if (o.type === 'stairs' || o.type === 'spiral') {
+        const lay = this.layout(o), tol = (o.type === 'spiral' ? o.w / 2 : o.w / 2) / this.h.baseLength();
+        if (lay.footprint.some(f => pointInPoly(p, f))) return o;
+        if (o.type === 'stairs' && lay.path.some((q, i) => i > 0 && distToSeg(p, lay.path[i - 1], q) <= tol)) return o;
+        continue;
+      }
+      if (pointInPoly(p, this.objCorners(o))) return o;
+    }
     return null;
   }
-  endChain() { this.head = null; this.h.selectionChanged(); this.draw(); }
+  endChain() { if (this.stairDraft) return this.finishStairs(); this.head = null; this.h.selectionChanged(); this.draw(); }
 
   // ---- mouse ----
   private down(e: MouseEvent) {
@@ -233,6 +259,17 @@ export class Planner {
     const pt = this.hitPoint(plan, p0);
     const p = this.h.area && this.tool === 'draw' && !pt ? this.snapArea(plan, p0) : p0;
 
+    if (this.tool === 'fill') {
+      const rooms = this.h.rooms?.() ?? [];
+      const f = rooms.find(r => pointInPoly(p, r.poly)); // the smallest room here
+      if (!f) return this.h.toast('Click inside a room (an area closed by walls)');
+      this.h.begin();
+      plan.filled = f.filled
+        ? (plan.filled ?? []).filter(m => rooms.find(r => pointInPoly(m, r.poly)) !== f)
+        : [...(plan.filled ?? []), { x: p.x, y: p.y }];
+      this.h.commit(); this.draw();
+      return;
+    }
     if (this.tool === 'carve') {
       const f = faceAt(areaFaces(plan), p);
       if (!f) return this.h.toast('Click inside a closed shape');
@@ -282,12 +319,19 @@ export class Planner {
       this.moveAll = { x: p.x, y: p.y, began: false, orig: new Map([...plan.points, ...plan.objects].map(q => [q.id, { x: q.x, y: q.y }])) };
       return;
     }
-    if (this.tool === 'stairs' || this.tool === 'spiral' || this.tool === 'elevator') {
+    if (this.tool === 'stairs') {
+      // drawn stairs: each click adds a point of the walking line (Shift keeps it straight); Enter / double-click finishes
+      if (!this.okPoint(p)) return this.h.toast('Draw stairs inside the building (inside the external walls)');
+      const last = this.stairDraft?.[this.stairDraft.length - 1];
+      const q = last && e.shiftKey ? (Math.abs(p.x - last.x) > Math.abs(p.y - last.y) ? { x: p.x, y: last.y } : { x: last.x, y: p.y }) : { x: p.x, y: p.y };
+      (this.stairDraft ??= []).push(q);
+      this.draw();
+      return;
+    }
+    if (this.tool === 'spiral' || this.tool === 'elevator') {
       if (!this.okPoint(p)) return this.h.toast('Place it inside the building (inside the external walls)');
       this.h.begin();
-      const o: PlanObject = this.tool === 'stairs'
-        ? { id: uid(), type: 'stairs', x: p.x, y: p.y, w: 1.2, d: 3.2, rot: 0 }
-        : this.tool === 'spiral' ? { id: uid(), type: 'spiral', x: p.x, y: p.y, w: 1.8, d: 1.8, rot: 0 }
+      const o: PlanObject = this.tool === 'spiral' ? { id: uid(), type: 'spiral', x: p.x, y: p.y, w: 1.8, d: 1.8, rot: 0 }
         : { id: uid(), type: 'elevator', x: p.x, y: p.y, w: 2, d: 2, rot: 0 };
       plan.objects.push(o);
       this.selPoints.clear(); this.selSegs.clear(); this.selObj = o.id;
@@ -347,6 +391,7 @@ export class Planner {
       const np = { x: p.x + this.objDrag.dx, y: p.y + this.objDrag.dy };
       if (o && this.okPoint(np)) {
         if (!this.objDrag.began) { this.h.begin(); this.objDrag.began = true; }
+        if (o.path) { const dx = np.x - o.x, dy = np.y - o.y; o.path = o.path.map(q => ({ x: q.x + dx, y: q.y + dy })); }
         o.x = np.x; o.y = np.y;
         this.draw();
       }
@@ -409,6 +454,7 @@ export class Planner {
   };
 
   private dbl(e: MouseEvent) {
+    if (this.tool === 'stairs' && this.stairDraft) { this.finishStairs(); return; }
     const plan = this.h.getPlan();
     if (!plan || this.tool !== 'select') return;
     const p = this.toPlan(e);
@@ -566,6 +612,22 @@ export class Planner {
       }
     }
 
+    // filled rooms (floor plans): solid from floor to ceiling, drawn dark and hatched
+    if (this.h.rooms) {
+      const rooms = this.h.rooms(), hov = this.tool === 'fill' && this.hover ? rooms.find(r => pointInPoly(this.hover!, r.poly)) : null;
+      for (const r of rooms) {
+        if (!r.filled && r !== hov) continue;
+        g.beginPath(); r.poly.forEach((v, i) => { const q = this.toScreen(v); i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); }); g.closePath();
+        if (r.filled) {
+          g.fillStyle = 'rgba(120,120,120,0.55)'; g.fill();
+          g.save(); g.clip(); g.strokeStyle = 'rgba(30,30,30,0.6)'; g.lineWidth = 1;
+          for (let x = -hh; x < w; x += 8) { g.beginPath(); g.moveTo(x, hh); g.lineTo(x + hh, 0); g.stroke(); }
+          g.restore();
+        }
+        if (r === hov) { g.strokeStyle = '#ffd400'; g.lineWidth = 3; g.stroke(); g.lineWidth = 1; }
+      }
+    }
+
     // walls: translucent band showing thickness + centre line
     const tpx = Math.max(2, (plan.wallThickness / this.h.baseLength()) * b.s);
     const sideOf = new Map<string, number>(); // +1: inside on the wall's left, -1: on its right
@@ -587,9 +649,9 @@ export class Planner {
           g.strokeStyle = g.fillStyle; g.lineWidth = tpx; path(sp); g.stroke();
         }
       }
-      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : kind === 'balustrade' ? '#c9b8ff' : '#f0f0f0';
+      g.strokeStyle = sel ? '#ffd400' : kind === 'open' ? '#9fb4c8' : kind === 'door' ? '#e0a060' : kind === 'balustrade' ? '#c9b8ff' : kind === 'roof' ? '#e0855a' : '#f0f0f0';
       g.lineWidth = sel ? 2.5 : 1.5;
-      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : kind === 'door' ? [8, 4] : kind === 'balustrade' ? [1, 3] : []);
+      g.setLineDash(kind === 'colonnade' ? [2, 5] : kind === 'open' ? [12, 4, 2, 4] : kind === 'door' ? [8, 4] : kind === 'balustrade' ? [1, 3] : kind === 'roof' ? [14, 3] : []);
       path(sp); g.stroke();
       g.setLineDash([]);
       // division borders (by length: full divisions in the middle, shorter ones at the ends)
@@ -620,23 +682,24 @@ export class Planner {
 
     // stairs / elevators
     for (const o of plan.objects) {
+      const isStair = o.type === 'stairs' || o.type === 'spiral';
       const cs = this.objCorners(o).map(c => this.toScreen(c));
       const sel = o.id === this.selObj;
       g.fillStyle = sel ? 'rgba(255,212,0,0.25)' : 'rgba(160,190,220,0.18)';
       g.strokeStyle = sel ? '#ffd400' : '#a8c0d8'; g.lineWidth = 1.5;
-      g.beginPath(); cs.forEach((c, i) => (i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y))); g.closePath(); g.fill(); g.stroke();
+      if (!isStair) { g.beginPath(); cs.forEach((c, i) => (i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y))); g.closePath(); g.fill(); g.stroke(); }
       g.lineWidth = 1;
-      if (o.type === 'stairs' || o.type === 'spiral') {
-        const lay = this.layout(o), L = this.h.baseLength();
-        const S = (q: [number, number]) => this.toScreen(localToPlan(o, L, q));
-        const poly = (pts: [number, number][], fill: string | null) => {
+      if (isStair) {
+        const lay = this.layout(o);
+        const S = (q: V2) => this.toScreen(q);
+        const poly = (pts: V2[], fill: string | null) => {
           g.beginPath(); pts.forEach((q, i) => { const c = S(q); i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y); }); g.closePath();
           if (fill) { g.fillStyle = fill; g.fill(); }
           g.stroke();
         };
         g.strokeStyle = sel ? '#ffd400' : '#a8c0d8';
-        for (const pf of lay.platforms) poly(pf.pts, 'rgba(160,190,220,0.3)');
-        for (const tr of lay.treads) poly(tr.pts, null);
+        for (const pf of lay.platforms) poly(pf.pts, sel ? 'rgba(255,212,0,0.25)' : 'rgba(160,190,220,0.3)');
+        for (const tr of lay.treads) poly(tr.pts, sel ? 'rgba(255,212,0,0.12)' : 'rgba(160,190,220,0.12)');
         // the way up: from the first step (dot + UP) to the arrival (arrowhead)
         const path = lay.path.map(S);
         if (path.length > 1) {
@@ -648,11 +711,28 @@ export class Planner {
           g.beginPath(); g.arc(path[0].x, path[0].y, 4, 0, Math.PI * 2); g.fill();
           g.font = 'bold 11px system-ui'; g.fillText('UP', path[0].x + 6, path[0].y + 4); g.font = '11px system-ui';
         }
-        if (lay.problem) { g.fillStyle = '#ff9b4a'; g.fillText('!', cs[0].x + 4, cs[0].y - 4); }
+        if (lay.problem) { const c0 = S(lay.path[0]); g.fillStyle = '#ff9b4a'; g.font = 'bold 13px system-ui'; g.fillText('!', c0.x - 12, c0.y - 6); g.font = '11px system-ui'; }
         g.lineWidth = 1;
       } else {
         g.beginPath(); g.moveTo(cs[0].x, cs[0].y); g.lineTo(cs[2].x, cs[2].y); g.moveTo(cs[1].x, cs[1].y); g.lineTo(cs[3].x, cs[3].y); g.stroke();
       }
+    }
+
+    // stairs being drawn: the walking line so far, on to the cursor
+    if (this.stairDraft) {
+      const pts = [...this.stairDraft, ...(this.hover ? [this.hover] : [])].map(q => this.toScreen(q));
+      g.strokeStyle = '#4cd964'; g.lineWidth = 2; g.setLineDash([6, 4]);
+      g.beginPath(); pts.forEach((c, i) => (i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y))); g.stroke(); g.setLineDash([]);
+      g.fillStyle = '#4cd964';
+      for (const c of pts.slice(0, this.stairDraft.length)) { g.beginPath(); g.arc(c.x, c.y, 3.5, 0, Math.PI * 2); g.fill(); }
+      if (pts.length > 1) {
+        const a = pts[pts.length - 2], e = pts[pts.length - 1], ang = Math.atan2(e.y - a.y, e.x - a.x);
+        g.beginPath(); g.moveTo(e.x, e.y); g.lineTo(e.x - 10 * Math.cos(ang - 0.45), e.y - 10 * Math.sin(ang - 0.45)); g.lineTo(e.x - 10 * Math.cos(ang + 0.45), e.y - 10 * Math.sin(ang + 0.45)); g.closePath(); g.fill();
+        const segL = Math.hypot(this.stairDraft[this.stairDraft.length - 1].x - (this.hover?.x ?? 0), this.stairDraft[this.stairDraft.length - 1].y - (this.hover?.y ?? 0)) * this.h.baseLength();
+        if (this.hover) { g.font = '11px system-ui'; g.fillText(`${fmt(segL)} m`, e.x + 8, e.y - 8); }
+      }
+      g.font = 'bold 11px system-ui'; g.fillText('UP', pts[0].x + 6, pts[0].y + 4); g.font = '11px system-ui';
+      g.lineWidth = 1;
     }
 
     const connected = new Set(plan.segments.flatMap(sg => [sg.a, sg.b]));

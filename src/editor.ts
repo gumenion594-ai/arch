@@ -7,12 +7,12 @@ import {
 import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
 import { DesignView } from './designview';
-import { GOING, SPIRAL_STEPS_PER_TURN, stairLayout } from './stairs';
+import { SPIRAL_STEPS_PER_TURN, stairLayout, stairPath } from './stairs';
 import { renderDecoPanel } from './decopanel';
 import { ShapeEditor, ShapeTool } from './shapeeditor';
 import { DesignMode, PickMode, onBoxPick, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
 import { V2, enclosedFaces, planarize, planValid, sampleSeg, signedArea } from './geometry';
-import { Selection, areaForFloor, autoFloorAreas, interiorForFloor, loftPointTarget } from './build3d';
+import { Selection, areaForFloor, autoFloorAreas, interiorForFloor, loftPointTarget, roomFaces } from './build3d';
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
@@ -197,6 +197,7 @@ export class Editor {
         area: m === 'floorarea',
         freeLines: m === 'structure',
         stairRise: () => this.stairRise(),
+        rooms: m === 'floorplan' ? () => { const pl = this.plan(); return pl ? roomFaces(this.b, pl) : []; } : undefined,
         snapPlans: () => this.areaRefs(),
       });
       if (m === 'floorarea') this.planner.tool = 'draw';
@@ -299,6 +300,7 @@ export class Editor {
   };
   setTool(t: Tool) {
     if (!this.planner) return;
+    if (t !== this.planner.tool) this.planner.endChain(); // finishes stairs being drawn
     this.planner.tool = t;
     if (t !== 'draw') this.planner.head = null;
     this.refresh();
@@ -361,8 +363,7 @@ export class Editor {
     this.selWalls.clear(); this.selDivs.clear();
     // in a planner, show the plan the clicked floor uses
     if ((this.mode === 'structure' || this.mode === 'floorplan' || this.mode === 'floorarea') && this.selFloors.has(id)) {
-      const mainId = this.b.floors[mainFloorIndex(this.b, this.b.floors.findIndex(f => f.id === id))]?.id ?? id;
-      const pl = this.mode === 'structure' ? planForFloor(this.b, id) : this.mode === 'floorplan' ? interiorForFloor(this.b, mainId) : areaForFloor(this.b, id);
+      const pl = this.mode === 'structure' ? planForFloor(this.b, id) : this.mode === 'floorplan' ? interiorForFloor(this.b, id) : areaForFloor(this.b, id);
       if (pl && pl.id !== this.plan()?.id) {
         this.setActivePlan(pl.id);
         if (this.planner) { this.planner.head = null; this.planner.selPoints.clear(); this.planner.selSegs.clear(); this.planner.selObj = null; }
@@ -484,9 +485,7 @@ export class Editor {
       h('div', { class: 'box-title' }, one ? `Floor ${floorLabel(p, idx[0])}` : `${sel.length} floors: ${formatRanges(p, idx)}`),
       h('label', {}, one ? 'Height (m)' : 'Height of each (m)', hin),
       planPicker(p.plans, 'Structure plan'),
-      sel.some(f => f.sub)
-        ? h('div', { class: 'muted small' }, 'Floor plan: a subfloor uses its main floor’s (its internal walls and stairs run through it).')
-        : planPicker(p.interiorPlans, 'Floor plan'),
+      planPicker(p.interiorPlans, 'Floor plan'),
       planPicker(p.areaPlans, 'Floor area'),
       h('div', { class: 'row' }, this.floorToggle(sel, 'hasFloor', 'Floor'),
         sel.some(f => f === p.floors[p.floors.length - 1]) ? this.floorToggle(sel.filter(f => f === p.floors[p.floors.length - 1]), 'hasCeiling', 'Roof') : null,
@@ -598,7 +597,6 @@ export class Editor {
    */
   editFloorIn(mode: 'structure' | 'floorplan' | 'floorarea', floorId: string, segId?: string) {
     const b = this.b;
-    if (mode === 'floorplan') floorId = b.floors[mainFloorIndex(b, b.floors.findIndex(f => f.id === floorId))]?.id ?? floorId; // subfloors: the main floor's plan
     let pl = mode === 'structure' ? planForFloor(b, floorId) : mode === 'floorplan' ? interiorForFloor(b, floorId) : areaForFloor(b, floorId);
     if (!pl) {
       this.begin();
@@ -707,10 +705,11 @@ export class Editor {
           + (interior ? ' Internal walls must stay inside the external walls (orange dashed).' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
         select: 'Click points or walls to select (Shift = add), or right-drag a box around them; drag one of several selected points to move them all. Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
         move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
-        stairs: 'Click inside the building to place a staircase: it climbs from the green dot (UP) along the arrow to the next floor, with standard steps; if its length runs out it turns back at a platform. Select it to change its width, length, direction and turn side.',
+        stairs: 'Draw the stairs from the bottom step up: click where they start, click at each turn, then double-click or press Enter at the top (Shift keeps a flight straight). Each leg is a flight of steps, each corner a landing; to turn back, draw a short leg across and then back. The arrows show the way up. The stairs climb to the floor above whatever is there: carve an opening in Floor areas where you want one.',
         spiral: 'Click inside the building to place a spiral staircase: it winds up around a post from the green dot (UP) to the next floor. Select it to change its diameter and direction.',
         elevator: 'Click inside the building to place an elevator shaft.',
         carve: 'Click a shape to carve it out (no floor there); click a carved shape to give it its floor back.',
+        fill: 'Click a room (an area closed by walls) to fill it solid from the floor to the ceiling, e.g. to make the ground floor a solid base; click a filled room to empty it again.',
       };
       if (area) {
         help.draw = 'Click to add points; each connects to the previous one. Click a point to draw from it or to connect to it. Lines may cross: crossings become points. Clicks snap to this floor\'s walls (orange) and to your lines. Enter / Esc ends the line: the next click starts a new one anywhere. Every closed shape is floor until you carve it.';
@@ -765,7 +764,7 @@ export class Editor {
       body.push(
         h('div', { class: 'box-title' }, 'Tool'),
         h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('move', 'Move all (M)'),
-          interior ? toolBtn('stairs', 'Stairs') : null, interior ? toolBtn('spiral', 'Spiral stairs') : null, interior ? toolBtn('elevator', 'Elevator') : null,
+          interior ? toolBtn('stairs', 'Stairs') : null, interior ? toolBtn('spiral', 'Spiral stairs') : null, interior ? toolBtn('elevator', 'Elevator') : null, interior ? toolBtn('fill', 'Fill room') : null,
           pn.tool === 'draw' ? h('button', { onclick: () => pn.endChain() }, 'End chain (Enter)') : null),
         this.selectionBox(pl, interior),
         h('div', { class: 'muted small help' }, help[pn.tool]),
@@ -896,8 +895,7 @@ export class Editor {
     this.mutate(() => {
       const set = new Set(ids);
       list.forEach(o => (o.floorIds = o.floorIds.filter(id => !set.has(id))));
-      // floor plans: subfloors (3.1 …) use their main floor's, so they are never assigned one
-      pl.floorIds = this.b.floors.filter(f => set.has(f.id) && !(this.mode === 'floorplan' && f.sub)).map(f => f.id);
+      pl.floorIds = this.b.floors.filter(f => set.has(f.id)).map(f => f.id);
     });
   }
 
@@ -1027,20 +1025,39 @@ export class Editor {
       });
       return h('label', {}, label, inp);
     };
-    const isStairs = ob.type === 'stairs', isSpiral = ob.type === 'spiral';
-    const lay = isStairs || isSpiral ? stairLayout(ob, this.stairRise()) : null;
+    const isStairs = ob.type === 'stairs', isSpiral = ob.type === 'spiral', L = this.b.baseLength;
+    const lay = isStairs || isSpiral ? stairLayout(ob, this.stairRise(), L) : null;
+    // drawn stairs: the length of each flight (changing one moves the rest of the path along)
+    const path = isStairs ? stairPath(ob, L) : [];
+    const flights = path.slice(1).map((q, i) => {
+      const a = path[i], lenM = Math.hypot(q.x - a.x, q.y - a.y) * L;
+      return f(`Flight ${i + 1} (m)`, () => lenM, v => {
+        const P = stairPath(ob, L).map(x => ({ ...x }));
+        const d = { x: (P[i + 1].x - P[i].x) / (lenM / L), y: (P[i + 1].y - P[i].y) / (lenM / L) };
+        const nx = P[i].x + (d.x * v) / L, ny = P[i].y + (d.y * v) / L, dx = nx - P[i + 1].x, dy = ny - P[i + 1].y;
+        for (let k = i + 1; k < P.length; k++) { P[k].x += dx; P[k].y += dy; }
+        ob.path = P;
+      }, 0.3, 100);
+    });
     return h('div', { class: 'box' },
       h('div', { class: 'box-title' }, isStairs ? 'Staircase' : isSpiral ? 'Spiral staircase' : 'Elevator'),
       isSpiral ? f('Diameter (m)', () => ob.w, v => { ob.w = v; ob.d = v; }, 0.8, 10)
-        : h('div', { class: 'row' }, f(isStairs ? 'Width of a flight (m)' : 'Width (m)', () => ob.w, v => (ob.w = v), 0.3, 50), f(isStairs ? 'Length it may use (m)' : 'Length (m)', () => ob.d, v => (ob.d = v), 0.3, 50)),
-      f('Rotation (°)', () => ob.rot, v => (ob.rot = v), -360, 360),
+        : isStairs ? f('Width (m)', () => ob.w, v => (ob.w = v), 0.5, 20)
+        : h('div', { class: 'row' }, f('Width (m)', () => ob.w, v => (ob.w = v), 0.3, 50), f('Length (m)', () => ob.d, v => (ob.d = v), 0.3, 50)),
+      isStairs ? h('div', { class: 'row' }, ...flights) : f('Rotation (°)', () => ob.rot, v => (ob.rot = v), -360, 360),
       lay ? h('div', { class: 'muted small' },
-        `${lay.risers} steps of ${fmt(lay.riser * 100)} cm${isStairs ? `, ${Math.round(GOING * 100)} cm deep` : ''} up to the next floor · `
-        + (isSpiral ? `${fmt((lay.risers - 1) / SPIRAL_STEPS_PER_TURN)} turns` : `${lay.flights} flight${lay.flights === 1 ? '' : 's'}${lay.flights > 1 ? ` with ${lay.flights - 1} platform${lay.flights > 2 ? 's' : ''}` : ''} · uses ${fmt(lay.length)} m of its length`)) : null,
+        `${lay.risers} steps of ${fmt(lay.riser * 100)} cm up to the floor above · `
+        + (isSpiral ? `${fmt((lay.risers - 1) / SPIRAL_STEPS_PER_TURN)} turns` : `${lay.flights} flight${lay.flights === 1 ? '' : 's'}${lay.flights > 1 ? ` and ${lay.flights - 1} landing${lay.flights > 2 ? 's' : ''}` : ''}, ${fmt(lay.length)} m in all. The arrows show the way up.`)) : null,
       lay?.problem ? h('div', { class: 'warn' }, lay.problem) : null,
       h('div', { class: 'row' },
-        h('button', { title: 'Turn the way up round', onclick: () => this.mutate(() => (ob.rot = (ob.rot + 90) % 360)) }, 'Rotate 90°'),
-        isStairs ? h('button', { title: 'Where it turns back after a platform', onclick: () => this.mutate(() => (ob.flip = !ob.flip)) }, ob.flip ? 'Turns back on the left' : 'Turns back on the right') : null,
+        h('button', {
+          title: 'Turn it a quarter round (about its first step)',
+          onclick: () => this.mutate(() => {
+            if (isStairs) { const P = stairPath(ob, L), c = P[0]; ob.path = P.map(q => ({ x: c.x + (q.y - c.y), y: c.y - (q.x - c.x) })); }
+            else ob.rot = (ob.rot + 90) % 360;
+          }),
+        }, 'Rotate 90°'),
+        isStairs ? h('button', { title: 'Climb the other way: the top becomes the bottom', onclick: () => this.mutate(() => { const P = [...stairPath(ob, L)].reverse(); ob.path = P; ob.x = P[0].x; ob.y = P[0].y; }) }, 'Reverse') : null,
         isSpiral ? h('button', { onclick: () => this.mutate(() => (ob.flip = !ob.flip)) }, ob.flip ? 'Clockwise' : 'Anticlockwise') : null,
         h('button', { class: 'danger', onclick: () => this.planner!.deleteSelection() }, 'Delete'),
       ),
@@ -1092,7 +1109,7 @@ export class Editor {
     const kind = common(segKind);
     const kindBtn = (k: SegKind, label: string) => h('button', { class: kind === k ? 'tab active' : 'tab', onclick: () => setAll(s => (s.kind = k)) }, label);
     wrap.append(h('div', { class: 'box-title' }, 'Type'), h('div', { class: 'row' },
-      kindBtn('wall', 'Wall'), interior ? kindBtn('door', 'Door') : null, kindBtn('colonnade', 'Colonnade'), kindBtn('balustrade', 'Balusters'), kindBtn('open', 'Open')));
+      kindBtn('wall', 'Wall'), interior ? kindBtn('door', 'Door') : null, interior ? null : kindBtn('roof', 'Roof'), kindBtn('colonnade', 'Colonnade'), kindBtn('balustrade', 'Balusters'), kindBtn('open', 'Open')));
     if (kind === 'wall' || kind === 'colonnade') {
       const dl = common(s => s.divLen ?? null);
       const dIn = h('input', {
