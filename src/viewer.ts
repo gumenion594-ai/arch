@@ -377,7 +377,7 @@ export class Viewer {
     if (!w) return;
     w.hud.innerHTML = `<b>${w.fly ? 'Flying' : 'Walking'}</b> · eyes ${Viewer.EYE} m above ${w.fly ? 'your feet' : 'the floor'} · ${w.feet.toFixed(1)} m elevation<br>`
       + `WASD / arrows move · mouse looks (click the view to capture it, or drag) · Shift run · `
-      + (w.fly ? 'Space / E up · C / Q down' : 'Space jump') + ' · F fly · Esc exit';
+      + (w.fly ? 'Space / E up · C / Q down · through walls' : 'Space jump') + ' · F fly · Esc exit';
   }
   /** Solid things you can stand on or bump into (not lines, not the invisible click surfaces). */
   private solids(): THREE.Object3D[] {
@@ -423,16 +423,17 @@ export class Viewer {
     let dx = fx * fwd + rx * side, dz = fz * fwd + rz * side;
     const l = Math.hypot(dx, dz);
     if (l > 0) { dx = (dx / l) * speed * dt; dz = (dz / l) * speed * dt; }
-    // slide along walls: try the full move, then each axis on its own
-    if (this.pathClear(w.x, w.z, dx, dz, w.feet, objs)) { w.x += dx; w.z += dz; }
+    // flying: straight through walls, floors and the ground (no collisions)
+    if (w.fly) { w.x += dx; w.z += dz; }
+    // walking: slide along walls: try the full move, then each axis on its own
+    else if (this.pathClear(w.x, w.z, dx, dz, w.feet, objs)) { w.x += dx; w.z += dz; }
     else {
       if (this.pathClear(w.x, w.z, dx, 0, w.feet, objs)) w.x += dx;
       if (this.pathClear(w.x, w.z, 0, dz, w.feet, objs)) w.z += dz;
     }
     if (w.fly) {
       const v = ((on('Space', 'KeyE') ? 1 : 0) - (on('KeyC', 'KeyQ', 'ControlLeft') ? 1 : 0)) * speed * dt;
-      const g = this.groundBelow(w.x, w.z, w.feet + 0.4, objs) ?? (w.feet >= -1e-3 ? 0 : null); // past the grass: still ground at 0
-      w.feet = Math.max(g ?? -1e9, w.feet + v);
+      w.feet = Math.max(-300, Math.min(3000, w.feet + v));
       w.onGround = false;
     } else {
       // gravity; step up onto anything up to 40 cm higher (stairs), fall otherwise
