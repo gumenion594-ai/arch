@@ -255,6 +255,11 @@ function elementBox(ed: Editor, elems: Placement[]) {
   const box = h('div', { class: 'sub' }, h('div', { class: 'box-title' }, t ? `${TYPE_LABEL[t]}${elems.length > 1 ? 's' : ''}` : 'Elements'));
   if (t === 'opening' || t === 'niche' || t === 'balcony' || t === 'pilaster') box.append(shapeSel());
   if (t === 'opening' || t === 'niche' || t === 'cornice' || t === 'pilaster' || t === 'balcony') box.append(decoSel(t));
+  if (t === 'pilaster') {
+    const cb = h('input', { type: 'checkbox', checked: elems.every(e => e.giant), onchange: () => ed.mutate(() => elems.forEach(e => (e.giant = cb.checked))) }) as HTMLInputElement;
+    cb.indeterminate = !elems.every(e => e.giant) && elems.some(e => e.giant);
+    box.append(h('label', { class: 'chk', title: 'With the pilasters above / below that are also continuous: one tall pilaster with one base and one capital, instead of one per storey' }, cb, 'Continuous through floors'));
+  }
   if (t === 'model' && one) {
     const pos = one.pos ?? { x: 0, y: 0, z: 0 };
     const f = (label: string, get: () => number, set: (v: number) => void) => h('label', {}, label, ed.numInput(get(), set, -10000, 10000, true));

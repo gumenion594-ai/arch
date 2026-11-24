@@ -125,6 +125,7 @@ export interface Placement {
   pos?: { x: number; y: number; z: number }; // free 3D model: metres from the building's corner (x east, y up, z north)
   rot?: number; // degrees
   scale?: number; // 3D model: size of its largest side in m
+  giant?: boolean; // pilaster: one continuous order through the floors above / below (one base, one capital), not one per storey
 }
 
 /** A subfloor (3.1…) only changes the structure: by default it has no floor slab of its own. */
@@ -693,9 +694,11 @@ export function sampleProject(): Project {
   // niches either side of the entrance
   place('niche', f0, front0, 0, { shapeId: shape('Niche'), dy: 0.6 });
   place('niche', f0, front0, divCount(g, front0) - 1, { shapeId: shape('Niche'), dy: 0.6 });
-  // pilasters on the house corners, both storeys (border 0 of every outer wall is a corner)
+  // pilasters on the house corners: on both faces of each corner (they meet in an L), one order through both storeys
   for (const [pl, fl] of [[g, f0], [up, f1]] as const) {
-    for (const s of [pl.segments[0], pl.segments[3], pl.segments[4], pl.segments[5]]) place('pilaster', fl, s, 0, { shapeId: b.pilasterShapes[0]?.id });
+    const sh = { shapeId: b.pilasterShapes[0]?.id, giant: true };
+    for (const s of [pl.segments[0], pl.segments[3], pl.segments[4], pl.segments[5]]) place('pilaster', fl, s, 0, sh); // where each wall starts
+    for (const s of [pl.segments[2], pl.segments[3], pl.segments[4], pl.segments[5]]) place('pilaster', fl, s, divCount(pl, s), sh); // where each wall ends
   }
   // round window in the roof (front slope)
   const roofFront = roof.segments[1];

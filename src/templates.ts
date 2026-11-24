@@ -1,6 +1,6 @@
 // Project templates that use 3D designs (they need three.js to measure the built-in models).
 import * as THREE from 'three';
-import { DecoDesign, Design, Floor, OpeningShape, PlanPoint, PlanSegment, Project, createProject, newPlan, uid } from './model';
+import { DecoDesign, Design, Floor, OpeningShape, PlanPoint, PlanSegment, Project, createProject, divisionBorders, newPlan, segDivLen, uid } from './model';
 import { ARCH_WIN, BUILTIN_DESIGNS } from './builtin';
 
 /** The "Tall arched window" shape: 1.4 × 3.5 m with a semicircular head (spring at 80 % of the height); smaller ones keep the proportions. */
@@ -52,6 +52,46 @@ export function dressVilla(p: Project): Project {
     if (name(pl.shapeId) === 'Arched window') { pl.shapeId = ground.id; pl.designId = deco.id; }
     else if (name(pl.shapeId) === 'Window') { pl.shapeId = upper.id; pl.designId = deco.id; pl.dy = -0.1; }
   }
+  // windows next to a corner pilaster move along the wall until their surround clears it
+  const L = b.baseLength;
+  for (const pl of b.placements) {
+    if (pl.type !== 'opening' || pl.designId !== deco.id) continue;
+    const plan = b.plans.find(x => x.floorIds.includes(pl.floorId)), seg = plan?.segments.find(x => x.id === pl.segId);
+    const shape = b.openingShapes.find(x => x.id === pl.shapeId);
+    if (!plan || !seg || !shape) continue;
+    const A = plan.points.find(q => q.id === seg.a)!, C = plan.points.find(q => q.id === seg.b)!;
+    const len = Math.hypot(C.x - A.x, C.y - A.y) * L, bs = divisionBorders(len, segDivLen(b, seg));
+    const centre = (bs[pl.div ?? 0] + bs[(pl.div ?? 0) + 1]) / 2 + pl.dx;
+    const half = 1.15 * (shape.w / ARCH_WIN.w); // half the surround's width
+    const pil = (k: number) => b.placements.find(x => x.type === 'pilaster' && x.floorId === pl.floorId && x.segId === seg.id && x.div === k);
+    const reach = (x?: { shapeId?: string | null }) => { const ps = b.pilasterShapes.find(q => q.id === x?.shapeId); return (ps?.w ?? 0.5) + (ps?.d ?? 0.12); }; // across the corner (an L)
+    const p0 = pil(0), p1 = pil(bs.length - 1);
+    if (p0) { const need = reach(p0) + half + 0.05; if (centre < need) pl.dx += Math.round((need - centre) * 100) / 100; }
+    if (p1) { const need = reach(p1) + half + 0.05; if (len - centre < need) pl.dx -= Math.round((need - (len - centre)) * 100) / 100; }
+  }
+  // where two windows now overlap (a short wall), keep one, centred in the space the pilasters leave
+  const groups = new Map<string, typeof b.placements>();
+  for (const pl of b.placements) if (pl.type === 'opening' && pl.designId === deco.id) (groups.get(pl.floorId + '|' + pl.segId) ?? groups.set(pl.floorId + '|' + pl.segId, []).get(pl.floorId + '|' + pl.segId)!).push(pl);
+  const drop = new Set<string>();
+  for (const list of groups.values()) {
+    const pl0 = list[0];
+    const plan = b.plans.find(x => x.floorIds.includes(pl0.floorId)), seg = plan?.segments.find(x => x.id === pl0.segId);
+    const shape = b.openingShapes.find(x => x.id === pl0.shapeId);
+    if (!plan || !seg || !shape || list.length < 2) continue;
+    const A = plan.points.find(q => q.id === seg.a)!, C = plan.points.find(q => q.id === seg.b)!;
+    const len = Math.hypot(C.x - A.x, C.y - A.y) * L, bs = divisionBorders(len, segDivLen(b, seg));
+    const centreOf = (x: typeof pl0) => (bs[x.div ?? 0] + bs[(x.div ?? 0) + 1]) / 2 + x.dx;
+    const half = 1.15 * (shape.w / ARCH_WIN.w);
+    const sorted = [...list].sort((x, y) => centreOf(x) - centreOf(y));
+    const clash = sorted.some((x, i) => i > 0 && centreOf(x) - centreOf(sorted[i - 1]) < 2 * half + 0.05);
+    if (!clash || sorted.length !== 2) continue;
+    const pil = (k: number) => b.placements.some(x => x.type === 'pilaster' && x.floorId === pl0.floorId && x.segId === seg.id && x.div === k);
+    const reach = 0.8, from = pil(0) ? reach : 0, to = pil(bs.length - 1) ? len - reach : len;
+    const keep = sorted[0], gone = sorted[1];
+    keep.dx = Math.round(((from + to) / 2 - (bs[keep.div ?? 0] + bs[(keep.div ?? 0) + 1]) / 2) * 100) / 100;
+    drop.add(gone.id);
+  }
+  b.placements = b.placements.filter(x => !drop.has(x.id));
   return p;
 }
 

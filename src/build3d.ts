@@ -514,8 +514,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     add(column(a, c, first.ct, first.bottom), selected ? mats.selected : segMat(seg, first.material, true), first.pick, { cat: 'col', material: first.material });
   }
   for (const run of joined(pilPieces, x => `${r2(x.base.x)},${r2(x.base.z)},${r2(x.out.x)},${r2(x.out.z)},${x.pl.designId ?? ''}`, x => x.y0, x => x.y1, 0.05,
-    // a floor or ceiling between the two storeys keeps them as separate pilasters (one per storey)
-    (_a, b) => slabs[b.floor].floor > 0)) {
+    // a floor or ceiling between the two storeys keeps them as separate pilasters (one per storey), unless they run through (giant order)
+    (a, b) => slabs[b.floor].floor > 0 && !(a.pl.giant && b.pl.giant))) {
     const f0 = run[0], y0 = f0.y0, y1 = run[run.length - 1].y1, H = y1 - y0;
     const { pw, pd, out } = f0;
     const up = new THREE.Vector3(0, 1, 0), side = new THREE.Vector3().crossVectors(up, out);
@@ -531,7 +531,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const shaftC = f0.base.clone().addScaledVector(out, pd / 2); shaftC.y = y0 + H / 2;
     if (designAt(f0.pl.designId, shaftC, f0.along, up, out, pw, H, pd, f0.pl.color || selected ? mat : null, f0.pick, true)) continue;
     const psh = f0.pl.shapeId ? p.pilasterShapes.find(x => x.id === f0.pl.shapeId) : undefined;
-    if (psh && psh.front.length && psh.side.length) { add(pilasterGeometry(psh, f0.base, side.clone().normalize(), out, y0, H), mat, f0.pick); continue; }
+    if (psh && psh.front.length && psh.side.length) { add(pilasterGeometry(psh, f0.base, side.clone().normalize(), out, y0, H, pw), mat, f0.pick); continue; }
     box(pw, H, pd, H / 2);
     box(pw + 0.14, 0.3, pd + 0.08, 0.15); // one base at the bottom
     box(pw + 0.14, 0.24, pd + 0.08, H - 0.12); // one capital at the top
@@ -562,6 +562,13 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     const near = new Set([seg.id, ...plan.segments.filter(o => o.a === seg.a || o.b === seg.a || o.a === seg.b || o.b === seg.b).map(o => o.id)]);
     const hasCornice = p.placements.some(x => x.type === 'cornice' && x.floorId === floor.id && near.has(x.segId ?? ''));
     const underCornice = (y: number) => (hasCornice ? Math.min(y, cy - CORNICE_H) : y);
+    /** A pilaster at the end of the wall that meets this one at its start (the other face of the corner)? */
+    const cornerMate = (sg: PlanSegment, floorId: string) => {
+      const other = plan.segments.find(o => o.id !== sg.id && o.b === sg.a && segKind(o) === 'wall');
+      if (!other) return false;
+      const nb = divisionBorders(polyLength(sampleSeg(plan, other)) * L, segDivLen(p, other)).length - 1;
+      return p.placements.some(x => x.type === 'pilaster' && x.floorId === floorId && x.segId === other.id && (x.div ?? 0) === nb);
+    };
     for (const pl of list) {
       const pick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, placementId: pl.id };
       const k = Math.min(Math.max(0, pl.div ?? 0), borders.length - (pl.type === 'pilaster' ? 1 : 2));
@@ -596,10 +603,13 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
         add(sweepProfile(wall, ua, ub, CORNICE, cy, m0, m1), mat, pick);
       } else if (pl.type === 'pilaster') {
         const psh = pl.shapeId ? p.pilasterShapes.find(x => x.id === pl.shapeId) : undefined;
-        const pw = psh?.w ?? 0.5, pd = psh?.d ?? 0.12;
+        let pw = psh?.w ?? 0.5;
+        const pd = psh?.d ?? 0.12;
         let s0 = borders[k] * lenM + pl.dx;
         const corner = wall.shift ? 0 : t / 2; // where the outer corner is, relative to the wall's ends
         if (k === 0) s0 = -corner + pw / 2 + pl.dx; // flush with the outer corner
+        // a pilaster on the other face of this corner too: this one runs on across the corner, so the two make an L
+        if (k === 0 && cornerMate(seg, floor.id)) { pw += pd; s0 -= pd / 2; }
         if (k === borders.length - 1) s0 = lenM + corner - pw / 2 + pl.dx;
         const u = s0 / lenM;
         const fr = wall.frame(Math.min(1, Math.max(0, u)), 0.5);
@@ -1385,7 +1395,7 @@ export function profileBreaks(pts: { x: number; y: number }[]): number[] {
  * A pilaster from its design: rectangular cross-sections (half width from the front outline, depth from the
  * side outline) stacked up the height. Base and capital keep their drawn size (at PILASTER_REF_H); the shaft stretches.
  */
-export function pilasterGeometry(sh: PilasterShape, base: THREE.Vector3, along: THREE.Vector3, out: THREE.Vector3, y0: number, H: number): THREE.BufferGeometry {
+export function pilasterGeometry(sh: PilasterShape, base: THREE.Vector3, along: THREE.Vector3, out: THREE.Vector3, y0: number, H: number, w = sh.w): THREE.BufferGeometry {
   const bandB = Math.min(sh.base * PILASTER_REF_H, H * 0.3), bandT = Math.min(sh.top * PILASTER_REF_H, H * 0.3);
   // height (m from the bottom) -> design y
   const yOf = (t: number) => t <= bandB ? (t / Math.max(bandB, 1e-9)) * sh.base
@@ -1399,7 +1409,8 @@ export function pilasterGeometry(sh: PilasterShape, base: THREE.Vector3, along: 
   void yOf;
   const up = new THREE.Vector3(0, 1, 0);
   const rings = ys.map(y => {
-    const hw = (sh.w / 2) * profileAt(sh.front, y), dd = sh.d * profileAt(sh.side, y), t = tOf(y);
+    // wider than drawn (a corner pilaster running across the corner): the extra width stays solid, only the drawn part steps in
+    const extra = Math.max(0, w - sh.w) / 2, hw = extra + (sh.w / 2) * profileAt(sh.front, y), dd = sh.d * profileAt(sh.side, y), t = tOf(y);
     const c = base.clone(); c.y = y0 + t;
     const P = (a: number, o: number) => c.clone().addScaledVector(along, a).addScaledVector(out, o);
     return [P(-hw, 0), P(hw, 0), P(hw, dd), P(-hw, dd)]; // against the wall, then the front
