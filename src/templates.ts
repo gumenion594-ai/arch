@@ -39,18 +39,18 @@ export function addArchedWindowDesign(p: Project): { shape: OpeningShape; deco: 
 
 /**
  * The villa template with the arched windows: same proportions as the design (so the arch stays round),
- * 1.3 × 3.25 m on the ground floor and 1.0 × 2.5 m upstairs (a little lower, clear of the cornice).
+ * 1.1 × 2.75 m on the ground floor and 0.86 × 2.15 m upstairs (a little lower, clear of the cornice).
  */
 export function dressVilla(p: Project): Project {
   const b = p.buildings[0];
   const { deco } = addArchedWindowDesign(p);
-  const ground = tallArchedWindow(1.3, 'Arched window, ground floor'), upper = tallArchedWindow(1.0, 'Arched window, upper floor');
+  const ground = tallArchedWindow(1.1, 'Arched window, ground floor'), upper = tallArchedWindow(0.86, 'Arched window, upper floor');
   b.openingShapes.push(ground, upper);
   const name = (id?: string | null) => b.openingShapes.find(s => s.id === id)?.name;
   for (const pl of b.placements) {
     if (pl.type !== 'opening') continue;
     if (name(pl.shapeId) === 'Arched window') { pl.shapeId = ground.id; pl.designId = deco.id; }
-    else if (name(pl.shapeId) === 'Window') { pl.shapeId = upper.id; pl.designId = deco.id; pl.dy = -0.15; }
+    else if (name(pl.shapeId) === 'Window') { pl.shapeId = upper.id; pl.designId = deco.id; pl.dy = -0.1; }
   }
   return p;
 }
