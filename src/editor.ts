@@ -16,7 +16,7 @@ import { Selection, areaForFloor, autoFloorAreas, interiorForFloor, loftPointTar
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
-type Mode = 'view' | 'structure' | 'floorplan' | 'floorarea' | DesignMode | 'decos';
+type Mode = 'view' | 'structure' | 'floorplan' | DesignMode | 'decos';
 const isDesign = (m: Mode): m is DesignMode => m === 'openings' || m === 'niches' || m === 'balconies' || m === 'walls' || m === 'pilasters';
 const PLAN_COLORS = ['#4a90d9', '#d97a4a', '#5cb85c', '#b05cd9', '#d9c84a', '#4ad9c8', '#d94a7a', '#8a8a8a'];
 
@@ -35,7 +35,9 @@ export class Editor {
   selDivs = new Set<string>(); // floorId|segId|k
   pickMode: PickMode = 'wall';
   private anchor: string | null = null;
-  activePlan: Record<'structure' | 'floorplan' | 'floorarea', string | null> = { structure: null, floorplan: null, floorarea: null };
+  activePlan: Record<'structure' | 'floorplan', string | null> = { structure: null, floorplan: null };
+  /** Structure tab: editing the walls or the floor area of the structure plan (both are always shown). */
+  structEdit: 'walls' | 'area' = 'walls';
   activeDesign: Record<DesignMode, string | null> = { openings: null, niches: null, balconies: null, walls: null, pilasters: null };
   selBorders = new Set<string>(); // floorId|segId|k
   selElements = new Set<string>(); // placement ids
@@ -83,7 +85,6 @@ export class Editor {
     for (const id of [...this.selFloors]) if (!fids.has(id)) this.selFloors.delete(id);
     if (!this.b.plans.some(pl => pl.id === this.activePlan.structure)) this.activePlan.structure = this.b.plans[0]?.id ?? null;
     if (!this.b.interiorPlans.some(pl => pl.id === this.activePlan.floorplan)) this.activePlan.floorplan = this.b.interiorPlans[0]?.id ?? null;
-    if (!this.b.areaPlans.some(pl => pl.id === this.activePlan.floorarea)) this.activePlan.floorarea = this.b.areaPlans[0]?.id ?? null;
     const pids = new Set(this.b.placements.map(x => x.id));
     for (const id of [...this.selElements]) if (!pids.has(id)) this.selElements.delete(id);
     saveProject(this.p);
@@ -183,8 +184,10 @@ export class Editor {
       if (!list.some(x => x.id === this.activeDesign[m])) this.activeDesign[m] = list[0]?.id ?? null;
       setupDesignMode(this, m);
     } else {
+      const ed = this;
       this.planner = new Planner(this.center, {
-        getPlan: () => this.plan(),
+        getPlan: () => this.editPlan(),
+        floorGuide: () => this.floorGuide(),
         getGhost: () => this.ghostPlan(),
         links: () => this.ghostLinks(),
         allowed: () => (this.mode === 'floorplan' ? this.allowedArea() : null),
@@ -194,19 +197,34 @@ export class Editor {
         commit: () => this.commit(),
         toast,
         selectionChanged: () => this.renderRight(),
-        area: m === 'floorarea',
+        get area() { return ed.editingArea(); },
         freeLines: m === 'structure',
         stairRise: () => this.stairRise(),
         rooms: m === 'floorplan' ? () => { const pl = this.plan(); return pl ? roomFaces(this.b, pl) : []; } : undefined,
         snapPlans: () => this.areaRefs(),
       });
-      if (m === 'floorarea') this.planner.tool = 'draw';
     }
     this.refresh();
   }
 
-  plans(): StructurePlan[] { return this.mode === 'floorplan' ? this.b.interiorPlans : this.mode === 'floorarea' ? this.b.areaPlans : this.b.plans; }
-  private planKey(): 'structure' | 'floorplan' | 'floorarea' { return this.mode === 'floorplan' ? 'floorplan' : this.mode === 'floorarea' ? 'floorarea' : 'structure'; }
+  plans(): StructurePlan[] { return this.mode === 'floorplan' ? this.b.interiorPlans : this.b.plans; }
+  private planKey(): 'structure' | 'floorplan' { return this.mode === 'floorplan' ? 'floorplan' : 'structure'; }
+  /** Structure tab, editing the floor area (not the walls). */
+  editingArea() { return this.mode === 'structure' && this.structEdit === 'area'; }
+  /** What the planner edits: the plan, or the structure plan's floor area. */
+  editPlan(): StructurePlan | null { return this.editingArea() ? this.plan()?.area ?? null : this.plan(); }
+  /** Floor surface drawn under the walls: the structure's floor area (null: automatic, inside the walls). */
+  floorGuide(): StructurePlan | null {
+    if (this.mode === 'floorplan') return this.refStructure()?.area ?? null;
+    return this.editingArea() ? null : this.plan()?.area ?? null;
+  }
+  setStructEdit(e: 'walls' | 'area') {
+    if (this.structEdit === e) return;
+    this.structEdit = e;
+    const pn = this.planner;
+    if (pn) { pn.head = null; pn.selPoints.clear(); pn.selSegs.clear(); pn.selObj = null; if (pn.tool === 'carve' && e === 'walls') pn.tool = 'select'; }
+    this.refresh();
+  }
   /** How high stairs in the active floor plan climb: from its (first) floor to the next main floor. */
   stairRise(): number {
     const pl = this.plan(), b = this.b;
@@ -238,10 +256,13 @@ export class Editor {
   wshape(): WallShape | null { return this.b.wallShapes.find(s => s.id === this.activeDesign.walls) ?? null; }
   pshape(): PilasterShape | null { return this.b.pilasterShapes.find(s => s.id === this.activeDesign.pilasters) ?? null; }
 
-  /** Floor planner: external-wall plan of the first floor this floor plan is used on. */
-  private refStructure(): StructurePlan | null {
+  /** Floor planner: the structure plan (walls + floor area) this floor plan is drawn in. */
+  refStructure(): StructurePlan | null {
     const pl = this.plan();
-    const fid = pl ? this.b.floors.find(f => pl.floorIds.includes(f.id))?.id : undefined;
+    if (!pl) return null;
+    const s = this.b.plans.find(x => x.id === pl.structureId);
+    if (s) return s;
+    const fid = this.b.floors.find(f => pl.floorIds.includes(f.id))?.id;
     return fid ? planForFloor(this.b, fid) ?? null : null;
   }
   private allowedArea(): V2[][] | null {
@@ -254,7 +275,7 @@ export class Editor {
     const pl = this.plan();
     if (!pl) return null;
     if (this.mode === 'floorplan') return this.refStructure();
-    if (this.mode === 'floorarea') { const i = this.areaFloor(); return i >= 0 ? planForFloor(this.b, this.b.floors[i].id) ?? null : null; }
+    if (this.editingArea()) return pl; // the walls, as a guide for the floor area
     const idx = this.b.floors.findIndex(f => pl.floorIds.includes(f.id));
     if (idx > 0) return planForFloor(this.b, this.b.floors[idx - 1].id) ?? null;
     if (idx < 0 && this.b.topPlanId === pl.id) return planForFloor(this.b, this.b.floors[this.b.floors.length - 1].id) ?? null;
@@ -263,7 +284,7 @@ export class Editor {
 
   planColor(pl: StructurePlan | null | undefined) {
     if (!pl) return 'transparent';
-    const list = this.b.plans.includes(pl) ? this.b.plans : this.b.interiorPlans.includes(pl) ? this.b.interiorPlans : this.b.areaPlans;
+    const list = this.b.plans.includes(pl) ? this.b.plans : this.b.interiorPlans;
     return PLAN_COLORS[list.indexOf(pl) % PLAN_COLORS.length];
   }
 
@@ -296,7 +317,8 @@ export class Editor {
     if (e.key === 'd') this.setTool('draw');
     if (e.key === 's') this.setTool('select');
     if (e.key === 'm') this.setTool('move');
-    if (e.key === 'c' && this.mode === 'floorarea') this.setTool('carve');
+    if (e.key === 'c' && this.editingArea()) this.setTool('carve');
+    if (e.key === 'a' && this.mode === 'structure') this.setStructEdit(this.structEdit === 'area' ? 'walls' : 'area');
   };
   setTool(t: Tool) {
     if (!this.planner) return;
@@ -338,7 +360,7 @@ export class Editor {
     put(this.header, 
       h('button', { onclick: () => this.onBack() }, '← Projects'),
       nameIn,
-      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('floorarea', 'Floor areas'), tab(this.designKind, 'Shape'), tab('decos', 'Design')),
+      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab(this.designKind, 'Shape'), tab('decos', 'Design')),
       this.mode === 'view' ? vm : null,
       this.mode === 'view' ? h('label', { class: 'chk', title: 'Show the building-area outline and floor lines' }, area, 'Area lines') : null,
       h('div', { class: 'spacer' }),
@@ -362,12 +384,12 @@ export class Editor {
     }
     this.selWalls.clear(); this.selDivs.clear();
     // in a planner, show the plan the clicked floor uses
-    if ((this.mode === 'structure' || this.mode === 'floorplan' || this.mode === 'floorarea') && this.selFloors.has(id)) {
-      const pl = this.mode === 'structure' ? planForFloor(this.b, id) : this.mode === 'floorplan' ? interiorForFloor(this.b, id) : areaForFloor(this.b, id);
+    if ((this.mode === 'structure' || this.mode === 'floorplan') && this.selFloors.has(id)) {
+      const pl = this.mode === 'structure' ? planForFloor(this.b, id) : interiorForFloor(this.b, id);
       if (pl && pl.id !== this.plan()?.id) {
         this.setActivePlan(pl.id);
         if (this.planner) { this.planner.head = null; this.planner.selPoints.clear(); this.planner.selSegs.clear(); this.planner.selObj = null; }
-      } else if (!pl) toast(`Floor ${floorLabel(this.b, this.b.floors.findIndex(f => f.id === id))} has no ${this.mode === 'structure' ? 'structure plan' : this.mode === 'floorplan' ? 'floor plan' : 'floor-area plan (its floor is automatic)'} yet: pick one in the floor panel or press Edit`);
+      } else if (!pl) toast(`Floor ${floorLabel(this.b, this.b.floors.findIndex(f => f.id === id))} has no ${this.mode === 'structure' ? 'structure plan' : 'floor plan'} yet: pick one in the floor panel or press Edit`);
     }
     this.refresh();
   }
@@ -486,10 +508,9 @@ export class Editor {
       h('label', {}, one ? 'Height (m)' : 'Height of each (m)', hin),
       planPicker(p.plans, 'Structure plan'),
       planPicker(p.interiorPlans, 'Floor plan'),
-      planPicker(p.areaPlans, 'Floor area'),
       h('div', { class: 'row' }, this.floorToggle(sel, 'hasFloor', 'Floor'),
         sel.some(f => f === p.floors[p.floors.length - 1]) ? this.floorToggle(sel.filter(f => f === p.floors[p.floors.length - 1]), 'hasCeiling', 'Roof') : null,
-        h('button', { title: 'Draw where this floor has floor: lines enclose shapes, carve the ones without floor', onclick: () => this.editFloorIn('floorarea', sel[0].id) }, 'Edit floor area')),
+        h('button', { title: 'Draw where this floor has floor: lines enclose shapes, carve the ones without floor', onclick: () => this.editFloorIn('area', sel[0].id) }, 'Edit floor area')),
       one ? h('div', { class: 'muted small' }, `Starts at ${fmt(elevation(p, idx[0]))} m`) : null,
       h('div', { class: 'row' },
         h('button', { onclick: () => this.editFloorIn('structure', sel[0].id) }, 'Edit structure'),
@@ -506,7 +527,7 @@ export class Editor {
             const groundId = p.floors[p.ground].id;
             const removedBelow = idx.filter(i => i < p.ground).length;
             p.floors = p.floors.filter(f => !ids.includes(f.id));
-            [...p.plans, ...p.interiorPlans, ...p.areaPlans].forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.includes(id))));
+            [...p.plans, ...p.interiorPlans].forEach(pl => (pl.floorIds = pl.floorIds.filter(id => !ids.includes(id))));
             const gi = p.floors.findIndex(f => f.id === groundId);
             p.ground = gi >= 0 ? gi : clamp(p.ground - removedBelow, 0, p.floors.length - 1);
             this.selFloors.clear();
@@ -595,25 +616,24 @@ export class Editor {
    * Jump to the structure / floor planner for a floor: opens the plan used by that floor
    * (creating a floor plan for it if it has none) and selects the given wall.
    */
-  editFloorIn(mode: 'structure' | 'floorplan' | 'floorarea', floorId: string, segId?: string) {
-    const b = this.b;
-    let pl = mode === 'structure' ? planForFloor(b, floorId) : mode === 'floorplan' ? interiorForFloor(b, floorId) : areaForFloor(b, floorId);
+  editFloorIn(target: 'structure' | 'floorplan' | 'area', floorId: string, segId?: string) {
+    const b = this.b, fi = b.floors.findIndex(f => f.id === floorId);
+    const structure = planForFloor(b, floorId);
+    if (target === 'area' && !structure) return toast(`Floor ${floorLabel(b, fi)} has no structure plan: its floor area belongs to one. Assign one first.`);
+    if (target === 'floorplan' && !structure) return toast(`Floor ${floorLabel(b, fi)} has no structure plan: a floor plan is drawn inside a floor structure (walls + floor area). Make one first.`);
+    const mode = target === 'floorplan' ? 'floorplan' : 'structure';
+    let pl = mode === 'structure' ? structure : interiorForFloor(b, floorId);
     if (!pl) {
       this.begin();
-      if (mode === 'floorarea') {
-        // start from what the floor has now (the automatic floor), as lines you can change
-        pl = newAreaPlan(`Floor area ${b.areaPlans.length + 1}`, [floorId]);
-        addLoops(pl, autoFloorAreas(b, b.floors.findIndex(f => f.id === floorId)));
-        b.areaPlans.push(pl);
-      } else {
-        pl = mode === 'structure' ? newPlan(`Plan ${b.plans.length + 1}`, [floorId]) : newInteriorPlan(`Floor plan ${b.interiorPlans.length + 1}`);
-        if (mode === 'floorplan') pl.floorIds = [floorId];
-        (mode === 'structure' ? b.plans : b.interiorPlans).push(pl);
-      }
+      pl = mode === 'structure' ? newPlan(`Plan ${b.plans.length + 1}`, [floorId]) : newInteriorPlan(`Floor plan ${b.interiorPlans.length + 1}`);
+      if (mode === 'floorplan') { pl.floorIds = [floorId]; pl.structureId = structure!.id; }
+      (mode === 'structure' ? b.plans : b.interiorPlans).push(pl);
       saveProject(this.p);
     }
+    if (target === 'area' && !pl.area) this.startArea(pl);
     this.activePlan[mode] = pl.id;
     this.selFloors = new Set([floorId]);
+    if (mode === 'structure') this.structEdit = target === 'area' ? 'area' : 'walls';
     this.setMode(mode);
     if (segId && this.planner) {
       this.planner.tool = 'select';
@@ -678,7 +698,8 @@ export class Editor {
   // ---- structure / floor planner panel ----
   private renderPlanPanel() {
     if (!this.planner) return;
-    const p = this.b, pl = this.plan(), pn = this.planner, interior = this.mode === 'floorplan', area = this.mode === 'floorarea';
+    const p = this.b, pn = this.planner, interior = this.mode === 'floorplan', area = this.editingArea();
+    const sp = this.plan(), pl = this.editPlan(); // the structure / floor plan, and what is being drawn (it, or its floor area)
     const list = this.plans();
     const floorIdx = (x: StructurePlan) => p.floors.map((f, i) => (x.floorIds.includes(f.id) ? i : -1)).filter(i => i >= 0);
     const plansEl = h('div', { class: 'plans' }, ...list.map(x => h('div', {
@@ -688,13 +709,19 @@ export class Editor {
     }, x.name, h('span', { class: 'muted small' }, ` ${formatRanges(p, floorIdx(x)) || 'no floors'}${p.topPlanId === x.id ? ' + Top' : ''}`))));
 
     const body: (Node | null)[] = [];
-    if (pl) {
+    if (area && sp && !pl) {
+      body.push(
+        h('div', { class: 'muted small help' }, `No floor area is drawn for ${sp.name}: its floors get their floor automatically, everywhere inside the walls (blue).`),
+        h('button', { class: 'primary', title: 'Start from the automatic floor, as lines you can change, add to and carve', onclick: () => this.startArea(sp) }, 'Draw floor area'),
+      );
+    }
+    if (pl && sp) {
       const ranges = h('input', {
-        value: formatRanges(p, floorIdx(pl)), placeholder: 'e.g. 0-3, 5, 8-20',
+        value: formatRanges(p, floorIdx(sp)), placeholder: 'e.g. 0-3, 5, 8-20',
         onchange: () => {
           const idx = parseRanges(ranges.value, p);
           if (!idx) { toast('Use floor numbers and ranges, e.g. 0-3, 5, 8-20'); return this.refresh(); }
-          this.assign(pl, idx.map(i => p.floors[i].id));
+          this.assign(sp, idx.map(i => p.floors[i].id));
         },
       });
       const topCb = h('input', { type: 'checkbox', checked: p.topPlanId === pl.id, onchange: () => this.mutate(() => (p.topPlanId = topCb.checked ? pl.id : null)) });
@@ -702,10 +729,10 @@ export class Editor {
       const help: Record<Tool, string> = {
         draw: 'Click to add points; each new point connects to the previous one. Click an existing point to connect to it (closing a loop) and continue from there. Enter, Space or Esc ends the chain: the next point starts a new, unconnected one. A point with no walls (orange ring) builds nothing; delete stray ones in Select mode.'
           + (interior ? '' : ' Walls may cross: a point is made where they do, splitting both.')
-          + (interior ? ' Internal walls must stay inside the external walls (orange dashed).' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
+          + (interior ? ' Internal walls must stay inside the walls of its floor structure (orange); its floor area shows in blue.' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
         select: 'Click points or walls to select (Shift = add), or right-drag a box around them; drag one of several selected points to move them all. Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
         move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
-        stairs: 'Draw the stairs from the bottom step up: click where they start, click at each turn, then double-click or press Enter at the top (Shift keeps a flight straight). Each leg is a flight of steps, each corner a landing; to turn back, draw a short leg across and then back. The arrows show the way up. The stairs climb to the floor above whatever is there: carve an opening in Floor areas where you want one.',
+        stairs: 'Draw the stairs from the bottom step up: click where they start, click at each turn, then double-click or press Enter at the top (Shift keeps a flight straight). Each leg is a flight of steps, each corner a landing; to turn back, draw a short leg across and then back. The arrows show the way up. The stairs climb to the floor above whatever is there: carve an opening in the floor area of the structure above (Structure tab → Floor area) where you want one.',
         spiral: 'Click inside the building to place a spiral staircase: it winds up around a post from the green dot (UP) to the next floor. Select it to change its diameter and direction.',
         elevator: 'Click inside the building to place an elevator shaft.',
         carve: 'Click a shape to carve it out (no floor there); click a carved shape to give it its floor back.',
@@ -742,25 +769,32 @@ export class Editor {
           h('div', { class: 'muted small help' }, help[pn.tool]),
           h('div', { class: 'row' }, h('button', { onclick: () => pn.resetView() }, 'Reset zoom'), h('span', { class: 'muted small' }, 'Wheel zooms · middle-drag pans · right-drag: box select')),
           pn.tool === 'move' ? this.transformBox() : null,
-          h('div', { class: 'box-title' }, 'Applies to floors'),
-          ranges,
-          h('div', { class: 'row' },
-            h('button', { onclick: () => this.assign(pl, p.floors.map(f => f.id)) }, 'All'),
-            h('button', { onclick: () => this.assign(pl, []) }, 'None'),
-            h('button', { disabled: !this.selFloors.size, title: 'Floors selected in the floor bar', onclick: () => this.assign(pl, [...pl.floorIds, ...this.selFloors]) }, '+ Selected floors'),
-          ),
+          h('div', { class: 'muted small' }, `The floor area of ${sp.name}: used on its floors (${formatRanges(p, floorIdx(sp)) || 'none yet'}). The walls are shown in orange as a guide.`),
           h('div', { class: 'row' },
             h('button', {
               disabled: !this.areaRefs().length, title: 'Add the lines of the walls (this floor and the floor below) to trace and carve',
               onclick: () => this.mutate(() => addLoops(pl, [], this.areaRefs().flatMap(r => r.segments.map(sg => sampleSeg(r, sg))))),
             }, 'Add lines from the walls'),
             h('button', { disabled: !(pl.carved ?? []).length, onclick: () => this.mutate(() => (pl.carved = [])) }, 'Restore all'),
+            h('button', { title: 'Remove the drawn floor area: the floors get their floor automatically, inside the walls', onclick: async () => { if (await askConfirm(`Remove the floor area of ${sp.name}? Its floors get their floor automatically again.`, 'Remove')) this.mutate(() => (sp.area = null)); } }, 'Back to automatic'),
           ),
-          h('div', { class: 'muted small' }, 'Floors without a floor-area plan get their floor automatically from their walls. The Floor switch in the floor panel still turns a floor off completely.'),
+          h('div', { class: 'muted small' }, 'The Floor switch in the floor panel still turns a single floor off completely.'),
         );
       }
       if (area) { /* panel built above */ } else {
-      if (interior && !this.refStructure()) body.push(h('div', { class: 'warn' }, 'Assign this floor plan to floors that have external walls (a structure plan) first; internal walls can only go inside them.'));
+      if (interior) {
+        const st = h('select', {
+          onchange: () => this.mutate(() => {
+            const s2 = p.plans.find(x => x.id === st.value);
+            if (!s2) return;
+            pl.structureId = s2.id;
+            pl.floorIds = pl.floorIds.filter(id => s2.floorIds.includes(id)); // only floors built with that structure
+          }),
+        }, ...p.plans.map(x => h('option', { value: x.id }, x.name)));
+        st.value = this.refStructure()?.id ?? '';
+        body.push(h('label', { title: 'The walls and floor area this floor plan is drawn in (shown as a guide)' }, 'Floor structure', st));
+        if (!this.refStructure()) body.push(h('div', { class: 'warn' }, 'Choose the floor structure (walls + floor area) this floor plan is drawn in.'));
+      }
       body.push(
         h('div', { class: 'box-title' }, 'Tool'),
         h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('move', 'Move all (M)'),
@@ -793,14 +827,32 @@ export class Editor {
       }
     }
 
+    // structure: what is being edited (both are always shown)
+    const editBtn = (e: 'walls' | 'area', label: string, title: string) => h('button', { class: this.structEdit === e ? 'tab active' : 'tab', title, onclick: () => this.setStructEdit(e) }, label);
+    const editRow = interior ? null : h('div', { class: 'row edit-switch' }, h('span', { class: 'muted small' }, 'Edit'),
+      editBtn('walls', 'Walls', 'Draw the external walls (A switches)'), editBtn('area', 'Floor area', 'Draw where the floors have floor: lines enclose shapes, carve the ones without (A switches)'));
+    // floor plans start from a floor structure
+    const newIn = interior ? h('select', { title: 'The floor structure (walls + floor area) the new floor plan is drawn in' },
+      ...p.plans.map(x => h('option', { value: x.id }, x.name))) as HTMLSelectElement : null;
+    if (newIn) newIn.value = this.refStructure()?.id ?? (p.floors.map(f => planForFloor(p, f.id)).find(Boolean)?.id ?? p.plans[0]?.id ?? '');
     this.right.innerHTML = '';
-    put(this.right, 
-      h('div', { class: 'box-title' }, area ? 'Floor-area plans (where floors have floor)' : interior ? 'Floor plans (internal walls)' : 'Structure plans (external walls)'),
+    put(this.right,
+      editRow,
+      h('div', { class: 'box-title' }, interior ? 'Floor plans (internal walls)' : 'Structure plans (walls + floor area)'),
       plansEl,
+      interior ? h('div', { class: 'row' }, h('span', { class: 'muted small' }, 'New floor plan in'), newIn) : null,
       h('div', { class: 'row' },
         h('button', {
+          disabled: interior && !p.plans.length, title: interior ? 'A floor plan is drawn inside a floor structure: choose it first' : '',
           onclick: () => this.mutate(() => {
-            const np = area ? newAreaPlan(`Floor area ${list.length + 1}`) : interior ? newInteriorPlan(`Floor plan ${list.length + 1}`) : newPlan(`Plan ${list.length + 1}`);
+            let np: StructurePlan;
+            if (interior) {
+              const s2 = p.plans.find(x => x.id === newIn!.value);
+              if (!s2) return toast('Make a structure plan first: a floor plan is drawn inside one');
+              np = newInteriorPlan(`Floor plan ${list.length + 1}`);
+              np.structureId = s2.id;
+              np.floorIds = s2.floorIds.filter(id => !interiorForFloor(p, id)); // its floors that have no floor plan yet
+            } else np = newPlan(`Plan ${list.length + 1}`);
             list.push(np); this.setActivePlan(np.id);
           }),
         }, 'New'),
@@ -890,8 +942,27 @@ export class Editor {
     );
   }
 
+  /** Gives a structure plan a drawn floor area, starting from the automatic floor of its first floor. */
+  startArea(sp: StructurePlan) {
+    if (sp.area) return;
+    const i = this.b.floors.findIndex(f => sp.floorIds.includes(f.id));
+    this.mutate(() => {
+      const ap = newAreaPlan(`${sp.name} floor area`);
+      if (i >= 0) addLoops(ap, autoFloorAreas(this.b, i));
+      sp.area = ap;
+    });
+    if (this.planner) this.planner.tool = 'draw';
+    this.structEdit = 'area';
+    this.refresh();
+  }
   assign(pl: StructurePlan, ids: string[]) {
     const list = this.plans();
+    const st = list === this.b.interiorPlans ? this.b.plans.find(x => x.id === pl.structureId) : undefined;
+    if (st) {
+      const off = ids.filter(id => !st.floorIds.includes(id));
+      if (off.length) toast(`Only floors built with ${st.name} can use this floor plan (it is drawn inside those walls)`);
+      ids = ids.filter(id => st.floorIds.includes(id));
+    }
     this.mutate(() => {
       const set = new Set(ids);
       list.forEach(o => (o.floorIds = o.floorIds.filter(id => !set.has(id))));

@@ -94,7 +94,7 @@ export function autoFloorAreas(b: Building, i: number): V2[][] {
  */
 export function roomFaces(b: Building, ip: StructurePlan): { poly: V2[]; area: number; filled: boolean }[] {
   const fid = b.floors.find(f => ip.floorIds.includes(f.id))?.id;
-  const ext = fid ? planForFloor(b, fid) : undefined;
+  const ext = b.plans.find(pl => pl.id === ip.structureId) ?? (fid ? planForFloor(b, fid) : undefined);
   const key = 'rooms:' + JSON.stringify([ext?.points, ext?.segments.map(s => [s.a, s.b]), ip.points, ip.segments.map(s => [s.a, s.b])]);
   let polys = roomCache.get(key);
   if (!polys) {
@@ -117,7 +117,8 @@ export function roomFaces(b: Building, ip: StructurePlan): { poly: V2[]; area: n
 }
 const roomCache = new Map<string, V2[][]>();
 
-export const areaForFloor = (b: Building, floorId: string) => b.areaPlans.find(pl => pl.floorIds.includes(floorId)) ?? null;
+/** A floor's floor area: the one drawn in its structure plan (none: automatic, inside the walls). */
+export const areaForFloor = (b: Building, floorId: string) => planForFloor(b, floorId)?.area ?? null;
 /** A region of the plan: outer ring (counter-clockwise) and holes. */
 export type Region = { outer: V2[]; holes: V2[][] };
 const regionCache = new Map<string, Region[]>();
@@ -155,7 +156,7 @@ export function floorRegions(b: Building, i: number): Region[] {
   if (!f) return [];
   const ap = areaForFloor(b, f.id);
   const base = ap ? areaPlanRegions(ap) : unionRegions(autoFloorAreas(b, i));
-  return base; // (stairs do not cut the floor above: carve an opening in Floor areas where you want one)
+  return base; // (stairs do not cut the floor above: carve an opening in the structure's floor area where you want one)
 }
 function regionsMinus(base: Region[], holes: V2[][]): Region[] {
   const key = 'minus:' + JSON.stringify([base, holes]);

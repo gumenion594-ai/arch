@@ -67,7 +67,7 @@ function newProjectDialog() {
   buildingDialog({
     title: 'New building project', nameLabel: 'Project name', defaultName: 'Untitled building',
     onCreate: (spec, name, template) => {
-      const p = template === 'villa' ? dressVilla(sampleProject()) : template === 'block' ? blockProject(name) : template === 'house' ? houseProject(name) : createProject(name, { ...spec, name });
+      const p = normalize(template === 'villa' ? dressVilla(sampleProject()) : template === 'block' ? blockProject(name) : template === 'house' ? houseProject(name) : createProject(name, { ...spec, name }));
       p.name = name; p.buildings[0].name = name;
       saveProject(p); openProject(p.id);
     },

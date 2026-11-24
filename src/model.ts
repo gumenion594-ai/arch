@@ -170,6 +170,10 @@ export interface StructurePlan {
   carved?: { x: number; y: number }[];
   /** Floor plans: marks of the rooms filled solid from floor to ceiling (e.g. a solid base). */
   filled?: { x: number; y: number }[];
+  /** Structure plans: the floor area (points / lines enclosing the floor, carved shapes without). None: automatic, inside the walls. */
+  area?: StructurePlan | null;
+  /** Floor plans: the structure plan (walls + floor area) the floor plan is drawn in. */
+  structureId?: string;
 }
 
 export interface Building {
@@ -183,7 +187,7 @@ export interface Building {
   plans: StructurePlan[];
   topPlanId: string | null; // plan at the very top of the building (roof level), no walls of its own
   interiorPlans: StructurePlan[]; // floor plans: internal walls, doors, stairs, elevators
-  /** Floor-area plans: points and lines whose enclosed shapes are the floor (unless carved); assigned to floors like structure plans. */
+  /** (older projects) separate floor-area plans; now each structure plan holds its own floor area. */
   areaPlans: StructurePlan[];
   divLen: number; // default wall division length, m
   openingShapes: OpeningShape[]; // openings and niches
@@ -371,6 +375,38 @@ export function createSite(name: string): Project {
 export const newInteriorPlan = (name: string): StructurePlan => ({ ...newPlan(name), wallThickness: 0.15, material: 'brick', floorEnabled: false });
 
 /** Plan that applies to a floor (a floor belongs to at most one plan). */
+/** Moves separate floor-area plans into the structure plans of their floors (splitting a structure plan whose floors had different floor areas). */
+export function mergeAreaPlans(b: Building) {
+  if (b.areaPlans.length) {
+    const areaOf = (fid: string) => b.areaPlans.find(a => a.floorIds.includes(fid)) ?? null;
+    for (const pl of [...b.plans]) {
+      const groups = new Map<StructurePlan | null, string[]>();
+      for (const fid of pl.floorIds) { const a = areaOf(fid); groups.set(a, [...(groups.get(a) ?? []), fid]); }
+      let first = true;
+      for (const [a, fids] of groups) {
+        const area = a ? { ...JSON.parse(JSON.stringify(a)), id: uid(), floorIds: [] } : null;
+        if (first) { pl.floorIds = fids; pl.area = area; first = false; continue; }
+        const twin: StructurePlan = { ...JSON.parse(JSON.stringify(pl)), id: uid(), name: a ? `${pl.name} – ${a.name.toLowerCase()}` : `${pl.name} – automatic floor`, floorIds: fids, area };
+        b.plans.splice(b.plans.indexOf(pl) + 1, 0, twin);
+      }
+    }
+    b.areaPlans = [];
+  }
+  // floor plans belong to one floor structure: one used with several is split, one per structure
+  for (const ip of [...b.interiorPlans]) {
+    if (ip.structureId && b.plans.some(pl => pl.id === ip.structureId)) continue;
+    const groups = new Map<string, string[]>();
+    for (const fid of ip.floorIds) { const sid = planForFloor(b, fid)?.id ?? ''; groups.set(sid, [...(groups.get(sid) ?? []), fid]); }
+    let first = true;
+    for (const [sid, fids] of groups) {
+      if (first) { ip.floorIds = fids; ip.structureId = sid || b.plans[0]?.id; first = false; continue; }
+      const st = b.plans.find(pl => pl.id === sid);
+      const twin: StructurePlan = { ...JSON.parse(JSON.stringify(ip)), id: uid(), name: `${ip.name} (${st?.name ?? 'other'})`, floorIds: fids, structureId: sid || b.plans[0]?.id };
+      b.interiorPlans.splice(b.interiorPlans.indexOf(ip) + 1, 0, twin);
+    }
+    if (first) ip.structureId = b.plans[0]?.id;
+  }
+}
 export const planForFloor = (b: Building, floorId: string) => b.plans.find(pl => pl.floorIds.includes(floorId));
 
 /**
@@ -424,6 +460,7 @@ export function normalize(p: Project): Project {
       b.areaPlans.push(pl);
       delete f.mask;
     }
+    mergeAreaPlans(b);
     b.divLen ??= 3;
     b.balconyShapes ??= defaultBalconyShapes();
     b.wallShapes ??= defaultWallShapes();

@@ -27,6 +27,8 @@ export interface PlannerHost {
   freeLines?: boolean;
   /** Floor plans: the rooms (closed by the external and internal walls), smallest first, and which are filled solid. */
   rooms?(): { poly: V2[]; area: number; filled: boolean }[];
+  /** The floor surface drawn under the walls (a structure's floor area); null: automatic, inside the walls. */
+  floorGuide?(): StructurePlan | null;
   /** Floor plans: how high stairs climb here (to the next main floor), for their layout. */
   stairRise?(): number;
 }
@@ -535,6 +537,25 @@ export class Planner {
   }
 
   // ---- drawing ----
+  /** A floor area's shapes: floor (blue) / carved (dark, hatched); largest first so shapes inside others paint over them. */
+  private drawAreaFaces(plan: StructurePlan, alpha: number, hov: { poly: V2[] } | null) {
+    const g = this.ctx, w = this.host.clientWidth, hh = this.host.clientHeight;
+    for (const f of areaFaces(plan)) {
+      g.beginPath();
+      f.poly.forEach((v, i) => { const s = this.toScreen(v); i ? g.lineTo(s.x, s.y) : g.moveTo(s.x, s.y); });
+      g.closePath();
+      g.fillStyle = f.carved ? `rgba(20,20,20,${Math.min(1, alpha * 2)})` : `rgba(58,123,213,${alpha})`;
+      g.fill();
+      if (f.carved) {
+        g.save(); g.clip();
+        g.strokeStyle = `rgba(217,90,74,${alpha + 0.1})`; g.lineWidth = 1;
+        for (let x = -hh; x < w; x += 10) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x + hh, hh); g.stroke(); }
+        g.restore();
+      }
+      if (hov && samePoly(hov.poly, f.poly)) { g.strokeStyle = '#ffd400'; g.lineWidth = 3; g.stroke(); }
+    }
+  }
+
   draw() {
     const c = this.canvas, dpr = window.devicePixelRatio || 1;
     const w = this.host.clientWidth, hh = this.host.clientHeight;
@@ -560,22 +581,41 @@ export class Planner {
     g.fillText(`${fmt(this.h.baseLength())} m`, b.x0 + b.s / 2 - 16, b.y0 + b.s + 14);
 
     const plan = this.h.getPlan();
-    if (!plan) { g.fillStyle = '#aaa'; g.fillText(this.h.area ? 'No floor-area plan selected: floors get their floor from their walls. Press New, or Edit floor area on a floor.' : 'No structure plan selected', b.x0 + 10, b.y0 + 20); return; }
-    const pts = new Map(plan.points.map(p => [p.id, p]));
     const path = (poly: V2[]) => {
       g.beginPath();
       poly.forEach((v, i) => { const q = this.toScreen(v); i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); });
     };
-
-    // ghost of the plan below
     const ghost = this.h.getGhost();
+    const guide = this.h.area ? null : this.h.floorGuide?.() ?? null;
+    // the floor surface (always shown): a drawn floor area under the walls, faint
+    if (guide) this.drawAreaFaces(guide, 0.22, null);
+    else if (!this.h.area && this.h.rooms && ghost) { // floor plan with an automatic floor: everywhere inside the structure's walls
+      g.fillStyle = 'rgba(58,123,213,0.14)';
+      for (const f of enclosedFaces(ghost)) { path(f); g.closePath(); g.fill(); }
+    }
+    if (this.h.area && !plan && ghost) { // no drawn floor area: the automatic floor inside the walls
+      g.fillStyle = 'rgba(58,123,213,0.3)';
+      for (const f of enclosedFaces(ghost)) { path(f); g.closePath(); g.fill(); }
+    }
+
+    // ghost of the plan below / the walls this is drawn in
     if (ghost && ghost !== plan) {
-      g.strokeStyle = this.h.area ? 'rgba(255,160,96,0.8)' : 'rgba(255,160,96,0.45)'; g.lineWidth = this.h.area ? 2 : 1; g.setLineDash(this.h.area ? [] : [3, 3]);
+      if (this.h.area || this.h.rooms) {
+        // the structure's walls, with their thickness, as the guide
+        const t = Math.max(2, (ghost.wallThickness / this.h.baseLength()) * b.s);
+        g.lineCap = 'round';
+        g.strokeStyle = this.h.area ? 'rgba(255,160,96,0.35)' : 'rgba(255,160,96,0.22)'; g.lineWidth = t;
+        for (const s of ghost.segments) { path(sampleSeg(ghost, s)); g.stroke(); }
+        g.lineCap = 'butt';
+      }
+      g.strokeStyle = this.h.area ? 'rgba(255,160,96,0.85)' : 'rgba(255,160,96,0.5)'; g.lineWidth = this.h.area ? 2 : 1; g.setLineDash(this.h.area || this.h.rooms ? [] : [3, 3]);
       for (const s of ghost.segments) { path(sampleSeg(ghost, s)); g.stroke(); }
       g.setLineDash([]);
       g.fillStyle = 'rgba(255,160,96,0.5)';
       for (const p of ghost.points) { const q = this.toScreen(p); g.fillRect(q.x - 2, q.y - 2, 4, 4); }
     }
+    if (!plan) { g.fillStyle = '#aaa'; g.fillText(this.h.area ? 'No floor area drawn: the floors get their floor automatically inside the walls. Press Draw floor area.' : 'No plan selected', b.x0 + 10, b.y0 + 20); return; }
+    const pts = new Map(plan.points.map(p => [p.id, p]));
 
     // connections from the plan below (walls that connect up instead of going straight)
     const links = this.h.links?.() ?? [];
@@ -587,23 +627,8 @@ export class Planner {
 
     // enclosed areas
     if (this.h.area) {
-      // floor (blue) / carved (dark, hatched); largest first so shapes inside others paint over them
-      const hov = this.tool === 'carve' && this.hover ? faceAt(areaFaces(plan), this.hover) : null;
-      for (const f of areaFaces(plan)) {
-        g.beginPath();
-        f.poly.forEach((v, i) => { const s = this.toScreen(v); i ? g.lineTo(s.x, s.y) : g.moveTo(s.x, s.y); });
-        g.closePath();
-        g.fillStyle = f.carved ? '#232323' : 'rgba(58,123,213,0.45)';
-        g.fill();
-        if (f.carved) {
-          g.save(); g.clip();
-          g.strokeStyle = 'rgba(217,90,74,0.55)'; g.lineWidth = 1;
-          for (let x = -hh; x < w; x += 10) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x + hh, hh); g.stroke(); }
-          g.restore();
-        }
-        if (hov && samePoly(hov.poly, f.poly)) { g.strokeStyle = '#ffd400'; g.lineWidth = 3; g.stroke(); }
-      }
-    } else {
+      this.drawAreaFaces(plan, 0.45, this.tool === 'carve' && this.hover ? faceAt(areaFaces(plan), this.hover) : null);
+    } else if (!guide && !this.h.rooms) {
       g.fillStyle = 'rgba(58,123,213,0.18)';
       for (const f of enclosedFaces(plan)) {
         g.beginPath();
