@@ -1,14 +1,15 @@
 // Three.js 3D view: ground, building-area wireframe, walls, slabs; click to pick.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Building, Design, MATERIALS, Texture, elevation, segConnect, segKind } from './model';
+import { Building, DecoDesign, Design, MATERIALS, Texture, elevation, segConnect, segKind } from './model';
 import { designObject } from './assets';
+import { decoObject } from './deco';
 import { enclosedFaces, sampleSeg, V2 } from './geometry';
 import { BuildStats, Mats, PickInfo, Selection, buildStructure, emptySelection, interiorForFloor, loftPointTarget, planAtLevel, toWorld } from './build3d';
 
 export type ViewMode = 'plan' | 'structural' | 'detailed';
 
-export interface Scene3D { id: string; buildings: Building[]; textures: Texture[]; designs?: Design[] }
+export interface Scene3D { id: string; buildings: Building[]; textures: Texture[]; designs?: Design[]; decos?: DecoDesign[] }
 export interface ViewOpts {
   activeId: string | null; // building drawn bright ('*' or null = all)
   mode: ViewMode;
@@ -269,6 +270,9 @@ export class Viewer {
       color: css => std('k' + css, () => new THREE.MeshStandardMaterial({ color: new THREE.Color(css), roughness: 0.85, side: THREE.DoubleSide })),
       deco: new THREE.MeshStandardMaterial({ color: detailed ? 0xeee8dc : 0xd0d0d0, roughness: 0.75, side: THREE.DoubleSide }),
       design: id => {
+        // a design (imported models arranged around a shape), or a single imported model (older projects)
+        const deco = id ? s.decos?.find(x => x.id === id) : undefined;
+        if (deco) return decoObject(deco, b, s.designs ?? [], () => this.onTexture?.());
         const d = id ? s.designs?.find(x => x.id === id) : undefined;
         const obj = d ? designObject(d, () => this.onTexture?.()) : null;
         if (obj && d) { obj.userData.baseFracOverride = d.baseFrac ?? undefined; obj.userData.topFracOverride = d.topFrac ?? undefined; }

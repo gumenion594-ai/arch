@@ -1,16 +1,14 @@
-// 3D-view side panel (selecting, adding elements, colours, imported designs) and the
-// design modes for openings, niches and balconies.
+// 3D-view side panel (selecting, adding elements, colours) and the Shape tab (openings, niches, balconies,
+// wall and pilaster shapes).
 import type { Editor } from './editor';
 import {
-  BalconyShape, PILASTER_REF_H, PilasterShape, WallShape, DESIGN_CATEGORIES, Design, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
-  divisionBorders, floorLabel, hasFloor, planForFloor, segColT, segDivLen, segKind, uid,
+  BalconyShape, DecoType, PILASTER_REF_H, PilasterShape, WallShape, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
+  divisionBorders, floorLabel, planForFloor, segColT, segDivLen, segKind, uid,
 } from './model';
-import { enclosedFaces, polyLength, sampleSeg } from './geometry';
-import { autoColumns, autoFloorAreas, columnRange, interiorForFloor } from './build3d';
+import { polyLength, sampleSeg } from './geometry';
+import { autoColumns, columnRange } from './build3d';
 import { Hit } from './viewer';
-import { ShapeEditor, ShapeHost, ShapeTool } from './shapeeditor';
-import { formatOf, importDesignFile, deleteAsset } from './assets';
-import { BUILTIN_DESIGNS } from './builtin';
+import { ShapeEditor, ShapeHost } from './shapeeditor';
 import { askConfirm, askText, h, num, put, toast } from './ui';
 import { fmt } from './planner';
 
@@ -127,7 +125,7 @@ export function renderViewPanel(ed: Editor) {
       h('button', { onclick: () => addModel(ed), disabled: !p.designs.some(d => d.category === 'model') , title: 'Import a 3D model in the library below first' }, 'Add 3D model'),
       h('label', { class: 'inline' }, 'Default division (m)', ed.numInput(b.divLen, v => (b.divLen = v), 0.3, 1000)),
     ),
-    libraryBox(ed),
+    h('div', { class: 'muted small' }, 'Imported 3D models and designs (frames, surrounds, column designs…): the Design tab. They show in the Detailed view.'),
     ed.reportBox(),
   );
 }
@@ -155,13 +153,13 @@ function addBox(ed: Editor, T: ReturnType<typeof targets>) {
     if (t === 'opening' || t === 'niche') b.openingShapes.filter(s => s.kind === t).forEach(s => choice.append(h('option', { value: s.id }, `${s.name} (${fmt(s.w)} × ${fmt(s.h)} m)`)));
     else if (t === 'balcony') b.balconyShapes.forEach(s => choice.append(h('option', { value: s.id }, s.name)));
     else if (t === 'pilaster') {
-      // a pilaster design (drawn in Design → Pilasters) or an imported 3D design
+      // a pilaster shape (drawn in Shape → Pilasters), or a pilaster design (Design tab)
       b.pilasterShapes.forEach(s => choice.append(h('option', { value: 's:' + s.id }, s.name)));
       choice.append(h('option', { value: '' }, 'Plain box'));
-      p.designs.filter(d => d.category === 'column').forEach(d => choice.append(h('option', { value: 'd:' + d.id }, `3D: ${d.name}`)));
+      p.decos.filter(d => d.type === 'pilaster').forEach(d => choice.append(h('option', { value: 'd:' + d.id }, `Design: ${d.name}`)));
     } else {
       choice.append(h('option', { value: '' }, 'Plain cornice'));
-      p.designs.filter(d => d.category === 'cornice').forEach(d => choice.append(h('option', { value: d.id }, d.name)));
+      p.decos.filter(d => d.type === 'cornice').forEach(d => choice.append(h('option', { value: d.id }, `Design: ${d.name}`)));
     }
   };
   typeSel.addEventListener('change', fill);
@@ -220,23 +218,31 @@ function elementBox(ed: Editor, elems: Placement[]) {
     s.value = vals.size > 1 ? '__m' : [...vals][0];
     return h('label', {}, label, s);
   };
+  // a design from the Design tab (detailed view); for shaped elements, the ones made on the same shape come first
+  const decoSel = (dt: DecoType) => {
+    const vals = new Set(elems.map(e => e.designId ?? ''));
+    const sid = one?.shapeId;
+    const list = p.decos.filter(d => d.type === dt).sort((a, c) => Number(c.shapeId === sid) - Number(a.shapeId === sid));
+    const s = h('select', { onchange: () => ed.mutate(() => elems.forEach(e => (e.designId = s.value || null))) },
+      vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null,
+      h('option', { value: '' }, 'None (plain)'), ...list.map(d => h('option', { value: d.id }, d.name + (sid && d.shapeId && d.shapeId !== sid ? ' (made on another shape)' : ''))),
+      ...p.designs.filter(d => elems.some(e => e.designId === d.id)).map(d => h('option', { value: d.id }, `${d.name} (imported model)`)));
+    s.value = vals.size > 1 ? '__m' : [...vals][0];
+    return h('label', { title: 'Designs are made in the Design tab' }, 'Design (detailed view)', s);
+  };
   const shapeSel = () => {
     const list: { id: string; name: string }[] = t === 'balcony' ? b.balconyShapes : t === 'pilaster' ? b.pilasterShapes : b.openingShapes.filter(s => s.kind === t);
     const vals = new Set(elems.map(e => e.shapeId ?? ''));
     const s = h('select', { onchange: () => ed.mutate(() => elems.forEach(e => (e.shapeId = s.value))) },
       vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null, t === 'pilaster' ? h('option', { value: '' }, 'Plain box') : null, ...list.map(x => h('option', { value: x.id }, x.name)));
     s.value = vals.size > 1 ? '__m' : [...vals][0];
-    return h('label', {}, t === 'pilaster' ? 'Pilaster design' : 'Shape', s);
+    return h('label', {}, t === 'pilaster' ? 'Pilaster shape' : 'Shape', s);
   };
   const nudge = (dx: number, dy: number) => ed.mutate(() => elems.forEach(e => { e.dx = Math.round((e.dx + dx) * 100) / 100; e.dy = Math.round((e.dy + dy) * 100) / 100; }));
   const step = 0.1;
   const box = h('div', { class: 'sub' }, h('div', { class: 'box-title' }, t ? `${TYPE_LABEL[t]}${elems.length > 1 ? 's' : ''}` : 'Elements'));
   if (t === 'opening' || t === 'niche' || t === 'balcony' || t === 'pilaster') box.append(shapeSel());
-  if (t === 'opening') box.append(designSel('frame', 'frameId', 'Frame (detailed view)', 'None'), designSel('surround', 'surroundId', 'Surround (detailed view)', 'None'));
-  if (t === 'niche') box.append(designSel('nicheDeco', 'designId', 'Decoration (detailed view)', 'None'));
-  if (t === 'cornice') box.append(designSel('cornice', 'designId', 'Cornice design', 'Plain'));
-  if (t === 'pilaster') box.append(designSel('column', 'designId', 'Imported 3D design (detailed view, replaces the drawn one)', 'None'));
-  if (t === 'balcony') box.append(designSel('balcony', 'designId', 'Balcony design', 'Plain platform'));
+  if (t === 'opening' || t === 'niche' || t === 'cornice' || t === 'pilaster' || t === 'balcony') box.append(decoSel(t));
   if (t === 'model' && one) {
     const pos = one.pos ?? { x: 0, y: 0, z: 0 };
     const f = (label: string, get: () => number, set: (v: number) => void) => h('label', {}, label, ed.numInput(get(), set, -10000, 10000, true));
@@ -388,76 +394,6 @@ function addModel(ed: Editor) {
   ed.refresh();
 }
 
-/** Imported 3D designs, by category. */
-function libraryBox(ed: Editor) {
-  const p = ed.p;
-  const cat = h('select', {}, ...Object.entries(DESIGN_CATEGORIES).map(([k, v]) => h('option', { value: k }, v)));
-  cat.value = ed.libCategory;
-  cat.addEventListener('change', () => (ed.libCategory = cat.value as DesignCategory));
-  const file = h('input', { type: 'file', accept: '.glb,.gltf,.obj,.stl', style: 'display:none' });
-  file.addEventListener('change', async () => {
-    const f = file.files?.[0];
-    file.value = '';
-    if (!f) return;
-    const format = formatOf(f.name);
-    if (!format) return toast('Use a .glb, .gltf (self-contained), .obj or .stl file');
-    const d: Design = { id: uid(), name: f.name.replace(/\.[^.]+$/, ''), category: cat.value as DesignCategory, format };
-    try {
-      await importDesignFile(d.id, format, await f.arrayBuffer());
-      ed.mutate(() => p.designs.push(d));
-      toast(`Imported “${d.name}” into ${DESIGN_CATEGORIES[d.category]}`);
-    } catch (e) { console.error(e); toast('Could not read that 3D file'); }
-  });
-  const groups = Object.entries(DESIGN_CATEGORIES).map(([k, label]) => {
-    const list = p.designs.filter(d => d.category === k);
-    if (!list.length) return null;
-    return h('div', {}, h('div', { class: 'muted small' }, label),
-      ...list.map(d => h('div', { class: 'lib-row' }, d.name,
-        d.category === 'column' ? bandFields(ed, d) : null,
-        h('button', {
-          class: 'danger', title: 'Remove from the library',
-          onclick: async () => {
-            if (!(await askConfirm(`Remove “${d.name}”? Elements using it go back to the plain look.`, 'Remove'))) return;
-            ed.mutate(() => {
-              p.designs = p.designs.filter(x => x !== d);
-              for (const bl of p.buildings) for (const x of bl.placements) for (const k2 of ['designId', 'frameId', 'surroundId'] as const) if (x[k2] === d.id) x[k2] = null;
-              for (const bl of p.buildings) for (const pl of bl.plans) for (const s of pl.segments) { if (s.columnDesign === d.id) s.columnDesign = null; if (s.balusterDesign === d.id) s.balusterDesign = null; }
-            });
-            if (d.format !== 'builtin') deleteAsset(d.id);
-          },
-        }, '×'))));
-  });
-  return h('details', { class: 'box', open: p.designs.length > 0 },
-    h('summary', {}, `Imported designs (${p.designs.length})`),
-    h('div', { class: 'row' }, cat, h('button', { onclick: () => file.click() }, 'Import 3D file')), file,
-    h('div', { class: 'row' }, h('span', { class: 'muted small' }, 'Built in:'),
-      ...Object.entries(BUILTIN_DESIGNS).map(([key, bd]) => h('button', {
-        disabled: p.designs.some(d => d.builtin === key),
-        title: p.designs.some(d => d.builtin === key) ? 'Already in the library' : `Add the ${bd.name} to ${DESIGN_CATEGORIES[bd.category]}`,
-        onclick: () => ed.mutate(() => p.designs.push({ id: uid(), name: bd.name, category: bd.category, format: 'builtin', builtin: key })),
-      }, `+ ${bd.name}`))),
-    h('div', { class: 'muted small' }, '3D files (.glb, .obj, .stl) stretch to fit what you assign them to: frames and surrounds to openings, cornices to divisions, columns to colonnades and pilasters, balusters to railings. They show in the Detailed view and are stored in this browser.'),
-    ...groups.filter(Boolean) as HTMLElement[],
-  );
-}
-
-/** Column designs: how much of the height is base and top (capital); those keep their proportions, only the shaft stretches. */
-function bandFields(ed: Editor, d: Design) {
-  const f = (label: string, key: 'baseFrac' | 'topFrac') => {
-    const inp = h('input', {
-      type: 'number', step: 1, min: 0, max: 45, title: `${label} as % of the design's height (empty = ${d.format === 'builtin' ? 'its own' : 'default 12%'})`,
-      value: d[key] != null ? String(Math.round(d[key]! * 100)) : '', placeholder: d.format === 'builtin' ? 'auto' : '12',
-      onchange: () => {
-        if (inp.value.trim() === '') return ed.mutate(() => (d[key] = null));
-        const v = num(inp.value);
-        if (!(v >= 0 && v <= 45)) { toast('Use 0 to 45 %'); return ed.refresh(); }
-        ed.mutate(() => (d[key] = v / 100));
-      },
-    });
-    return h('label', { class: 'inline band' }, label, inp, '%');
-  };
-  return h('span', { class: 'bands' }, f('base', 'baseFrac'), f('top', 'topFrac'));
-}
 
 // ---------------------------------------------------------------- design modes
 export type DesignMode = 'openings' | 'niches' | 'balconies' | 'walls' | 'pilasters';
@@ -549,7 +485,7 @@ export function setupDesignMode(ed: Editor, mode: DesignMode) {
 function designTypes(ed: Editor, mode: DesignMode) {
   const kindBtn = (m: DesignMode, label: string) => h('button', { class: mode === m ? 'tab active' : 'tab', onclick: () => mode !== m && ed.setMode(m) }, label);
   return [
-    h('div', { class: 'box-title' }, 'Design type'),
+    h('div', { class: 'box-title' }, 'Shape type'),
     h('div', { class: 'row' }, kindBtn('openings', 'Openings'), kindBtn('niches', 'Niches'), kindBtn('balconies', 'Balconies'), kindBtn('walls', 'Walls'), kindBtn('pilasters', 'Pilasters')),
   ];
 }
@@ -575,7 +511,7 @@ function renderProfilePanel(ed: Editor, mode: 'walls' | 'pilasters') {
   ed.right.innerHTML = '';
   put(ed.right,
     ...designTypes(ed, mode),
-    h('div', { class: 'box-title' }, isWall ? 'Wall designs (side profiles)' : 'Pilaster designs'),
+    h('div', { class: 'box-title' }, isWall ? 'Wall shapes (side profiles)' : 'Pilaster shapes'),
     h('div', { class: 'plans' }, ...list.map(s => h('div', { class: 'plan-row' + (s.id === cur?.id ? ' active' : ''), onclick: () => select(s.id) },
       s.name, h('span', { class: 'muted small' }, ` ${'depth' in s ? `up to ${fmt(s.depth)} m out` : `${fmt(s.w)} × ${fmt(s.d)} m`} · used ${used(s.id)}×`)))),
     h('div', { class: 'row' },
@@ -604,7 +540,7 @@ function renderProfilePanel(ed: Editor, mode: 'walls' | 'pilasters') {
       h('button', { onclick: () => eds.forEach(e => e.selectedPoint() && e.deleteSelected()) }, 'Delete point'),
       h('button', { title: 'Put this point on the line between its neighbours', onclick: () => eds.forEach(e => e.selectedPoint() && e.align('straight')) }, 'Straighten')) : null,
     h('div', { class: 'muted small help' }, isWall
-      ? 'Side view of the wall, outside face on the left. Click to add points, drag to move. Points further right make the face stick out more at that height. Two points at the same height make a step (a plinth top, a string course). Use it on walls in the Structure tab (select a wall → Wall design) or in the 3D view (select walls → Wall design). The profile runs from the floor to the ceiling of each storey.'
+      ? 'Side view of the wall, outside face on the left. Click to add points, drag to move. Points further right make the face stick out more at that height. Two points at the same height make a step (a plinth top, a string course). Use it on walls in the Structure tab (select a wall → Wall shape) or in the 3D view (select walls → Wall shape). The profile runs from the floor to the ceiling of each storey.'
       : `Front view (half the width, from the centre line) and side view (depth from the wall). The bottom ${Math.round(((cur as PilasterShape | null)?.base ?? 0.12) * 100)} % (base) and top ${Math.round(((cur as PilasterShape | null)?.top ?? 0.12) * 100)} % (capital) keep their size, drawn as if the pilaster were ${PILASTER_REF_H} m tall; the shaft between them stretches to the storey. Add pilasters in the 3D view (select borders → Add → Pilaster) and pick the design there.`),
   );
 }

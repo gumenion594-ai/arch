@@ -1,11 +1,13 @@
 // Building project editor: floors panel, 3D view, structure / floor / window planners.
 import {
-  Building, BalconyShape, PilasterShape, WallShape, ConnectMode, DesignCategory, Floor, History, OpeningShape, PlacementType, segConnect, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan,
+  Building, BalconyShape, DecoDesign, DecoType, PilasterShape, WallShape, ConnectMode, DesignCategory, Floor, History, OpeningShape, PlacementType, segConnect, MATERIALS, MAX_M, PlanObject, PlanSegment, Project, SegKind, StructurePlan,
   addLoops, clamp, elevation, floorBase, floorLabel, formatRanges, newAreaPlan, newInteriorPlan, newPlan, parseRanges, planForFloor, saveProject,
   segKind, totalHeight, uid,
 } from './model';
 import { Hit, Viewer, ViewMode } from './viewer';
 import { Planner, Tool, fmt } from './planner';
+import { DesignView } from './designview';
+import { renderDecoPanel } from './decopanel';
 import { ShapeEditor, ShapeTool } from './shapeeditor';
 import { DesignMode, PickMode, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
 import { V2, enclosedFaces, planValid, sampleSeg, signedArea } from './geometry';
@@ -13,7 +15,7 @@ import { Selection, areaForFloor, autoFloorAreas, interiorForFloor, loftPointTar
 import { calculate, Report } from './stats';
 import { app, askConfirm, askText, h, num, put, toast } from './ui';
 
-type Mode = 'view' | 'structure' | 'floorplan' | 'floorarea' | DesignMode;
+type Mode = 'view' | 'structure' | 'floorplan' | 'floorarea' | DesignMode | 'decos';
 const isDesign = (m: Mode): m is DesignMode => m === 'openings' || m === 'niches' || m === 'balconies' || m === 'walls' || m === 'pilasters';
 const PLAN_COLORS = ['#4a90d9', '#d97a4a', '#5cb85c', '#b05cd9', '#d9c84a', '#4ad9c8', '#d94a7a', '#8a8a8a'];
 
@@ -62,7 +64,7 @@ export class Editor {
 
   destroy() {
     window.removeEventListener('keydown', this.onKey);
-    this.viewer?.dispose(); this.planner?.dispose(); this.shapeEds.forEach(e => e.dispose());
+    this.viewer?.dispose(); this.planner?.dispose(); this.shapeEds.forEach(e => e.dispose()); this.decoView?.dispose();
   }
 
   /** The building (a building project has exactly one). */
@@ -95,13 +97,23 @@ export class Editor {
     this.renderHeader();
     this.renderLeft();
     // 3D first: the side panel shows numbers the build produces (e.g. windows that no longer fit)
-    if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures, designs: this.p.designs }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea, upTo: this.upTo });
+    if (this.mode === 'view') this.viewer?.update({ id: this.p.id, buildings: this.p.buildings, textures: this.p.textures, designs: this.p.designs, decos: this.p.decos }, { activeId: '*', mode: this.viewMode, selection: this.selection, showArea: this.showArea, upTo: this.upTo });
     this.renderRight();
     this.planner?.draw();
     this.shapeEds.forEach(e => e.draw());
+    if (this.mode === 'decos') { this.decoView?.set(this.deco(), this.b, this.p.designs, () => this.refresh()); this.decoView?.select(this.decoPart); }
   }
 
-  /** Last design category (openings / niches / balconies) opened in the Design tab. */
+  /** Design tab: the 3D editor, the design type shown, the design open (per type) and its selected part. */
+  decoView: DesignView | null = null;
+  decoType: DecoType = 'opening';
+  activeDeco: Partial<Record<DecoType, string>> = {};
+  decoPart: string | null = null;
+  deco(): DecoDesign | null {
+    const list = this.p.decos.filter(d => d.type === this.decoType);
+    return list.find(d => d.id === this.activeDeco[this.decoType]) ?? list[0] ?? null;
+  }
+  /** Last shape category opened in the Shape tab. */
   designKind: DesignMode = 'openings';
   private preWalkMode: ViewMode | null = null;
   /** Side panels hidden (each on its own, with the small arrow buttons); both hidden automatically in first person. */
@@ -131,6 +143,7 @@ export class Editor {
     this.mode = m;
     if (isDesign(m)) this.designKind = m;
     this.viewer?.dispose(); this.viewer = null;
+    this.decoView?.dispose(); this.decoView = null;
     this.planner?.dispose(); this.planner = null;
     this.shapeEds.forEach(e => e.dispose()); this.shapeEds = [];
     this.center.innerHTML = '';
@@ -148,6 +161,11 @@ export class Editor {
         if (!walking && this.preWalkMode) { this.viewMode = this.preWalkMode; this.preWalkMode = null; this.refresh(); return; }
         this.renderHeader(); this.renderRight();
       };
+    } else if (m === 'decos') {
+      this.decoView = new DesignView(this.center, {
+        select: id => { this.decoPart = id; this.decoView?.select(id); this.renderRight(); },
+        begin: () => this.begin(), commit: () => this.commit(), live: () => this.renderRight(),
+      });
     } else if (isDesign(m)) {
       const list: { id: string }[] = m === 'balconies' ? this.b.balconyShapes : m === 'walls' ? this.b.wallShapes : m === 'pilasters' ? this.b.pilasterShapes
         : this.b.openingShapes.filter(x => x.kind === (m === 'openings' ? 'opening' : 'niche'));
@@ -237,6 +255,14 @@ export class Editor {
     if (this.shapeEds.length && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); this.shapeEds.forEach(x => x.selectedPoint() && x.deleteSelected()); return; }
     if (this.shapeEds.length && (finishKey || e.key === 'Escape')) { e.preventDefault(); this.shapeEds.forEach(x => x.finish()); return; }
     if (this.mode === 'view' && e.key === 'Escape') { this.clearSel(); return; }
+    if (this.mode === 'decos' && this.decoView) {
+      // gizmo: W move, E rotate, R scale; Delete removes the selected part
+      const k = e.key.toLowerCase();
+      if (k === 'w' || k === 'e' || k === 'r') { this.decoView.setMode(k === 'w' ? 'translate' : k === 'e' ? 'rotate' : 'scale'); this.renderRight(); }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && this.decoPart) { e.preventDefault(); const d = this.deco(); if (d) this.mutate(() => (d.parts = d.parts.filter(x => x.id !== this.decoPart))); this.decoPart = null; }
+      if (e.key === 'Escape') { this.decoPart = null; this.decoView.select(null); this.renderRight(); }
+      return;
+    }
     if (!this.planner) return;
     if (e.key === 'Escape' || finishKey) { e.preventDefault(); this.planner.endChain(); }
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); this.planner.deleteSelection(); }
@@ -284,11 +310,11 @@ export class Editor {
     put(this.header, 
       h('button', { onclick: () => this.onBack() }, '← Projects'),
       nameIn,
-      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('floorarea', 'Floor areas'), tab(this.designKind, 'Design')),
+      h('div', { class: 'tabs' }, tab('view', '3D view'), tab('structure', 'Structure'), tab('floorplan', 'Floor plan'), tab('floorarea', 'Floor areas'), tab(this.designKind, 'Shape'), tab('decos', 'Design')),
       this.mode === 'view' ? vm : null,
       this.mode === 'view' ? h('label', { class: 'chk', title: 'Show the building-area outline and floor lines' }, area, 'Area lines') : null,
       h('div', { class: 'spacer' }),
-      h('button', { onclick: () => toast('Importing 3D models is planned — not implemented yet') }, 'Import 3D model'),
+      h('button', { title: 'Import 3D models and arrange them into designs', onclick: () => this.setMode('decos') }, 'Import 3D model'),
       h('button', { title: 'Ctrl+Z', onclick: () => this.undo() }, 'Undo'),
     );
   }
@@ -575,6 +601,7 @@ export class Editor {
   renderRight() {
     if (this.mode === 'view') return renderViewPanel(this);
     if (isDesign(this.mode)) return renderDesignPanel(this, this.mode);
+    if (this.mode === 'decos') return renderDecoPanel(this);
     this.renderPlanPanel();
   }
 
@@ -951,15 +978,15 @@ export class Editor {
   }
 
   /** Properties of one or more selected walls. */
-  /** Wall design (side profile) of walls; designs are made in Design → Walls. */
+  /** Wall shape (side profile) of walls; made in Shape → Walls. */
   wallShapeField(segs: PlanSegment[]): HTMLElement {
     const vals = new Set(segs.map(sg => sg.wallShape ?? ''));
     const sel = h('select', { onchange: () => { if (sel.value === '__new') { this.designKind = 'walls'; this.setMode('walls'); return; } this.mutate(() => segs.forEach(sg => (sg.wallShape = sel.value || null))); } },
       vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null,
       h('option', { value: '' }, 'Flat'), ...this.b.wallShapes.map(x => h('option', { value: x.id }, x.name)),
-      h('option', { value: '__new' }, 'Design one…'));
+      h('option', { value: '__new' }, 'Draw one…'));
     sel.value = vals.size > 1 ? '__m' : [...vals][0];
-    return h('label', { title: 'Side profile of the wall: plinths, string courses, sloping walls (Design → Walls)' }, 'Wall design', sel);
+    return h('label', { title: 'Side profile of the wall: plinths, string courses, sloping walls (Shape → Walls)' }, 'Wall shape', sel);
   }
 
   segmentProps(pl: StructurePlan, segs: PlanSegment[], interior: boolean): HTMLElement {
@@ -1008,11 +1035,13 @@ export class Editor {
       });
       wrap.append(h('label', {}, kind === 'colonnade' ? 'Column spacing (m, empty = default division)' : 'Division length (m, empty = default)', dIn));
     }
-    const designPick = (cat: DesignCategory, key: 'columnDesign' | 'balusterDesign', label: string) => {
+    const designPick = (cat: DesignCategory, key: 'columnDesign' | 'balusterDesign' | 'wallDesign', label: string) => {
       const vals = new Set(segs.map(x => x[key] ?? ''));
+      const dt = key === 'columnDesign' ? 'column' : key === 'balusterDesign' ? 'baluster' : 'wall';
       const sel = h('select', { onchange: () => setAll(x => (x[key] = sel.value || null)) },
         vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null,
-        h('option', { value: '' }, 'Plain'), ...this.p.designs.filter(d => d.category === cat).map(d => h('option', { value: d.id }, d.name)));
+        h('option', { value: '' }, 'Plain'), ...this.p.decos.filter(d => d.type === dt).map(d => h('option', { value: d.id }, d.name)),
+        ...this.p.designs.filter(d => d.category === cat).map(d => h('option', { value: d.id }, `${d.name} (imported model)`)));
       sel.value = vals.size > 1 ? '__m' : [...vals][0];
       return h('label', {}, label, sel);
     };
@@ -1021,6 +1050,7 @@ export class Editor {
       wrap.append(this.numField('Column thickness (m), empty = wall thickness', ct === 'mixed' ? null : ct, v => segs.forEach(s => (s.columnThickness = v)), L / 2, true));
       wrap.append(designPick('column', 'columnDesign', 'Column design (detailed view)'));
     }
+    if (kind === 'wall') wrap.append(designPick('model', 'wallDesign', 'Wall design on every division (detailed view)'));
     if (kind === 'balustrade' || kind === 'wall') wrap.append(designPick('baluster', 'balusterDesign', kind === 'wall' ? 'Baluster design for balconies on this wall' : 'Baluster design (detailed view)'));
     const colIn = h('input', { type: 'color', value: segs.find(x => x.color)?.color ?? '#d8cfc0' });
     wrap.append(h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Colour'), colIn,

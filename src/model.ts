@@ -46,7 +46,8 @@ export interface PlanSegment {
   texture?: string | null; // texture id
   material?: string | null; // null = plan material
   color?: string | null; // '#rrggbb', shown in structural and detailed views
-  wallShape?: string | null; // wall design (side profile), null = flat
+  wallShape?: string | null; // wall shape (side profile), null = flat
+  wallDesign?: string | null; // design (decos) on every division of the wall (detailed view)
   columnDesign?: string | null; // imported column design for colonnade columns (detailed view)
   balusterDesign?: string | null; // imported baluster design (detailed view)
 }
@@ -110,7 +111,7 @@ export interface Placement {
   segId?: string;
   div?: number; // division index (pilaster: border index 0..n)
   shapeId?: string | null; // opening / niche / balcony shape
-  designId?: string | null; // imported design (cornice, pilaster column, balcony, niche decoration, model)
+  designId?: string | null; // a design (decos) or, in older projects, an imported model (cornice, pilaster, balcony, niche decoration, model)
   frameId?: string | null; // opening frame design
   surroundId?: string | null; // opening surround design
   dx: number; dy: number; // moved along the wall / up, in m
@@ -191,8 +192,24 @@ export interface Project {
   buildings: Building[]; // building project: exactly one
   items: SiteItem[]; // site project: placed building projects
   textures: Texture[];
-  designs: Design[]; // imported 3D designs
+  designs: Design[]; // imported 3D models (the library)
+  /** Designs: imported 3D models arranged around a reference shape (a window, a column, a strip of wall…). */
+  decos: DecoDesign[];
 }
+
+/** What a design decorates. */
+export type DecoType = 'opening' | 'niche' | 'balcony' | 'pilaster' | 'column' | 'cornice' | 'wall' | 'baluster';
+export const DECO_TYPES: Record<DecoType, string> = {
+  opening: 'Openings', niche: 'Niches', balcony: 'Balconies', pilaster: 'Pilasters', column: 'Columns', cornice: 'Cornices', wall: 'Walls', baluster: 'Balusters',
+};
+/** One imported model placed in a design: centre (m), rotation (degrees) and size (m), in the reference shape's frame. */
+export interface DecoPart { id: string; modelId: string; pos: [number, number, number]; rot: [number, number, number]; size: [number, number, number] }
+/**
+ * A design. Its parts sit around the reference shape (shapeId: the opening / niche / balcony / pilaster / wall shape it
+ * was made on); on the building, the whole arrangement stretches from the reference size to the real element.
+ * Columns and pilasters: the bottom `base` and top `top` fractions keep their size (base and capital).
+ */
+export interface DecoDesign { id: string; name: string; type: DecoType; shapeId?: string | null; parts: DecoPart[]; base?: number; top?: number }
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -308,10 +325,10 @@ export const defaultBalconyShapes = (): BalconyShape[] => [
 ];
 
 export function createProject(name: string, first: BuildingSpec): Project {
-  return { id: uid(), name, kind: 'building', created: Date.now(), updated: Date.now(), buildings: [createBuilding(first)], items: [], textures: [], designs: [] };
+  return { id: uid(), name, kind: 'building', created: Date.now(), updated: Date.now(), buildings: [createBuilding(first)], items: [], textures: [], designs: [], decos: [] };
 }
 export function createSite(name: string): Project {
-  return { id: uid(), name, kind: 'site', created: Date.now(), updated: Date.now(), buildings: [], items: [], textures: [], designs: [] };
+  return { id: uid(), name, kind: 'site', created: Date.now(), updated: Date.now(), buildings: [], items: [], textures: [], designs: [], decos: [] };
 }
 
 export const newInteriorPlan = (name: string): StructurePlan => ({ ...newPlan(name), wallThickness: 0.15, material: 'brick', floorEnabled: false });
@@ -350,6 +367,7 @@ export function normalize(p: Project): Project {
   p.items ??= [];
   p.kind ??= 'building';
   p.designs ??= [];
+  p.decos ??= [];
   for (const b of p.buildings) {
     const ob = b as any;
     b.ground ??= 0;
