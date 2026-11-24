@@ -671,3 +671,80 @@ export function sampleProject(): Project {
   place('opening', f2, roofFront, Math.floor(divCount(roof, roofFront) / 2), { shapeId: shape('Round window'), dy: -0.2 });
   return p;
 }
+
+/**
+ * Template: a 5-storey panel block (the classic “commie block”): a long 60 × 12 m slab, every floor the same plan,
+ * rows of identical windows, three entrances (one per stairwell section), small balconies, a flat roof.
+ */
+export function blockProject(name: string): Project {
+  const L = 64, H = 2.8;
+  const p = createProject(name, { name, baseLength: L, floors: 5, floorHeight: H, ground: 0, x: 0, y: 0 });
+  const b = p.buildings[0];
+  const fl = b.floors;
+  const X = (m: number) => m / L;
+  const x0 = X(2), x1 = X(62), y0 = X(26), y1 = X(38); // 60 × 12 m, centred
+  const pl = b.plans[0];
+  pl.name = 'Typical floor';
+  pl.wallThickness = 0.35; pl.floorThickness = 0.22; pl.ceilingThickness = 0.25; pl.material = 'concrete';
+  let n = 1;
+  const pt = (x: number, y: number): PlanPoint => ({ id: uid(), n: n++, x, y });
+  const sw = pt(x0, y0), se = pt(x1, y0), ne = pt(x1, y1), nw = pt(x0, y1);
+  pl.points = [sw, se, ne, nw];
+  const seg = (a: PlanPoint, c: PlanPoint): PlanSegment => ({ id: uid(), a: a.id, b: c.id, color: '#cdc8bd' });
+  const front = seg(sw, se), east = seg(se, ne), back = seg(ne, nw), west = seg(nw, sw);
+  pl.segments = [front, east, back, west];
+  pl.nextN = n;
+  b.divLen = 3; // 20 equal bays along the long walls
+  fl[0].color = '#a9a49a';
+
+  const shape = (nm: string) => b.openingShapes.find(s => s.name === nm)!.id;
+  const place = (type: PlacementType, floor: Floor, s: PlanSegment, div: number, extra: Partial<Placement> = {}) =>
+    b.placements.push({ id: uid(), type, floorId: floor.id, segId: s.id, div, dx: 0, dy: 0, ...extra });
+  const bays = 20, entrances = [3, 10, 16]; // one stairwell per section
+  fl.forEach((f, i) => {
+    for (let k = 0; k < bays; k++) {
+      // front: entrance doors on the ground floor, stairwell windows above them; balconies every third bay
+      if (entrances.includes(k)) { place('opening', f, front, k, { shapeId: shape(i === 0 ? 'Door' : 'Window') }); }
+      else if (i > 0 && k % 3 === 1) {
+        place('opening', f, front, k, { shapeId: shape('Door') });
+        place('balcony', f, front, k, { shapeId: b.balconyShapes[0].id, dy: 0.25 - H * BALCONY_AT });
+      } else place('opening', f, front, k, { shapeId: shape('Window') });
+      place('opening', f, back, k, { shapeId: shape('Window') });
+    }
+  });
+  const win = b.openingShapes.find(s => s.name === 'Window')!; win.w = 1.5; win.h = 1.4;
+  const door = b.openingShapes.find(s => s.name === 'Door')!; door.w = 0.9; door.h = 2.1;
+  b.balconyShapes[0].w = 2.4; b.balconyShapes[0].d = 0.9;
+
+  // inside: walls between the three sections, a staircase behind each entrance (none from the top floor)
+  const bayX = (k: number) => x0 + X(3 * k + 1.5 + 0.2);
+  const cuts = [X(22), X(42)];
+  const inner = (withStairs: boolean, floors: Floor[], nm: string) => {
+    const ip = newInteriorPlan(nm);
+    ip.floorIds = floors.map(f => f.id);
+    ip.material = 'concrete'; ip.wallThickness = 0.16;
+    let m = 1;
+    const ipt = (x: number, y: number): PlanPoint => ({ id: uid(), n: m++, x, y });
+    for (const cx of cuts) {
+      const a = ipt(x0 + X(0) + cx, y0 + X(0.4)), c = ipt(x0 + cx, y1 - X(0.4));
+      ip.points.push(a, c);
+      ip.segments.push({ id: uid(), a: a.id, b: c.id });
+    }
+    ip.nextN = m;
+    if (withStairs) for (const k of entrances) ip.objects.push({ id: uid(), type: 'stairs', x: bayX(k) + X(2.2), y: y0 + X(3), w: 1.2, d: 3.6, rot: 0 });
+    b.interiorPlans.push(ip);
+    return ip;
+  };
+  inner(true, fl.slice(0, 4), 'Sections + stairs');
+  inner(false, [fl[4]], 'Sections (top floor)');
+  // floors 1–4: holes in the floor above each staircase
+  const ap = newAreaPlan('Floors with stairwells', fl.slice(1).map(f => f.id));
+  const holes = entrances.map(k => {
+    const cx = bayX(k) + X(2.2), cy = y0 + X(3), hw = X(0.75), hd = X(1.95);
+    return [{ x: cx - hw, y: cy - hd }, { x: cx + hw, y: cy - hd }, { x: cx + hw, y: cy + hd }, { x: cx - hw, y: cy + hd }];
+  });
+  addLoops(ap, [[{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }], ...holes]);
+  ap.carved = holes.map(hh => ({ x: (hh[0].x + hh[2].x) / 2, y: (hh[0].y + hh[2].y) / 2 }));
+  b.areaPlans.push(ap);
+  return p;
+}

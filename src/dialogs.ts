@@ -8,12 +8,19 @@ interface Opts {
   nameLabel: string;
   defaultName: string;
   project?: Project; // when adding a building: existing buildings to place against
-  onCreate(spec: BuildingSpec, name: string): void;
+  onCreate(spec: BuildingSpec, name: string, template: Template): void;
 }
+/** Starting point of a new building project. */
+export type Template = 'none' | 'villa' | 'block';
 
 export function buildingDialog(o: Opts) {
   type Combo = 'nf' | 'nt' | 'ft';
   const name = h('input', { value: o.defaultName });
+  const tplSel = h('select', {},
+    h('option', { value: 'none' }, 'None'),
+    h('option', { value: 'villa' }, 'Villa'),
+    h('option', { value: 'block' }, '5-storey block'),
+  );
   const comboSel = h('select', {},
     h('option', { value: 'nf' }, 'Number of floors + floor height'),
     h('option', { value: 'nt' }, 'Number of floors + total height'),
@@ -33,7 +40,12 @@ export function buildingDialog(o: Opts) {
   const rowT = h('label', {}, 'Total height (m)', inT);
 
   let result: { n: number; f: number; L: number; u: number } | null = null;
+  const sizeRows: HTMLElement[] = [];
   const calc = () => {
+    // a template brings its own size: the size fields only matter for an empty building
+    const tpl = tplSel.value !== 'none';
+    sizeRows.forEach(el => (el.style.display = tpl ? 'none' : ''));
+    if (tpl) { [rowN, rowF, rowT].forEach(r => (r.style.display = 'none')); out.innerHTML = ''; out.append(h('div', {}, tplSel.value === 'villa' ? 'Villa: 3 floors, 11 m tall, 24 m base; porch with Ionic columns, balcony, pilasters, cornice, hip roof.' : '5-storey panel block: 60 × 12 m, 5 identical floors × 2.8 m = 14 m, 64 m base; rows of windows, 3 entrances with stairwells, balconies, flat roof.')); result = { n: 0, f: 0, L: 0, u: 0 }; okBtn.disabled = !name.value.trim(); return; }
     const combo = comboSel.value as Combo, baseMode = baseSel.value;
     rowN.style.display = combo === 'ft' ? 'none' : '';
     rowF.style.display = combo === 'nt' ? 'none' : '';
@@ -64,32 +76,34 @@ export function buildingDialog(o: Opts) {
     result = errs.length ? null : { n, f, L, u };
     okBtn.disabled = !result || !name.value.trim();
   };
-  [comboSel, inN, inF, inT, inU, baseSel, inB, name].forEach(el => el.addEventListener('input', calc));
-  calc();
+  [comboSel, inN, inF, inT, inU, baseSel, inB, name, tplSel].forEach(el => el.addEventListener('input', calc));
 
   const overlay = h('div', { class: 'overlay' });
   const close = () => overlay.remove();
   const dialog = h('div', { class: 'dialog' });
+  const heightBy = h('label', {}, 'Height defined by', comboSel), under = h('label', {}, 'Underground floors (the floor above them is the ground floor)', inU);
+  const baseBy = h('label', {}, 'Base defined by', baseSel), baseVal = h('label', {}, 'Value', inB);
+  const note = h('p', { class: 'muted small' }, 'The building area is a square. The base length cannot be changed later.');
+  sizeRows.push(heightBy, under, baseBy, baseVal, note);
   const form = h('div', {},
     h('h2', {}, o.title),
     h('label', {}, o.nameLabel, name),
-    h('label', {}, 'Height defined by', comboSel),
+    placing ? null : h('label', {}, 'Template', tplSel),
+    heightBy,
     rowN, rowF, rowT,
-    h('label', {}, 'Underground floors (the floor above them is the ground floor)', inU),
-    h('label', {}, 'Base defined by', baseSel),
-    h('label', {}, 'Value', inB),
-    h('p', { class: 'muted small' }, 'The building area is a square. The base length cannot be changed later.'),
+    under, baseBy, baseVal, note,
     out,
     h('div', { class: 'row end' }, h('button', { onclick: close }, 'Cancel'), okBtn),
   );
   dialog.append(form);
+  calc();
 
   const spec = (x = 0, y = 0): BuildingSpec => ({ name: name.value.trim(), baseLength: result!.L, floors: result!.n, floorHeight: result!.f, ground: result!.u, x, y });
   okBtn.addEventListener('click', () => {
     if (!result) return;
-    if (!placing) { close(); o.onCreate(spec(), name.value.trim()); return; }
+    if (!placing) { close(); o.onCreate(tplSel.value === 'none' ? spec() : { name: name.value.trim(), baseLength: 0, floors: 0, floorHeight: 0, ground: 0, x: 0, y: 0 }, name.value.trim(), tplSel.value as Template); return; }
     form.style.display = 'none';
-    dialog.append(placement(o.project!.buildings, result.L, (x, y) => { close(); o.onCreate(spec(x, y), name.value.trim()); }, () => {
+    dialog.append(placement(o.project!.buildings, result.L, (x, y) => { close(); o.onCreate(spec(x, y), name.value.trim(), 'none'); }, () => {
       dialog.lastChild!.remove(); form.style.display = '';
     }));
   });

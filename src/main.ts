@@ -1,5 +1,5 @@
 import './style.css';
-import { Project, createProject, createSite, deleteProject, initStorage, loadProjects, normalize, sampleProject, saveProject, storageInfo, totalHeight, uid } from './model';
+import { Project, createProject, createSite, deleteProject, initStorage, loadProjects, normalize, blockProject, sampleProject, saveProject, storageInfo, totalHeight, uid } from './model';
 import { getAsset, putAsset } from './assets';
 import { buildingDialog } from './dialogs';
 import { fmt } from './planner';
@@ -53,10 +53,9 @@ function showList() {
       h('button', { title: 'Open a project saved as a file', onclick: importProject }, 'Open file…')),
     usage,
     h('div', { class: 'row' }, h('h2', {}, 'Buildings'), h('div', { class: 'row' },
-      h('button', { title: 'Add the example villa as a new project', onclick: () => { const p = sampleProject(); saveProject(p); openProject(p.id); } }, 'Load example villa'),
       h('button', { class: 'primary', onclick: newProjectDialog }, '+ New building project'))),
     buildings.length ? h('div', { class: 'projects' }, ...buildings.map(row)) : h('div', { class: 'row' }, h('span', { class: 'muted' }, 'No building projects yet.'),
-      h('button', { onclick: () => { const p = sampleProject(); saveProject(p); openProject(p.id); } }, 'Load example')),
+      h('span', { class: 'muted small' }, 'Start one with + New building project (empty, or from the villa / block template).')),
     h('div', { class: 'row' }, h('h2', {}, 'Sites'), h('button', { class: 'primary', onclick: newSite }, '+ New site')),
     h('p', { class: 'muted small' }, 'A site places several of your building projects together.'),
     sites.length ? h('div', { class: 'projects' }, ...sites.map(row)) : h('p', { class: 'muted' }, 'No sites yet.'),
@@ -66,8 +65,9 @@ function showList() {
 function newProjectDialog() {
   buildingDialog({
     title: 'New building project', nameLabel: 'Project name', defaultName: 'Untitled building',
-    onCreate: (spec, name) => {
-      const p = createProject(name, { ...spec, name });
+    onCreate: (spec, name, template) => {
+      const p = template === 'villa' ? sampleProject() : template === 'block' ? blockProject(name) : createProject(name, { ...spec, name });
+      p.name = name; p.buildings[0].name = name;
       saveProject(p); openProject(p.id);
     },
   });
