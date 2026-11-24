@@ -49,6 +49,10 @@ export class ShapeEditor {
   private zoom = 1;
   private pan = { x: 0, y: 0 };
   private panning: { x: number; y: number } | null = null;
+  /** Points picked with the selection box (right-drag), as "outline:index"; they move and delete together. */
+  multi = new Set<string>();
+  private boxSel: { a: V2; b: V2; add: boolean } | null = null;
+  private dragFrom: V2 | null = null;
 
   constructor(private host: HTMLElement, private h: ShapeHost, private mode: ShapeMode = 'closed') {
     host.appendChild(this.canvas);
@@ -67,7 +71,7 @@ export class ShapeEditor {
     window.removeEventListener('mouseup', this.up);
     this.canvas.remove();
   }
-  reset() { this.sel = null; this.cur = null; this.rect = null; }
+  reset() { this.sel = null; this.cur = null; this.rect = null; this.multi.clear(); }
   resetView() { this.zoom = 1; this.pan = { x: 0, y: 0 }; this.draw(); }
   private wheel(e: WheelEvent) {
     e.preventDefault();
@@ -173,7 +177,8 @@ export class ShapeEditor {
   private copy() { return (this.h.getOutlines() ?? []).map(o => o.map(q => ({ ...q }))); }
 
   private down(e: MouseEvent) {
-    if (e.button === 1 || e.button === 2) { e.preventDefault(); this.panning = { x: e.clientX, y: e.clientY }; return; }
+    if (e.button === 1) { e.preventDefault(); this.panning = { x: e.clientX, y: e.clientY }; return; } // middle-drag pans
+    if (e.button === 2) { e.preventDefault(); const q = this.P(e); this.boxSel = { a: q, b: q, add: e.shiftKey || e.ctrlKey || e.metaKey }; return; } // right-drag: selection box
     const ols = this.h.getOutlines();
     if (!ols || e.button !== 0) return;
     const p = this.P(e);
@@ -181,6 +186,8 @@ export class ShapeEditor {
     if (hit) {
       // clicking the first point of the outline being drawn closes it
       const closing = !this.profile && hit.o === this.cur && hit.i === 0 && ols[hit.o].length >= 3 && this.sel?.o === hit.o && this.sel.i === ols[hit.o].length - 1;
+      if (!this.multi.has(`${hit.o}:${hit.i}`)) this.multi.clear(); // clicking outside the boxed points drops them
+      this.dragFrom = { x: ols[hit.o][hit.i].x, y: ols[hit.o][hit.i].y };
       this.sel = hit; this.cur = this.profile || closing ? null : hit.o; this.drag = { ...hit, began: false }; this.h.selectionChanged(); this.draw(); return;
     }
     if (!this.profile && this.hitEdge(ols, p)) return; // double-click inserts a point there
@@ -222,6 +229,7 @@ export class ShapeEditor {
     this.h.begin(); this.h.setOutlines(next); this.sel = { o: hit.o, i: hit.i + 1 }; this.h.commit(); this.draw();
   }
   private move = (e: MouseEvent) => {
+    if (this.boxSel) { this.boxSel.b = this.P(e); this.draw(); return; }
     if (this.panning) {
       this.pan.x += e.clientX - this.panning.x; this.pan.y += e.clientY - this.panning.y;
       this.panning = { x: e.clientX, y: e.clientY };
@@ -237,6 +245,21 @@ export class ShapeEditor {
       this.hover = this.lock(this.snap(this.hover, !e.altKey), e, this.tool === 'points' ? curOl?.[curOl.length - 1] : undefined);
       const sn = this.snapped as { q: V2 } | null; if (sn) sn.q = this.hover;
     }
+    if (this.drag && this.multi.size > 1 && this.multi.has(`${this.drag.o}:${this.drag.i}`) && this.dragFrom) {
+      // the boxed points move together, by how far the grabbed one moved
+      const d = this.drag, np = this.snap(this.P(e), !e.altKey, ols[d.o]?.[d.i]);
+      const dx = np.x - this.dragFrom.x, dy = np.y - this.dragFrom.y;
+      const base = this.copy(), next = this.copy();
+      const cur = ols[d.o][d.i], ox = cur.x - this.dragFrom.x, oy = cur.y - this.dragFrom.y; // already moved so far
+      for (const k of this.multi) { const [o, i] = k.split(':').map(Number); const q = next[o]?.[i]; if (q) { q.x = base[o][i].x - ox + dx; q.y = base[o][i].y - oy + dy; } }
+      const inBox = next.flat().every(q => q.x >= -1e-9 && q.x <= 1 + 1e-9 && q.y >= -1e-9 && q.y <= 1 + 1e-9);
+      if (inBox && this.valid(next)) {
+        if (!d.began) { this.h.begin(); d.began = true; }
+        this.h.setOutlines(next);
+      }
+      this.draw();
+      return;
+    }
     if (this.drag) {
       const d = this.drag, np = this.snap(this.P(e), !e.altKey, ols[d.o]?.[d.i]);
       const next = this.copy();
@@ -251,6 +274,18 @@ export class ShapeEditor {
   };
   private up = () => {
     this.panning = null;
+    if (this.boxSel) {
+      const { a, b, add } = this.boxSel, ols = this.h.getOutlines() ?? [];
+      this.boxSel = null;
+      const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+      if (!add) this.multi.clear();
+      ols.forEach((ol, o) => ol.forEach((q, i) => { if (q.x >= x0 && q.x <= x1 && q.y >= y0 && q.y <= y1) this.multi.add(`${o}:${i}`); }));
+      const first = [...this.multi][0];
+      if (first) { const [o, i] = first.split(':').map(Number); this.sel = { o, i }; } else this.sel = null;
+      this.h.selectionChanged();
+      this.draw();
+      return;
+    }
     if (this.rect) {
       const { a, b } = this.rect;
       this.rect = null;
@@ -278,6 +313,16 @@ export class ShapeEditor {
   }
   deleteSelected() {
     const ols = this.copy();
+    if (this.multi.size > 1) {
+      // every boxed point (highest index first, so the others keep their place)
+      const keys = [...this.multi].map(k => k.split(':').map(Number)).sort((p, q) => q[0] - p[0] || q[1] - p[1]);
+      for (const [o, i] of keys) ols[o]?.splice(i, 1);
+      const left = ols.filter(ol => (this.profile ? ol.length >= 2 : ol.length > 0));
+      if (this.profile && left.length < ols.length) return this.h.toast('A profile needs at least 2 points');
+      this.multi.clear();
+      this.h.begin(); this.h.setOutlines(left); this.sel = null; this.cur = null; this.h.commit(); this.h.selectionChanged(); this.draw();
+      return;
+    }
     if (!this.sel || !ols[this.sel.o]) return;
     const { o, i } = this.sel;
     if (this.profile && ols[o].length <= 2) return this.h.toast('A profile needs at least 2 points');
@@ -388,7 +433,7 @@ export class ShapeEditor {
         }
       }
       ol.forEach((p, i) => {
-        const q = pts[i], selected = this.sel?.o === o && this.sel.i === i;
+        const q = pts[i], selected = (this.sel?.o === o && this.sel.i === i) || this.multi.has(`${o}:${i}`);
         g.fillStyle = selected ? '#ffd400' : '#fff';
         g.beginPath(); g.arc(q.x, q.y, selected ? 5.5 : 4.5, 0, Math.PI * 2); g.fill();
         if (p.s != null) { g.strokeStyle = '#9fd3ff'; g.lineWidth = 1.5; g.beginPath(); g.arc(q.x, q.y, 8, 0, Math.PI * 2); g.stroke(); }
@@ -398,6 +443,13 @@ export class ShapeEditor {
       if (gl.length < 2) continue;
       g.strokeStyle = 'rgba(255,255,255,0.55)'; g.lineWidth = 1.5;
       g.beginPath(); gl.forEach((q, i) => { const p2 = this.S(q); i ? g.lineTo(p2.x, p2.y) : g.moveTo(p2.x, p2.y); }); g.stroke();
+    }
+    if (this.boxSel) {
+      const A = this.S(this.boxSel.a), B = this.S(this.boxSel.b);
+      g.fillStyle = 'rgba(255,212,0,0.12)'; g.strokeStyle = '#ffd400'; g.lineWidth = 1; g.setLineDash([4, 3]);
+      g.fillRect(Math.min(A.x, B.x), Math.min(A.y, B.y), Math.abs(B.x - A.x), Math.abs(B.y - A.y));
+      g.strokeRect(Math.min(A.x, B.x), Math.min(A.y, B.y), Math.abs(B.x - A.x), Math.abs(B.y - A.y));
+      g.setLineDash([]);
     }
     if (this.rect) {
       const a = this.S(this.rect.a), c = this.S(this.rect.b);

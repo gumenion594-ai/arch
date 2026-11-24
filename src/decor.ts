@@ -21,32 +21,44 @@ export function wallBorders(ed: Editor, plan: StructurePlan, seg: PlanSegment): 
 }
 
 // ---------------------------------------------------------------- picking
-export function onPick(ed: Editor, hit: Hit | null, e: MouseEvent) {
-  if (!hit) { if (!e.shiftKey) ed.clearSel(); return; }
-  const add = e.shiftKey || e.ctrlKey || e.metaKey;
-  const toggle = (set: Set<string>, key: string) => {
-    if (!add) { ed.clearSets(); set.add(key); return; }
-    set.has(key) ? set.delete(key) : set.add(key);
-  };
+/** What a click on `hit` selects in the current pick mode: the set and its key (null: nothing there). */
+function hitTarget(ed: Editor, hit: Hit): { set: Set<string>; key: string } | null {
   const uv = hit.uvOf ? hit.uvOf(hit.point) : null;
   const pl = hit.placementId ? ed.b.placements.find(x => x.id === hit.placementId) : undefined;
   const mode = ed.pickMode;
   if (mode === 'element') {
     let id = hit.placementId;
     if (!id && uv && hit.holes) id = hit.holes.find(o => uv.u >= o.u0 && uv.u <= o.u1 && uv.v >= o.v0 && uv.v <= o.v1)?.id;
-    if (id) toggle(ed.selElements, id); else if (!add) ed.clearSets();
-  } else if (mode === 'floor' || !hit.segId || hit.interior) {
-    toggle(ed.selFloors, hit.floorId);
-  } else if (mode === 'wall') {
-    toggle(ed.selWalls, `${hit.floorId}|${hit.segId}`);
-  } else {
-    const bs = hit.borders ?? [0, 1];
-    let k: number;
-    if (pl) k = pl.div ?? 0;
-    else if (!uv) k = 0;
-    else if (mode === 'border') k = bs.reduce((best, b, i) => (Math.abs(b - uv.u) < Math.abs(bs[best] - uv.u) ? i : best), 0);
-    else k = Math.max(0, Math.min(bs.length - 2, bs.findIndex((b, i) => i < bs.length - 1 && uv.u >= b && uv.u <= bs[i + 1])));
-    toggle(mode === 'border' ? ed.selBorders : ed.selDivs, `${hit.floorId}|${hit.segId}|${k}`);
+    return id ? { set: ed.selElements, key: id } : null;
+  }
+  if (mode === 'floor' || !hit.segId || hit.interior) return { set: ed.selFloors, key: hit.floorId };
+  if (mode === 'wall') return { set: ed.selWalls, key: `${hit.floorId}|${hit.segId}` };
+  const bs = hit.borders ?? [0, 1];
+  let k: number;
+  if (pl) k = pl.div ?? 0;
+  else if (!uv) k = 0;
+  else if (mode === 'border') k = bs.reduce((best, b, i) => (Math.abs(b - uv.u) < Math.abs(bs[best] - uv.u) ? i : best), 0);
+  else k = Math.max(0, Math.min(bs.length - 2, bs.findIndex((b, i) => i < bs.length - 1 && uv.u >= b && uv.u <= bs[i + 1])));
+  return { set: mode === 'border' ? ed.selBorders : ed.selDivs, key: `${hit.floorId}|${hit.segId}|${k}` };
+}
+
+export function onPick(ed: Editor, hit: Hit | null, e: MouseEvent) {
+  if (!hit) { if (!e.shiftKey) ed.clearSel(); return; }
+  const add = e.shiftKey || e.ctrlKey || e.metaKey;
+  const t = hitTarget(ed, hit);
+  if (!t) { if (!add) ed.clearSets(); }
+  else if (!add) { ed.clearSets(); t.set.add(t.key); }
+  else t.set.has(t.key) ? t.set.delete(t.key) : t.set.add(t.key);
+  ed.refresh();
+}
+
+/** Right-drag box in the 3D view: everything visible inside it (Shift: added to the selection). */
+export function onBoxPick(ed: Editor, hits: Hit[], e: MouseEvent) {
+  if (!(e.shiftKey || e.ctrlKey || e.metaKey)) ed.clearSets();
+  for (const hit of hits) {
+    if (ed.pickMode !== 'floor' && ed.pickMode !== 'element' && (!hit.segId || hit.interior)) continue; // a box only takes what the pick mode is about
+    const t = hitTarget(ed, hit);
+    if (t) t.set.add(t.key);
   }
   ed.refresh();
 }
@@ -100,7 +112,7 @@ export function renderViewPanel(ed: Editor) {
       pm('border', 'Border', 'The border between two divisions (for pilasters)'),
       pm('wall', 'Wall', 'A whole wall on one floor'),
       pm('floor', 'Floor', 'Everything on a floor')),
-    h('div', { class: 'muted small' }, 'Click in the 3D view (Shift = add). Esc clears. Imported designs and textures show in the Detailed view.'),
+    h('div', { class: 'muted small' }, 'Click in the 3D view (Shift = add); right-drag a box to select everything visible in it. Middle-drag pans. Esc clears. Imported designs and textures show in the Detailed view.'),
     ed.viewer?.walk
       ? h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => ed.viewer?.exitWalk() }, 'Exit first person (Esc)'), h('span', { class: 'muted small' }, 'WASD walk · mouse look · F fly · Space jump'))
       : h('div', { class: 'muted small' }, 'First person: pick “First person view” in the view list at the top.'),

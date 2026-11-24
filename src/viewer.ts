@@ -30,6 +30,8 @@ export class Viewer {
   private frameKey = '';
   stats: BuildStats = { windowCount: 0, windowArea: 0, windowSkipped: 0 };
   onPick?: (hit: Hit | null, e: MouseEvent) => void;
+  /** Right-drag box: what is visible inside it. */
+  onBoxPick?: (hits: Hit[], e: MouseEvent) => void;
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, preserveDrawingBuffer: true });
@@ -39,6 +41,8 @@ export class Viewer {
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1e6);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    // right button: selection box; middle button pans (the wheel zooms)
+    this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: null as unknown as THREE.MOUSE };
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.4);
     sun.position.set(1, 2, 1.5);
@@ -50,9 +54,13 @@ export class Viewer {
     // a click (not a drag) picks
     let down: { x: number; y: number } | null = null;
     const el = this.renderer.domElement;
-    el.addEventListener('pointerdown', e => (down = { x: e.clientX, y: e.clientY }));
+    el.addEventListener('pointerdown', e => {
+      down = { x: e.clientX, y: e.clientY };
+      if (e.button === 2 && !this.walk && this.onBoxPick) this.startBox(e);
+    });
+    el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerup', e => {
-      if (down && !this.walk && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) this.onPick?.(this.pick(e), e);
+      if (e.button === 0 && down && !this.walk && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) this.onPick?.(this.pick(e), e);
       down = null;
     });
     let last = performance.now();
@@ -101,10 +109,44 @@ export class Viewer {
   }
   private sharedMats: THREE.Material[] = [];
 
-  pick(e: MouseEvent): Hit | null {
+  // ---- selection box (right-drag) ----
+  private startBox(e: PointerEvent) {
+    const host = this.renderer.domElement.parentElement!, r = host.getBoundingClientRect();
+    const box = document.createElement('div');
+    box.className = 'sel-box';
+    host.appendChild(box);
+    const x0 = e.clientX, y0 = e.clientY;
+    const place = (x: number, y: number) => Object.assign(box.style, {
+      left: `${Math.min(x0, x) - r.left}px`, top: `${Math.min(y0, y) - r.top}px`, width: `${Math.abs(x - x0)}px`, height: `${Math.abs(y - y0)}px`,
+    });
+    place(x0, y0);
+    const move = (ev: PointerEvent) => place(ev.clientX, ev.clientY);
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      box.remove();
+      const w = Math.abs(ev.clientX - x0), hh = Math.abs(ev.clientY - y0);
+      if (w < 4 && hh < 4) return;
+      // what is visible inside: rays through a grid of points in the box
+      const step = Math.max(6, Math.sqrt((w * hh) / 900));
+      const hits: Hit[] = [], seen = new Set<string>();
+      for (let y = Math.min(y0, ev.clientY) + step / 2; y < Math.max(y0, ev.clientY); y += step) {
+        for (let x = Math.min(x0, ev.clientX) + step / 2; x < Math.max(x0, ev.clientX); x += step) {
+          const hit = this.pickAt(x, y);
+          if (!hit) continue;
+          const key = `${hit.floorId}|${hit.segId ?? ''}|${hit.placementId ?? ''}|${Math.round(hit.point.x * 4)},${Math.round(hit.point.y * 4)},${Math.round(hit.point.z * 4)}`;
+          if (!seen.has(key)) { seen.add(key); hits.push(hit); }
+        }
+      }
+      this.onBoxPick?.(hits, ev);
+    };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  }
+
+  pick(e: MouseEvent): Hit | null { return this.pickAt(e.clientX, e.clientY); }
+  pickAt(cx: number, cy: number): Hit | null {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ray = new THREE.Raycaster();
-    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
+    ray.setFromCamera(new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1), this.camera);
     for (const hit of ray.intersectObjects(this.content.children, true)) {
       const info = hit.object.userData?.pick as PickInfo | undefined;
       if (info && hit.object instanceof THREE.Mesh) {

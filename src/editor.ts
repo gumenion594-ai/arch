@@ -9,7 +9,7 @@ import { Planner, Tool, fmt } from './planner';
 import { DesignView } from './designview';
 import { renderDecoPanel } from './decopanel';
 import { ShapeEditor, ShapeTool } from './shapeeditor';
-import { DesignMode, PickMode, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
+import { DesignMode, PickMode, onBoxPick, onPick, renderDesignPanel, renderViewPanel, setupDesignMode } from './decor';
 import { V2, enclosedFaces, planValid, sampleSeg, signedArea } from './geometry';
 import { Selection, areaForFloor, autoFloorAreas, interiorForFloor, loftPointTarget } from './build3d';
 import { calculate, Report } from './stats';
@@ -155,6 +155,7 @@ export class Editor {
       this.viewer = new Viewer(this.center);
       this.viewer.onTexture = () => this.refresh();
       this.viewer.onPick = (hit, e) => onPick(this, hit, e);
+      this.viewer.onBoxPick = (hits, e) => onBoxPick(this, hits, e);
       this.viewer.onWalkChange = walking => {
         if (walking && this.preWalkPanels === null) { this.preWalkPanels = [this.hideLeft, this.hideRight]; this.setPanels(true, true); }
         if (!walking && this.preWalkPanels !== null) { const [l, rr] = this.preWalkPanels; this.preWalkPanels = null; this.setPanels(l, rr); }
@@ -677,7 +678,7 @@ export class Editor {
       const help: Record<Tool, string> = {
         draw: 'Click to add points; each new point connects to the previous one. Click an existing point to connect to it (closing a loop) and continue from there. Enter, Space or Esc ends the chain: the next point starts a new, unconnected one. A point with no walls (orange ring) builds nothing; delete stray ones in Select mode.'
           + (interior ? ' Internal walls must stay inside the external walls (orange dashed).' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
-        select: 'Click points or walls to select (Shift = add). Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
+        select: 'Click points or walls to select (Shift = add), or right-drag a box around them; drag one of several selected points to move them all. Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
         move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
         stairs: 'Click inside the building to place a staircase. Select it to change size and rotation.',
         elevator: 'Click inside the building to place an elevator shaft.',
@@ -685,7 +686,7 @@ export class Editor {
       };
       if (area) {
         help.draw = 'Click to add points; each connects to the previous one. Click a point to draw from it or to connect to it. Lines may cross: crossings become points. Clicks snap to this floor\'s walls (orange) and to your lines. Enter / Esc ends the line: the next click starts a new one anywhere. Every closed shape is floor until you carve it.';
-        help.select = 'Click points or lines to select (Shift = add). Drag points (they snap to the walls). Double-click a line to add a point. Delete removes the selection.';
+        help.select = 'Click points or lines to select (Shift = add), or right-drag a box around them; drag one of several selected points to move them all. Drag points (they snap to the walls). Double-click a line to add a point. Delete removes the selection.';
       }
       // points with no walls (stray clicks, or left behind when a wall is deleted) build nothing
       const wired = new Set(pl.segments.flatMap(sg => [sg.a, sg.b]));
@@ -712,7 +713,7 @@ export class Editor {
               pair ? h('button', { onclick: () => pn.alignSelected('right') }, 'Right angle') : null,
               pair ? h('button', { onclick: () => pn.alignSelected('straight') }, 'Same line') : null)) : null,
           h('div', { class: 'muted small help' }, help[pn.tool]),
-          h('div', { class: 'row' }, h('button', { onclick: () => pn.resetView() }, 'Reset zoom'), h('span', { class: 'muted small' }, 'Wheel zooms · right-drag pans')),
+          h('div', { class: 'row' }, h('button', { onclick: () => pn.resetView() }, 'Reset zoom'), h('span', { class: 'muted small' }, 'Wheel zooms · middle-drag pans · right-drag: box select')),
           pn.tool === 'move' ? this.transformBox() : null,
           h('div', { class: 'box-title' }, 'Applies to floors'),
           ranges,

@@ -42,6 +42,8 @@ export class Planner {
   private zoom = 1;
   private pan = { x: 0, y: 0 };
   private panning: { x: number; y: number } | null = null;
+  /** Right-drag: a selection box (plan coordinates), and whether it adds to the selection. */
+  private boxSel: { a: V2; b: V2; add: boolean } | null = null;
 
   constructor(private host: HTMLElement, private h: PlannerHost) {
     host.appendChild(this.canvas);
@@ -212,7 +214,8 @@ export class Planner {
 
   // ---- mouse ----
   private down(e: MouseEvent) {
-    if (e.button === 1 || e.button === 2) { e.preventDefault(); this.panning = { x: e.clientX, y: e.clientY }; return; }
+    if (e.button === 1) { e.preventDefault(); this.panning = { x: e.clientX, y: e.clientY }; return; } // middle-drag pans
+    if (e.button === 2) { e.preventDefault(); const q = this.toPlan(e); this.boxSel = { a: q, b: q, add: e.shiftKey || e.ctrlKey || e.metaKey }; return; } // right-drag: selection box
     const plan = this.h.getPlan();
     if (!plan || e.button !== 0) return;
     const p0 = this.toPlan(e);
@@ -305,6 +308,7 @@ export class Planner {
   }
 
   private move = (e: MouseEvent) => {
+    if (this.boxSel) { this.boxSel.b = this.toPlan(e); this.draw(); return; }
     if (this.panning) {
       this.pan.x += e.clientX - this.panning.x; this.pan.y += e.clientY - this.panning.y;
       this.panning = { x: e.clientX, y: e.clientY };
@@ -342,6 +346,22 @@ export class Planner {
       const np0 = { x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) };
       // area plans: dragged points snap to the walls too (not to their own lines)
       const np = this.h.area ? this.snapArea({ ...plan, segments: plan.segments.filter(sg => sg.a !== pt.id && sg.b !== pt.id) }, np0) : np0;
+      // several points selected (e.g. with a box): they all move together
+      if (this.selPoints.size > 1 && this.selPoints.has(pt.id)) {
+        const dx = np.x - pt.x, dy = np.y - pt.y;
+        const moved = plan.points.filter(q => this.selPoints.has(q.id));
+        const ov = new Map(moved.map(q => [q.id, { x: q.x + dx, y: q.y + dy }]));
+        const okAll = [...ov.values()].every(q => q.x >= 0 && q.x <= 1 && q.y >= 0 && q.y <= 1)
+          && (this.h.area || (planValid(plan, ov) && moved.every(q => this.okPointWithWalls(plan, q.id, ov.get(q.id)!))));
+        if (okAll) {
+          if (!this.drag.began) { this.h.begin(); this.drag.began = true; }
+          for (const q of moved) { const o = ov.get(q.id)!; q.x = o.x; q.y = o.y; }
+          this.drag.moved = true;
+          this.h.selectionChanged();
+        }
+        this.draw();
+        return;
+      }
       if (this.h.area || (planValid(plan, new Map([[pt.id, np]])) && this.okPointWithWalls(plan, pt.id, np))) {
         if (!this.drag.began) { this.h.begin(); this.drag.began = true; }
         pt.x = np.x; pt.y = np.y;
@@ -354,6 +374,23 @@ export class Planner {
 
   private up = () => {
     this.panning = null;
+    if (this.boxSel) {
+      // everything inside the box: points, lines with both ends inside, stairs / elevators
+      const { a, b, add } = this.boxSel, plan = this.h.getPlan();
+      this.boxSel = null;
+      const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+      const inside = (q: V2) => q.x >= x0 && q.x <= x1 && q.y >= y0 && q.y <= y1;
+      if (plan && Math.hypot((b.x - a.x) * this.box.s, (b.y - a.y) * this.box.s) > 3) {
+        if (!add) { this.selPoints.clear(); this.selSegs.clear(); this.selObj = null; }
+        const ids = new Set(plan.points.filter(inside).map(q => q.id));
+        ids.forEach(id => this.selPoints.add(id));
+        plan.segments.filter(sg => ids.has(sg.a) && ids.has(sg.b)).forEach(sg => this.selSegs.add(sg.id));
+        if (this.tool === 'draw') { this.tool = 'select'; this.head = null; } // a box is for selecting
+        this.h.selectionChanged();
+      }
+      this.draw();
+      return;
+    }
     if (this.drag?.moved) { const plan = this.h.getPlan(); if (plan) this.settle(plan); }
     if (this.drag?.moved || this.objDrag?.began || this.moveAll?.began) this.h.commit();
     this.drag = null; this.objDrag = null; this.moveAll = null;
@@ -606,6 +643,15 @@ export class Planner {
         g.strokeStyle = '#4cd964'; g.lineWidth = 2;
         g.beginPath(); g.arc(s.x, s.y, 8, 0, Math.PI * 2); g.stroke();
       }
+    }
+
+    // selection box (right-drag)
+    if (this.boxSel) {
+      const A = this.toScreen(this.boxSel.a), B = this.toScreen(this.boxSel.b);
+      g.fillStyle = 'rgba(255,212,0,0.12)'; g.strokeStyle = '#ffd400'; g.lineWidth = 1; g.setLineDash([4, 3]);
+      g.fillRect(Math.min(A.x, B.x), Math.min(A.y, B.y), Math.abs(B.x - A.x), Math.abs(B.y - A.y));
+      g.strokeRect(Math.min(A.x, B.x), Math.min(A.y, B.y), Math.abs(B.x - A.x), Math.abs(B.y - A.y));
+      g.setLineDash([]);
     }
 
     // cursor readout

@@ -101,3 +101,6 @@ label.inline.band { font-size: 11px; gap: 2px; } label.inline.band input { width
 .editor.hide-left .left, .editor.hide-right .right { display: none; }
 .panel-toggle { position: absolute; top: 50px; z-index: 5; width: 22px; height: 26px; padding: 0; font-size: 12px; line-height: 1; opacity: .8; }
 .panel-toggle:hover { opacity: 1; }
+
+/* right-drag selection box (3D view) */
+.sel-box { position: absolute; border: 1px dashed #ffd400; background: rgba(255, 212, 0, 0.12); pointer-events: none; z-index: 4; }
