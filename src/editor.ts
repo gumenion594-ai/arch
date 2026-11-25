@@ -38,6 +38,8 @@ export class Editor {
   activePlan: Record<'structure' | 'floorplan', string | null> = { structure: null, floorplan: null };
   /** Structure tab: editing the walls or the floor area of the structure plan (both are always shown). */
   structEdit: 'walls' | 'area' = 'walls';
+  /** More plans picked (Ctrl / Shift in the plan list, or several floors): the move / rotate / resize tool takes them along. */
+  selPlans = new Set<string>();
   activeDesign: Record<DesignMode, string | null> = { openings: null, niches: null, balconies: null, walls: null, pilasters: null };
   selBorders = new Set<string>(); // floorId|segId|k
   selElements = new Set<string>(); // placement ids
@@ -188,6 +190,7 @@ export class Editor {
       this.planner = new Planner(this.center, {
         getPlan: () => this.editPlan(),
         floorGuide: () => this.floorGuide(),
+        xfPlans: () => (this.editingArea() ? [] : this.plans().filter(x => this.selPlans.has(x.id))),
         getGhost: () => this.ghostPlan(),
         links: () => this.ghostLinks(),
         allowed: () => (this.mode === 'floorplan' ? this.allowedArea() : null),
@@ -384,6 +387,11 @@ export class Editor {
     }
     this.selWalls.clear(); this.selDivs.clear();
     // in a planner, show the plan the clicked floor uses
+    if ((this.mode === 'structure' || this.mode === 'floorplan') && this.selFloors.size > 1) {
+      // several floors: their plans are picked together (stacked), for the move / rotate / resize tool
+      const of = (fid: string) => (this.mode === 'structure' ? planForFloor(this.b, fid) : interiorForFloor(this.b, fid));
+      this.selPlans = new Set([...this.selFloors].map(of).filter((x): x is StructurePlan => !!x && x.id !== this.plan()?.id).map(x => x.id));
+    } else this.selPlans.clear();
     if ((this.mode === 'structure' || this.mode === 'floorplan') && this.selFloors.has(id)) {
       const pl = this.mode === 'structure' ? planForFloor(this.b, id) : interiorForFloor(this.b, id);
       if (pl && pl.id !== this.plan()?.id) {
@@ -705,8 +713,17 @@ export class Editor {
     const plansEl = h('div', { class: 'plans' }, ...list.map(x => h('div', {
       class: 'plan-row' + (x.id === pl?.id ? ' active' : ''),
       style: `border-left-color:${this.planColor(x)}`,
-      onclick: () => { this.setActivePlan(x.id); pn.head = null; pn.selPoints.clear(); pn.selSegs.clear(); pn.selObj = null; this.refresh(); },
-    }, x.name, h('span', { class: 'muted small' }, ` ${formatRanges(p, floorIdx(x)) || 'no floors'}${p.topPlanId === x.id ? ' + Top' : ''}`))));
+      onclick: (e: MouseEvent) => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey) { // pick more plans, to move / rotate / resize them together
+          if (x.id === pl?.id) return;
+          this.selPlans.has(x.id) ? this.selPlans.delete(x.id) : this.selPlans.add(x.id);
+          if (this.selPlans.size) pn.tool = 'move';
+          return this.refresh();
+        }
+        this.selPlans.clear();
+        this.setActivePlan(x.id); pn.head = null; pn.selPoints.clear(); pn.selSegs.clear(); pn.selObj = null; this.refresh();
+      },
+    }, x.name, this.selPlans.has(x.id) ? h('span', { class: 'small', style: 'color:#78c8ff' }, ' ✓') : null, h('span', { class: 'muted small' }, ` ${formatRanges(p, floorIdx(x)) || 'no floors'}${p.topPlanId === x.id ? ' + Top' : ''}`))));
 
     const body: (Node | null)[] = [];
     if (area && sp && !pl) {
@@ -731,7 +748,7 @@ export class Editor {
           + (interior ? '' : ' Walls may cross: a point is made where they do, splitting both.')
           + (interior ? ' Internal walls must stay inside the walls of its floor structure (orange); its floor area shows in blue.' : ' The orange dashed outline is the plan of the floor below; dotted orange lines show where its points connect up to this plan.'),
         select: 'Click points or walls to select (Shift = add), or right-drag a box around them; drag one of several selected points to move them all. Drag points to move. Double-click a wall to insert a point. Delete removes the selection.',
-        move: 'Drag anywhere to move every point and wall (and stairs / elevators) together.',
+        move: 'Drag the red / green arrow to move along x / y, the middle square (or anywhere) to move freely (Shift: straight), the blue ring to rotate (Shift: 15° steps), a corner to resize, a side dot to stretch one way. Ctrl- or Shift-click more plans in the list (or select several floors) to move, rotate or resize the stacked plans together; they show dashed blue.',
         stairs: 'Draw the stairs from the bottom step up: click where they start, click at each turn, then double-click or press Enter at the top (Shift keeps a flight straight). Each leg is a flight of steps, each corner a landing; to turn back, draw a short leg across and then back. The arrows show the way up. The stairs climb to the floor above whatever is there: carve an opening in the floor area of the structure above (Structure tab → Floor area) where you want one.',
         spiral: 'Click inside the building to place a spiral staircase: it winds up around a post from the green dot (UP) to the next floor. Select it to change its diameter and direction.',
         elevator: 'Click inside the building to place an elevator shaft.',
@@ -756,7 +773,7 @@ export class Editor {
         }, 'Delete them')));
       if (area) {
         const segs = pl.segments.filter(sg => pn.selSegs.has(sg.id)), pair = pn.pairOfSelected();
-        const toolRow = h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('carve', 'Carve / restore (C)'), toolBtn('move', 'Move all (M)'),
+        const toolRow = h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('carve', 'Carve / restore (C)'), toolBtn('move', 'Move / rotate / resize (M)'),
           pn.tool === 'draw' ? h('button', { onclick: () => pn.endChain() }, 'End line (Enter)') : null);
         body.push(
           h('div', { class: 'box-title' }, 'Tool'), toolRow,
@@ -797,7 +814,7 @@ export class Editor {
       }
       body.push(
         h('div', { class: 'box-title' }, 'Tool'),
-        h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('move', 'Move all (M)'),
+        h('div', { class: 'row' }, toolBtn('select', 'Select (S)'), toolBtn('draw', 'Draw (D)'), toolBtn('move', 'Move / rotate / resize (M)'),
           interior ? toolBtn('stairs', 'Stairs') : null, interior ? toolBtn('spiral', 'Spiral stairs') : null, interior ? toolBtn('elevator', 'Elevator') : null, interior ? toolBtn('fill', 'Fill room') : null,
           pn.tool === 'draw' ? h('button', { onclick: () => pn.endChain() }, 'End chain (Enter)') : null),
         this.selectionBox(pl, interior),

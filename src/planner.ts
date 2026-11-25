@@ -27,6 +27,8 @@ export interface PlannerHost {
   freeLines?: boolean;
   /** Floor plans: the rooms (closed by the external and internal walls), smallest first, and which are filled solid. */
   rooms?(): { poly: V2[]; area: number; filled: boolean }[];
+  /** Move / rotate / resize tool: the plans it transforms together (default: the plan being edited). */
+  xfPlans?(): StructurePlan[];
   /** The floor surface drawn under the walls (a structure's floor area); null: automatic, inside the walls. */
   floorGuide?(): StructurePlan | null;
   /** Floor plans: how high stairs climb here (to the next main floor), for their layout. */
@@ -44,7 +46,9 @@ export class Planner {
   selSegs = new Set<string>();
   selObj: string | null = null;
   private objDrag: { id: string; dx: number; dy: number; began: boolean } | null = null;
-  private moveAll: { x: number; y: number; began: boolean; orig: Map<string, V2> } | null = null;
+  /** Move / rotate / resize gizmo drag: which handle, where it started, the plans and their copies from before. */
+  private xf: { mode: XfMode; start: V2; c: V2; plans: StructurePlan[]; snap: StructurePlan[]; began: boolean } | null = null;
+  private xfHover: XfMode | null = null;
   private hover: V2 | null = null;
   private drag: { id: string; moved: boolean; began: boolean } | null = null;
   private ro: ResizeObserver;
@@ -318,7 +322,10 @@ export class Planner {
     }
 
     if (this.tool === 'move') {
-      this.moveAll = { x: p.x, y: p.y, began: false, orig: new Map([...plan.points, ...plan.objects].map(q => [q.id, { x: q.x, y: q.y }])) };
+      const plans = this.xfSet(), bb = xfBounds(plans);
+      if (!bb) return;
+      const mode = this.xfHit(e, bb) ?? 'move';
+      this.xf = { mode, start: p0, c: { x: (bb.x0 + bb.x1) / 2, y: (bb.y0 + bb.y1) / 2 }, plans, snap: plans.map(x => JSON.parse(JSON.stringify(x))), began: false };
       return;
     }
     if (this.tool === 'stairs') {
@@ -376,17 +383,10 @@ export class Planner {
     if (!plan) return;
     const p = this.toPlan(e);
     if (e.target === this.canvas) this.hover = p;
-    if (this.moveAll) {
-      const m = this.moveAll;
-      let dx = p.x - m.x, dy = p.y - m.y;
-      // keep everything inside the square
-      const all = [...m.orig.values()];
-      dx = clamp(dx, -Math.min(...all.map(q => q.x)), 1 - Math.max(...all.map(q => q.x)));
-      dy = clamp(dy, -Math.min(...all.map(q => q.y)), 1 - Math.max(...all.map(q => q.y)));
-      if (!m.began) { this.h.begin(); m.began = true; }
-      for (const q of [...plan.points, ...plan.objects]) { const o = m.orig.get(q.id); if (o) { q.x = o.x + dx; q.y = o.y + dy; } }
-      this.draw();
-      return;
+    if (this.xf) { this.xfDrag(p, e.shiftKey); return; }
+    if (this.tool === 'move' && e.target === this.canvas) {
+      const bb = xfBounds(this.xfSet()), m = bb ? this.xfHit(e, bb) : null;
+      if (m !== this.xfHover) { this.xfHover = m; this.canvas.style.cursor = m === 'rot' ? 'grab' : m === 'x' ? 'ew-resize' : m === 'y' ? 'ns-resize' : m === 'scale' ? 'nwse-resize' : m === 'sx' ? 'col-resize' : m === 'sy' ? 'row-resize' : 'move'; this.draw(); }
     }
     if (this.objDrag) {
       const o = plan.objects.find(x => x.id === this.objDrag!.id);
@@ -451,8 +451,9 @@ export class Planner {
       return;
     }
     if (this.drag?.moved) { const plan = this.h.getPlan(); if (plan) this.settle(plan); }
-    if (this.drag?.moved || this.objDrag?.began || this.moveAll?.began) this.h.commit();
-    this.drag = null; this.objDrag = null; this.moveAll = null;
+    if (this.drag?.moved || this.objDrag?.began || this.xf?.began) this.h.commit();
+    this.drag = null; this.objDrag = null; this.xf = null;
+    this.draw();
   };
 
   private dbl(e: MouseEvent) {
@@ -537,6 +538,100 @@ export class Planner {
   }
 
   // ---- drawing ----
+  // ---- move / rotate / resize gizmo ----
+  private xfSet(): StructurePlan[] {
+    const own = this.h.getPlan(), list = this.h.xfPlans?.() ?? [];
+    return [...new Set([...(own ? [own] : []), ...list])];
+  }
+  /** Screen positions of the gizmo's handles for a box (plan coordinates). */
+  private xfHandles(bb: Box) {
+    const A = this.toScreen({ x: bb.x0, y: bb.y1 }), B = this.toScreen({ x: bb.x1, y: bb.y0 }); // top-left, bottom-right on screen
+    const c = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 }, arm = Math.max(46, Math.min(90, (B.x - A.x) / 2 + 24));
+    return {
+      A, B, c,
+      x: { x: c.x + arm, y: c.y }, y: { x: c.x, y: c.y - arm },
+      rot: { x: c.x, y: A.y - 30 },
+      corners: [A, { x: B.x, y: A.y }, B, { x: A.x, y: B.y }],
+      sides: [{ x: A.x, y: c.y, m: 'sx' as XfMode }, { x: B.x, y: c.y, m: 'sx' as XfMode }, { x: c.x, y: A.y, m: 'sy' as XfMode }, { x: c.x, y: B.y, m: 'sy' as XfMode }],
+    };
+  }
+  private xfHit(e: MouseEvent, bb: Box): XfMode | null {
+    const r = this.canvas.getBoundingClientRect(), m = { x: e.clientX - r.left, y: e.clientY - r.top };
+    const H = this.xfHandles(bb), near = (q: { x: number; y: number }, d = 9) => Math.hypot(q.x - m.x, q.y - m.y) <= d;
+    const onSeg = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+      const dx = b.x - a.x, dy = b.y - a.y, t = clamp(((m.x - a.x) * dx + (m.y - a.y) * dy) / (dx * dx + dy * dy || 1), 0, 1);
+      return Math.hypot(a.x + dx * t - m.x, a.y + dy * t - m.y) <= 6 && t > 0.25;
+    };
+    if (near(H.rot, 10)) return 'rot';
+    if (H.corners.some(q => near(q))) return 'scale';
+    const sd = H.sides.find(q => near(q));
+    if (sd) return sd.m;
+    if (onSeg(H.c, H.x) || near(H.x, 11)) return 'x';
+    if (onSeg(H.c, H.y) || near(H.y, 11)) return 'y';
+    return null;
+  }
+  private xfDrag(p: V2, shift: boolean) {
+    const x = this.xf!, c = x.c, s0 = x.start;
+    let f: (q: V2) => V2, ang = 0, k = 1;
+    if (x.mode === 'rot') {
+      ang = Math.atan2(p.y - c.y, p.x - c.x) - Math.atan2(s0.y - c.y, s0.x - c.x);
+      if (shift) ang = Math.round(ang / (Math.PI / 12)) * (Math.PI / 12); // 15° steps
+      const cs = Math.cos(ang), sn = Math.sin(ang);
+      f = q => ({ x: c.x + (q.x - c.x) * cs - (q.y - c.y) * sn, y: c.y + (q.x - c.x) * sn + (q.y - c.y) * cs });
+    } else if (x.mode === 'scale' || x.mode === 'sx' || x.mode === 'sy') {
+      const r = (a: number, b: number) => (Math.abs(b) < 1e-6 ? 1 : Math.max(0.05, a / b));
+      const kx = x.mode === 'sy' ? 1 : x.mode === 'sx' ? r(p.x - c.x, s0.x - c.x) : r(Math.hypot(p.x - c.x, p.y - c.y), Math.hypot(s0.x - c.x, s0.y - c.y));
+      const ky = x.mode === 'sx' ? 1 : x.mode === 'sy' ? r(p.y - c.y, s0.y - c.y) : kx;
+      k = Math.sqrt(kx * ky);
+      f = q => ({ x: c.x + (q.x - c.x) * kx, y: c.y + (q.y - c.y) * ky });
+    } else {
+      let dx = p.x - s0.x, dy = p.y - s0.y;
+      if (x.mode === 'x' || (shift && Math.abs(dx) >= Math.abs(dy))) dy = 0;
+      else if (x.mode === 'y' || shift) dx = 0;
+      f = q => ({ x: q.x + dx, y: q.y + dy });
+    }
+    // everything must stay in the building square (and a single floor plan inside its walls)
+    const pts = x.snap.flatMap(pl => xfPoints(pl)).map(f);
+    if (!pts.every(q => q.x >= -1e-9 && q.x <= 1 + 1e-9 && q.y >= -1e-9 && q.y <= 1 + 1e-9)) return;
+    if (x.plans.length === 1 && this.h.allowed?.() && !x.snap[0].points.map(f).every(q => this.okPoint(q))) return;
+    if (!x.began) { this.h.begin(); x.began = true; }
+    x.plans.forEach((pl, i) => xfApply(pl, x.snap[i], f, (ang * 180) / Math.PI, k));
+    this.draw();
+  }
+  private drawGizmo() {
+    const plans = this.xfSet(), bb = xfBounds(plans), g = this.ctx;
+    if (!bb) return;
+    // the other plans moved along: their walls, dashed
+    const own = this.h.getPlan();
+    g.strokeStyle = 'rgba(120,200,255,0.75)'; g.lineWidth = 1.5; g.setLineDash([5, 4]);
+    for (const pl of plans) if (pl !== own) for (const sg of pl.segments) {
+      const pts = sampleSeg(pl, sg); g.beginPath(); pts.forEach((v, i) => { const q = this.toScreen(v); i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); }); g.stroke();
+    }
+    const H = this.xfHandles(bb), hot = this.xf?.mode ?? this.xfHover;
+    g.strokeStyle = 'rgba(255,255,255,0.7)'; g.lineWidth = 1; g.strokeRect(H.A.x, H.A.y, H.B.x - H.A.x, H.B.y - H.A.y);
+    g.setLineDash([]);
+    const arrow = (to: { x: number; y: number }, col: string, on: boolean) => {
+      g.strokeStyle = col; g.fillStyle = col; g.lineWidth = on ? 4 : 2.5;
+      g.beginPath(); g.moveTo(H.c.x, H.c.y); g.lineTo(to.x, to.y); g.stroke();
+      const a = Math.atan2(to.y - H.c.y, to.x - H.c.x);
+      g.beginPath(); g.moveTo(to.x + Math.cos(a) * 10, to.y + Math.sin(a) * 10);
+      g.lineTo(to.x + Math.cos(a + 2.5) * 10, to.y + Math.sin(a + 2.5) * 10); g.lineTo(to.x + Math.cos(a - 2.5) * 10, to.y + Math.sin(a - 2.5) * 10); g.closePath(); g.fill();
+    };
+    arrow(H.x, '#e5534b', hot === 'x'); arrow(H.y, '#57c26b', hot === 'y');
+    g.fillStyle = hot === 'move' ? '#ffd400' : 'rgba(255,255,255,0.85)'; g.fillRect(H.c.x - 6, H.c.y - 6, 12, 12);
+    // rotate: a ring above the box
+    g.strokeStyle = '#4aa3ff'; g.lineWidth = hot === 'rot' ? 4 : 2.5;
+    g.beginPath(); g.moveTo(H.c.x, H.A.y); g.lineTo(H.rot.x, H.rot.y + 8); g.stroke();
+    g.beginPath(); g.arc(H.rot.x, H.rot.y, 8, 0, Math.PI * 2); g.stroke();
+    // resize: corners (both ways) and sides (one way)
+    for (const q of H.corners) { g.fillStyle = hot === 'scale' ? '#ffd400' : '#fff'; g.fillRect(q.x - 5, q.y - 5, 10, 10); }
+    for (const q of H.sides) { g.fillStyle = hot === q.m ? '#ffd400' : '#cfd8e3'; g.beginPath(); g.arc(q.x, q.y, 5, 0, Math.PI * 2); g.fill(); }
+    if (this.xf?.began) {
+      g.fillStyle = '#ddd'; g.font = '12px system-ui';
+      g.fillText(this.xf.mode === 'rot' ? 'Shift: 15° steps' : this.xf.mode === 'move' ? 'Shift: straight along x or y' : '', H.A.x, H.B.y + 18);
+    }
+  }
+
   /** A floor area's shapes: floor (blue) / carved (dark, hatched); largest first so shapes inside others paint over them. */
   private drawAreaFaces(plan: StructurePlan, alpha: number, hov: { poly: V2[] } | null) {
     const g = this.ctx, w = this.host.clientWidth, hh = this.host.clientHeight;
@@ -778,6 +873,8 @@ export class Planner {
       }
     }
 
+    if (this.tool === 'move') this.drawGizmo();
+
     // selection box (right-drag)
     if (this.boxSel) {
       const A = this.toScreen(this.boxSel.a), B = this.toScreen(this.boxSel.b);
@@ -794,6 +891,35 @@ export class Planner {
       g.fillText(`x ${this.hover.x.toFixed(3)}  y ${this.hover.y.toFixed(3)}   (${fmt(this.hover.x * L)} m, ${fmt(this.hover.y * L)} m)`, 12, hh - 12);
     }
   }
+}
+
+type XfMode = 'move' | 'x' | 'y' | 'rot' | 'scale' | 'sx' | 'sy';
+type Box = { x0: number; y0: number; x1: number; y1: number };
+/** Everything with a position in a plan (and in a structure plan's floor area). */
+function xfPoints(pl: StructurePlan): V2[] {
+  return [...pl.points, ...pl.objects, ...pl.objects.flatMap(o => o.path ?? []), ...(pl.area ? xfPoints(pl.area) : [])];
+}
+function xfBounds(plans: StructurePlan[]): Box | null {
+  const pts = plans.flatMap(pl => [...pl.points, ...pl.objects, ...(pl.area?.points ?? [])]);
+  if (!pts.length) return null;
+  let x0 = Math.min(...pts.map(q => q.x)), x1 = Math.max(...pts.map(q => q.x)), y0 = Math.min(...pts.map(q => q.y)), y1 = Math.max(...pts.map(q => q.y));
+  if (x1 - x0 < 0.02) { x0 -= 0.01; x1 += 0.01; }
+  if (y1 - y0 < 0.02) { y0 -= 0.01; y1 += 0.01; }
+  return { x0, y0, x1, y1 };
+}
+/** dst = src transformed (points, stairs and their paths, carve / fill marks, the floor area); ang in degrees, k: object size factor. */
+function xfApply(dst: StructurePlan, src: StructurePlan, f: (q: V2) => V2, ang: number, k: number) {
+  const fp = (q: V2) => { const r = f(q); return { x: clamp(r.x, 0, 1), y: clamp(r.y, 0, 1) }; };
+  dst.points.forEach((q, i) => Object.assign(q, fp(src.points[i])));
+  dst.objects.forEach((o, i) => {
+    const so = src.objects[i];
+    Object.assign(o, fp(so));
+    o.rot = so.rot + ang; o.w = so.w * k; o.d = so.d * k;
+    if (so.path) o.path = so.path.map(fp);
+  });
+  if (src.carved) dst.carved = src.carved.map(fp);
+  if (src.filled) dst.filled = src.filled.map(fp);
+  if (dst.area && src.area) xfApply(dst.area, src.area, f, ang, k);
 }
 
 export const fmt = (v: number) => (Math.round(v * 100) / 100).toString();
