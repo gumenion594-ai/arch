@@ -298,7 +298,8 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     return tex ?? (pl.color ? mats.color(pl.color) : fallback);
   };
   /** An imported design fitted into a box, only in the detailed view (null otherwise). */
-  let passDesign = false; // designs being placed in a door: you can walk through them
+  let passDesign = false;
+  let lastDesign: THREE.Object3D | null = null; // the design object designAt placed last // designs being placed in a door: you can walk through them
   const designAt = (id: string | null | undefined, c: THREE.Vector3, along: THREE.Vector3, up: THREE.Vector3, out: THREE.Vector3, w: number, h: number, d: number, recolor?: THREE.Material | null, pick?: PickInfo, sliced = false, clip?: THREE.Plane[], cutouts?: Cutouts) => {
     if (!o.detailed || !id || !mats.design) return false;
     const src = mats.design(id);
@@ -329,6 +330,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
       m.userData = { pick, passThrough: passDesign || !!cutouts || !!clip?.length };
     });
     g.add(obj);
+    lastDesign = obj;
     return glass ? 'glass' : true;
   };
 
@@ -518,6 +520,7 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
 
           // openings and niches: holes in u/v; big ones reach into the neighbouring divisions
           const holes: Hole[] = [];
+          const keepClear: THREE.Vector3[][] = []; // outlines (world) of opening designs: wall patterns stop round them
           pick.holes = [];
           for (const pl of placements) {
             if (pl.segId !== seg.id || (pl.type !== 'opening' && pl.type !== 'niche') || (kind !== 'wall' && kind !== 'roof')) continue;
@@ -557,7 +560,9 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             if (pl.designId) {
               const fd = wall.frame(clamp01(sc / lenM), clamp01((yLow + shape.h / 2) / wallH));
               passDesign = use === 'door'; // walk through doors
+              lastDesign = null;
               made = designAt(pl.designId, fd.face, fd.along, fd.up, fd.out, shape.w, shape.h, REF_WALL, sm, ppick);
+              if (made && lastDesign) { const hl = outlineOnWall(lastDesign, fd.face, fd.along, fd.up); if (hl) keepClear.push(hl); }
               passDesign = false;
             }
             // what fills it: glass in windows (unless the design brings its own), a plain door without a design, nothing in arches
@@ -607,6 +612,13 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
               const us = hl.poly.map(q => q.x);
               if (Math.max(...us) < u0 || Math.min(...us) > u1) continue;
               polys.push(hl.poly.map(q => { const P = wall.at(q.x, q.y, 0).sub(O); return { x: P.dot(U), y: P.dot(V) }; }));
+            }
+            // a window / door design (frame, surround) shows whole: the pattern stops round its outline
+            const lo = wall.at(u0, 0.5, 0), hi = wall.at(u1, 0.5, 0), a0 = Math.min(lo.clone().sub(O).dot(U), hi.clone().sub(O).dot(U)) - 0.01, a1 = Math.max(lo.clone().sub(O).dot(U), hi.clone().sub(O).dot(U)) + 0.01;
+            for (const kc of keepClear) {
+              const poly = kc.map(P => { const d = P.clone().sub(O); return { x: d.dot(U), y: d.dot(V) }; });
+              if (Math.max(...poly.map(q => q.x)) < a0 || Math.min(...poly.map(q => q.x)) > a1) continue;
+              polys.push(poly);
             }
             return polys.length ? { O, U: U.clone(), V: V.clone(), polys } : undefined;
           };
@@ -1101,10 +1113,38 @@ function sweepProfile(wall: WallSolid, u0: number, u1: number, prof: [number, nu
 
 type Hole = { poly: V2[]; depth?: (u: number, v: number) => number };
 /** Not drawn, but still hit by clicks. */
+/** The outline of a placed design seen straight on the wall (convex hull, 1 cm wider), in world coordinates. */
+function outlineOnWall(obj: THREE.Object3D, c: THREE.Vector3, along: THREE.Vector3, up: THREE.Vector3): THREE.Vector3[] | null {
+  obj.updateMatrixWorld(true);
+  const pts: V2[] = [], v = new THREE.Vector3();
+  obj.traverse(x => {
+    const m = x as THREE.Mesh;
+    if (!m.isMesh) return;
+    const pos = m.geometry.getAttribute('position');
+    const step = Math.max(1, Math.floor(pos.count / 3000));
+    for (let k = 0; k < pos.count; k += step) {
+      v.fromBufferAttribute(pos, k).applyMatrix4(m.matrixWorld).sub(c);
+      pts.push({ x: v.dot(along), y: v.dot(up) });
+    }
+  });
+  if (pts.length < 3) return null;
+  // convex hull (monotone chain)
+  pts.sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o: V2, a: V2, b: V2) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: V2[] = [], upper: V2[] = [];
+  for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+  let hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
+  if (hull.length < 3) return null;
+  const mid = hull.reduce((a, q) => ({ x: a.x + q.x / hull.length, y: a.y + q.y / hull.length }), { x: 0, y: 0 });
+  hull = hull.map(q => { const d = Math.hypot(q.x - mid.x, q.y - mid.y) || 1; return { x: q.x + ((q.x - mid.x) / d) * 0.01, y: q.y + ((q.y - mid.y) / d) * 0.01 }; });
+  if (hull.length > 60) hull = hull.filter((_, i) => i % Math.ceil(hull.length / 60) === 0);
+  return hull.map(q => c.clone().addScaledVector(along, q.x).addScaledVector(up, q.y));
+}
 /** Outlines (in a frame O + x·U + y·V) where a design is not drawn: the openings of the wall it covers. */
 const cutMatCache = new WeakMap<object, Map<THREE.Material, THREE.Material>>();
 type Cutouts = { O: THREE.Vector3; U: THREE.Vector3; V: THREE.Vector3; polys: V2[][] };
-const MAX_CUT_PTS = 256, MAX_CUTS = 12;
+const MAX_CUT_PTS = 512, MAX_CUTS = 12;
 /** Makes a material skip whatever lies over the cut-out outlines (tested per pixel, so arches stay round). */
 function withCutouts(m: THREE.Material, c: Cutouts) {
   const polys = c.polys.slice(0, MAX_CUTS), pts: THREE.Vector2[] = [], start: number[] = [];
