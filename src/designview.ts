@@ -233,7 +233,13 @@ function referenceShape(deco: DecoDesign, b: Building): THREE.Object3D {
       wallBehind(R.w + 1, 2.5, -R.d / 2, R.h / 2 - 1.25);
       break;
     }
-    case 'wall': add(new THREE.BoxGeometry(R.w, R.h, R.d), planeMat); break;
+    case 'wall': case 'roof': add(new THREE.BoxGeometry(R.w, R.h, R.d), planeMat); break;
+    case 'stairs': {
+      // the step (blue) with the ones below and above it, the front facing +z
+      add(new THREE.BoxGeometry(R.w, R.h, R.d), planeMat);
+      for (const k of [-2, -1, 1, 2]) add(new THREE.BoxGeometry(R.w, R.h, R.d).translate(0, k * R.h, -k * R.d));
+      break;
+    }
     case 'baluster': {
       // a 1 m section of railing: plinth, four balusters, handrail (repeated along the railing on the building)
       add(new THREE.BoxGeometry(R.w, 0.12, R.d).translate(0, -R.h / 2 + 0.06, 0), planeMat);

@@ -28,7 +28,8 @@ export interface PlanPoint {
 
 /** 'door' only in floor (interior) plans; 'balustrade' = a 1 m railing of balusters. */
 export type SegKind = 'wall' | 'colonnade' | 'balustrade' | 'open' | 'door' | 'roof' | 'steel';
-export type ConnectMode = 'straight' | 'loft';
+/** straight: up to the floor above; loft: to the plan above; wrap: straight up and over the next floor's slab edge (or the roof's). */
+export type ConnectMode = 'straight' | 'loft' | 'wrap';
 
 export interface PlanSegment {
   id: string;
@@ -59,6 +60,8 @@ export interface PlanSegment {
  * flip = turn back on the left instead of the right). Spiral: w = diameter, flip = clockwise.
  */
 export interface PlanObject { id: string; type: 'stairs' | 'spiral' | 'elevator'; x: number; y: number; w: number; d: number; rot: number; flip?: boolean;
+  /** Stairs: a design (Design tab, Stairs) put on every step instead of the plain one (detailed view). */
+  designId?: string | null;
   /** Stairs: the walking line drawn from the bottom step up (plan coordinates); each leg a flight, each corner a landing. */
   path?: { x: number; y: number }[];
   /** Stairs: climb exactly to the next main floor (step height worked out); else standard steps, as high as the path takes them. */
@@ -238,9 +241,9 @@ export interface Project {
 }
 
 /** What a design decorates. */
-export type DecoType = 'opening' | 'niche' | 'balcony' | 'pilaster' | 'column' | 'cornice' | 'wall' | 'baluster';
+export type DecoType = 'opening' | 'niche' | 'balcony' | 'pilaster' | 'column' | 'cornice' | 'wall' | 'roof' | 'baluster' | 'stairs';
 export const DECO_TYPES: Record<DecoType, string> = {
-  opening: 'Openings', niche: 'Niches', balcony: 'Balconies', pilaster: 'Pilasters', column: 'Columns', cornice: 'Cornices', wall: 'Walls', baluster: 'Balusters',
+  opening: 'Openings', niche: 'Niches', balcony: 'Balconies', pilaster: 'Pilasters', column: 'Columns', cornice: 'Cornices', wall: 'Walls', roof: 'Roofs', baluster: 'Balusters', stairs: 'Stairs',
 };
 /** One imported model placed in a design: centre (m), rotation (degrees) and size (m), in the reference shape's frame. */
 export interface DecoPart {
@@ -253,7 +256,9 @@ export interface DecoPart {
  * was made on); on the building, the whole arrangement stretches from the reference size to the real element.
  * Columns and pilasters: the bottom `base` and top `top` fractions keep their size (base and capital).
  */
-export interface DecoDesign { id: string; name: string; type: DecoType; shapeId?: string | null; parts: DecoPart[]; base?: number; top?: number }
+export interface DecoDesign { id: string; name: string; type: DecoType; shapeId?: string | null; parts: DecoPart[]; base?: number; top?: number;
+  /** Walls / roofs: repeat at its own size (a pattern: bricks, stones, tiles) instead of stretching onto each division. */
+  tile?: boolean }
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));

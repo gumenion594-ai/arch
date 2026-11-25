@@ -23,7 +23,8 @@ export function decoRef(deco: { type: DecoType; shapeId?: string | null }, b: Bu
     case 'pilaster': return { w: 0.5, h: PILASTER_REF_H, d: 0.15 }; // a plain rectangular column against the wall
     case 'column': return { w: 0.4, h: 3, d: 0.4 };
     case 'cornice': return { w: 3, h: 0.32, d: 0.34 };
-    case 'wall': return { w: 3, h: 3, d: REF_WALL };
+    case 'wall': case 'roof': return { w: 3, h: 3, d: REF_WALL }; // one division (a roof's: up the slope)
+    case 'stairs': return { w: 1.2, h: 0.17, d: 0.28 }; // one step: across, rise, going (its front towards +z)
     case 'baluster': return { w: 1, h: 1, d: 0.2 }; // a 1 m section of railing (plinth, balusters, handrail), repeated along it
   }
 }
@@ -81,6 +82,7 @@ export function decoObject(deco: DecoDesign, b: Building, models: Design[], onLo
   root.userData.size = new THREE.Vector3(R.w, R.h, R.d);
   if (deco.type === 'column' || deco.type === 'pilaster') { root.userData.baseFrac = deco.base ?? 0.12; root.userData.topFrac = deco.top ?? 0.12; }
   root.userData.decoType = deco.type;
+  root.userData.tile = !!deco.tile;
   root.updateMatrixWorld(true);
   return root;
 }

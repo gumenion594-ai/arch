@@ -45,6 +45,7 @@ export class Viewer {
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, preserveDrawingBuffer: true });
+    this.renderer.localClippingEnabled = true; // designs cut to the outline of their wall / roof division
     this.renderer.setPixelRatio(window.devicePixelRatio);
     host.appendChild(this.renderer.domElement);
     this.scene.background = new THREE.Color(0x232323);

@@ -5,12 +5,13 @@ import { DECO_TYPES, DecoDesign, DecoPart, DecoType, Design, DesignCategory, MAT
 import { decoRef } from './deco';
 import { formatOf, importDesignFile, deleteAsset } from './assets';
 import { BUILTIN_DESIGNS } from './builtin';
+import { READY, addReady } from './ready';
 import { askConfirm, askText, h, num, put, toast } from './ui';
 import { fmt } from './planner';
 
-const ONE: Record<DecoType, string> = { opening: 'opening', niche: 'niche', balcony: 'balcony', pilaster: 'pilaster', column: 'column', cornice: 'cornice', wall: 'wall', baluster: 'baluster' };
+const ONE: Record<DecoType, string> = { opening: 'opening', niche: 'niche', balcony: 'balcony', pilaster: 'pilaster', column: 'column', cornice: 'cornice', wall: 'wall', roof: 'roof', baluster: 'baluster', stairs: 'stairs' };
 /** Library category a model imported for a design type goes in (only used to group the list). */
-const CAT: Record<DecoType, DesignCategory> = { opening: 'surround', niche: 'nicheDeco', balcony: 'balcony', pilaster: 'column', column: 'column', cornice: 'cornice', wall: 'model', baluster: 'baluster' };
+const CAT: Record<DecoType, DesignCategory> = { opening: 'surround', niche: 'nicheDeco', balcony: 'balcony', pilaster: 'column', column: 'column', cornice: 'cornice', wall: 'model', roof: 'model', baluster: 'baluster', stairs: 'model' };
 
 /** Shapes a design of this type can be made on. */
 function shapesFor(ed: Editor, t: DecoType): { id: string; name: string }[] | null {
@@ -34,6 +35,14 @@ function usage(ed: Editor, d: DecoDesign) {
     case 'baluster': {
       const list = segs.filter(s => s.kind === 'balustrade' || !s.kind || s.kind === 'wall');
       return { used: segs.filter(s => s.balusterDesign === d.id).length, all: () => list.forEach(s => (s.balusterDesign = d.id)), none: () => segs.forEach(s => { if (s.balusterDesign === d.id) s.balusterDesign = null; }) };
+    }
+    case 'stairs': {
+      const obs = b.interiorPlans.flatMap(pl => pl.objects).filter(o => o.type === 'stairs');
+      return { used: obs.filter(o => o.designId === d.id).length, all: () => obs.forEach(o => (o.designId = d.id)), none: () => obs.forEach(o => { if (o.designId === d.id) o.designId = null; }) };
+    }
+    case 'roof': {
+      const list = b.plans.flatMap(pl => pl.segments).filter(s => s.kind === 'roof');
+      return { used: list.filter(s => s.wallDesign === d.id).length, all: () => list.forEach(s => (s.wallDesign = d.id)), none: () => list.forEach(s => { if (s.wallDesign === d.id) s.wallDesign = null; }) };
     }
     case 'wall': {
       const list = b.plans.flatMap(pl => pl.segments).filter(s => !s.kind || s.kind === 'wall');
@@ -81,7 +90,13 @@ export function renderDecoPanel(ed: Editor) {
         },
       }, 'Delete'),
     ),
+    READY.some(r => r.type === t) ? h('div', { class: 'row' }, h('span', { class: 'muted small' }, 'Ready-made'),
+      ...READY.filter(r => r.type === t).map(r => h('button', {
+        title: r.about,
+        onclick: () => { let id = ''; ed.mutate(() => (id = addReady(p, b, r.key).id)); select(id); },
+      }, r.name))) : null,
     cur && shapes ? shapeField(ed, cur, shapes) : null,
+    cur && (t === 'wall' || t === 'roof') ? ed.checkField('Repeat as a pattern (its own size, not stretched)', !!cur.tile, v => (cur.tile = v)) : null,
     cur && (t === 'column' || t === 'pilaster') ? h('div', { class: 'row' },
       pctField(ed, 'Base (% of height)', cur.base ?? 0.12, v => (cur.base = v)),
       pctField(ed, 'Top (% of height)', cur.top ?? 0.12, v => (cur.top = v))) : null,
@@ -95,7 +110,7 @@ export function renderDecoPanel(ed: Editor) {
         h('button', { onclick: () => ed.mutate(() => use.all()), title: 'Put this design on every one that fits in this building' },
           t === 'opening' || t === 'niche' || t === 'balcony' ? `Use on every ${ONE[t]} with this shape` : t === 'baluster' ? 'Use on every railing' : `Use on every ${ONE[t]}`),
         h('button', { disabled: !use.used, onclick: () => ed.mutate(() => use.none()) }, 'Stop using')),
-      h('div', { class: 'muted small' }, t === 'wall' ? 'Wall designs go on every division of the walls that use them (the structure plan’s walls, all floors using it).' : 'Or pick it on single elements: select them in the 3D view (or walls in the Structure tab).')) : null,
+      h('div', { class: 'muted small' }, t === 'wall' || t === 'roof' ? `${t === 'wall' ? 'Wall' : 'Roof'} designs go on every division of the ${t === 'wall' ? 'walls' : 'roof segments'} that use them (the structure plan’s ${t === 'wall' ? 'walls' : 'roofs'}, all floors using it).` : t === 'stairs' ? 'Stairs designs replace every step of the stairs that use them. Or pick one on single stairs in the Floor plan tab.' : 'Or pick it on single elements: select them in the 3D view (or walls in the Structure tab).')) : null,
     libraryBox(ed, cur),
   );
 }

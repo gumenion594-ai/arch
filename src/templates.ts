@@ -17,7 +17,7 @@ export function tallArchedWindow(w = ARCH_WIN.w, name = 'Tall arched window'): O
 }
 
 /** A part placed exactly where a built-in model was modelled (its own box, in the reference frame). */
-function partFor(key: string, modelId: string) {
+export function partFor(key: string, modelId: string) {
   const box = new THREE.Box3().setFromObject(BUILTIN_DESIGNS[key].make());
   const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
   const r = (v: number) => Math.round(v * 1000) / 1000;

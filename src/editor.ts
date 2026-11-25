@@ -1020,6 +1020,7 @@ export class Editor {
       allowDefault ? h('option', { value: '' }, 'Plan default') : null,
       h('option', { value: 'straight' }, 'Straight up'),
       h('option', { value: 'loft' }, 'Connect to plan above'),
+      h('option', { value: 'wrap', title: 'Straight up, past the floor to cover the edge of the next floor’s slab (on the top floor: the roof slab)' }, 'Straight up, over the next floor’s slab'),
     );
     s.value = val ?? '';
     return h('label', {}, 'Connection to floor above', s);
@@ -1139,6 +1140,12 @@ export class Editor {
       lay ? h('div', { class: 'muted small' },
         `${lay.risers} steps of ${fmt(lay.riser * 100)} cm · climbs ${fmt(lay.rise)} m${isStairs && !ob.toFloor ? ' (standard steps; tick “Up to the next floor” to reach it)' : ' to the next floor'} · `
         + (isSpiral ? `${fmt((lay.risers - 1) / SPIRAL_STEPS_PER_TURN)} turns` : `${lay.flights} flight${lay.flights === 1 ? '' : 's'}${lay.flights > 1 ? ` and ${lay.flights - 1} landing${lay.flights > 2 ? 's' : ''}` : ''}, ${fmt(lay.length)} m in all. The arrows show the way up.`)) : null,
+      isStairs ? (() => {
+        const sel = h('select', { onchange: () => this.mutate(() => (ob.designId = sel.value || null)) },
+          h('option', { value: '' }, 'Plain'), ...this.p.decos.filter(d => d.type === 'stairs').map(d => h('option', { value: d.id }, d.name)));
+        sel.value = ob.designId ?? '';
+        return h('label', { title: 'Stairs designs are made in the Design tab (Stairs); they replace every step in the detailed view' }, 'Step design (detailed view)', sel);
+      })() : null,
       lay && isStairs && ob.toFloor ? h('div', { class: lay.fit === 'good' ? 'ok' : 'warn' }, lay.fit === 'good' ? `Good: comfortable steps of ${fmt(lay.riser * 100)} cm.` : lay.problem ?? '') : null,
       lay?.problem && !(isStairs && ob.toFloor) ? h('div', { class: 'warn' }, lay.problem) : null,
       h('div', { class: 'row' },
@@ -1215,9 +1222,9 @@ export class Editor {
       });
       wrap.append(h('label', {}, kind === 'colonnade' ? 'Column spacing (m, empty = default division)' : 'Division length (m, empty = default)', dIn));
     }
-    const designPick = (cat: DesignCategory, key: 'columnDesign' | 'balusterDesign' | 'wallDesign', label: string) => {
+    const designPick = (cat: DesignCategory, key: 'columnDesign' | 'balusterDesign' | 'wallDesign', label: string, dtFor?: 'roof') => {
       const vals = new Set(segs.map(x => x[key] ?? ''));
-      const dt = key === 'columnDesign' ? 'column' : key === 'balusterDesign' ? 'baluster' : 'wall';
+      const dt = dtFor ?? (key === 'columnDesign' ? 'column' : key === 'balusterDesign' ? 'baluster' : 'wall');
       const sel = h('select', { onchange: () => setAll(x => (x[key] = sel.value || null)) },
         vals.size > 1 ? h('option', { value: '__m', disabled: true }, 'mixed') : null,
         h('option', { value: '' }, 'Plain'), ...this.p.decos.filter(d => d.type === dt).map(d => h('option', { value: d.id }, d.name)),
@@ -1231,6 +1238,7 @@ export class Editor {
       wrap.append(designPick('column', 'columnDesign', 'Column design (detailed view)'));
     }
     if (kind === 'wall') wrap.append(designPick('model', 'wallDesign', 'Wall design on every division (detailed view)'));
+    if (kind === 'roof') wrap.append(designPick('model', 'wallDesign', 'Roof design on every division (detailed view)', 'roof'));
     if (kind === 'balustrade' || kind === 'wall') wrap.append(designPick('baluster', 'balusterDesign', kind === 'wall' ? 'Baluster design for balconies on this wall' : 'Baluster design (detailed view)'));
     const colIn = h('input', { type: 'color', value: segs.find(x => x.color)?.color ?? '#d8cfc0' });
     wrap.append(h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Colour'), colIn,
