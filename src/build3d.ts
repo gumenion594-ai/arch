@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import {
   Building, Floor, OpeningShape, Placement, PlanObject, PlanSegment, StructurePlan, Texture, WinPoint, divisionBorders, elevation, hasCeiling, hasFloor,
   BALCONY_AT, PILASTER_REF_H, PilasterShape, mainFloorIndex, newPlan, nextMainFloor, planForFloor, segColT, segConnect, segConnectSmooth, segDivLen, segKind, segMaterial, segSmoothSpan,
+  openingUse,
 } from './model';
 import { fitDesign, fitDesignSliced } from './assets';
 import { REF_WALL } from './deco';
@@ -277,20 +278,24 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
     return tex ?? (pl.color ? mats.color(pl.color) : fallback);
   };
   /** An imported design fitted into a box, only in the detailed view (null otherwise). */
+  let passDesign = false; // designs being placed in a door: you can walk through them
   const designAt = (id: string | null | undefined, c: THREE.Vector3, along: THREE.Vector3, up: THREE.Vector3, out: THREE.Vector3, w: number, h: number, d: number, recolor?: THREE.Material | null, pick?: PickInfo, sliced = false) => {
     if (!o.detailed || !id || !mats.design) return false;
     const src = mats.design(id);
     if (!src) return false;
     if (src.userData.decoType && recolor !== mats.selected) recolor = null; // a design keeps its parts' own looks (only the selection highlight replaces them)
     const obj = sliced ? fitDesignSliced(src, c, along, up, out, w, h, d) : fitDesign(src, c, along, up, out, w, h, d);
+    let glass = false;
     obj.traverse(x => {
       const m = x as THREE.Mesh;
       if (!m.isMesh) return;
+      const was = m.material as THREE.Material;
+      if (!Array.isArray(was) && was.transparent && (was as THREE.MeshStandardMaterial).opacity < 0.9) glass = true;
       if (recolor) m.material = recolor;
-      m.userData = { pick };
+      m.userData = { pick, passThrough: passDesign };
     });
     g.add(obj);
-    return true;
+    return glass ? 'glass' : true;
   };
 
   // roofs (segments of type Roof): how far the eaves run out and how steep they are, per floor
@@ -510,9 +515,27 @@ export function buildStructure(p: Building, o: BuildOpts): { group: THREE.Group;
             const sm = sel.elements.has(pl.id) ? mats.selected : pl.color ? mats.color(pl.color) : null;
             const ppick: PickInfo = { floorId: floor.id, floorIndex: i, segId: seg.id, placementId: pl.id };
             // a design: its shape plane lands on the outside face, over the shape's whole box
+            const use = shape.kind === 'opening' ? openingUse(shape) : null;
+            let made: boolean | 'glass' = false;
             if (pl.designId) {
               const fd = wall.frame(clamp01(sc / lenM), clamp01((yLow + shape.h / 2) / wallH));
-              designAt(pl.designId, fd.face, fd.along, fd.up, fd.out, shape.w, shape.h, REF_WALL, sm, ppick);
+              passDesign = use === 'door'; // walk through doors
+              made = designAt(pl.designId, fd.face, fd.along, fd.up, fd.out, shape.w, shape.h, REF_WALL, sm, ppick);
+              passDesign = false;
+            }
+            // what fills it: glass in windows (unless the design brings its own), a plain door without a design, nothing in arches
+            if ((use === 'window' && made !== 'glass') || (use === 'door' && !made)) {
+              const fill = use === 'window' ? (sel.elements.has(pl.id) ? mats.selected : GLASS) : sm ?? DOOR;
+              for (const poly of polys) {
+                const tris = THREE.ShapeUtils.triangulateShape(poly.map(q => new THREE.Vector2(q.x * lenM, q.y * wallH)), []);
+                const pos: number[] = [];
+                for (const t of tris) for (const k2 of t) { const v = wall.at(poly[k2].x, poly[k2].y, use === 'door' ? 0.3 : 0); pos.push(v.x, v.y, v.z); }
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+                geo.computeVertexNormals();
+                const m = add(geo, fill, ppick, undefined, false);
+                if (use === 'door') m.userData.passThrough = true;
+              }
             }
             if (shape.kind === 'opening') { // imported frames / surrounds (older projects)
               designAt(pl.frameId, fr.mid, fr.along, fr.up, fr.out, ww, hh, plan.wallThickness * 0.9, sm, ppick);
@@ -983,6 +1006,8 @@ function sweepProfile(wall: WallSolid, u0: number, u1: number, prof: [number, nu
 type Hole = { poly: V2[]; depth?: (u: number, v: number) => number };
 /** Not drawn, but still hit by clicks. */
 const HIDDEN = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
+const GLASS = new THREE.MeshStandardMaterial({ color: 0x9fb4c8, roughness: 0.1, metalness: 0.1, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false });
+const DOOR = new THREE.MeshStandardMaterial({ color: 0x6e4a2c, roughness: 0.75, side: THREE.DoubleSide });
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const clamp01 = (v: number) => clamp(v, 0, 1);

@@ -73,6 +73,7 @@ export interface WinPoint { x: number; y: number; s?: number | null }
  * Niches also have a depth and two profiles (0..1): side view (x = depth, y = height) and
  * bottom view (x = width, y = depth); the recess depth at a point is depth × min(side, bottom).
  */
+export type OpeningUse = 'window' | 'door' | 'arch';
 export interface OpeningShape {
   id: string; name: string;
   kind: 'opening' | 'niche';
@@ -80,6 +81,8 @@ export interface OpeningShape {
   smooth: number;
   w: number; h: number;
   anchor: 'center' | 'bottom';
+  /** Openings: a window (glass), a door (a door, or a brown plane without a design) or an arch (nothing in it). */
+  use?: OpeningUse;
   depth?: number; // niche
   side?: WinPoint[]; // niche side-view profile
   bottom?: WinPoint[]; // niche bottom-view profile
@@ -327,9 +330,15 @@ const rect = (x0: number, y0: number, x1: number, y1: number): WinPoint[] => [{ 
 const circle = (n = 8): WinPoint[] => Array.from({ length: n }, (_, k) => ({ x: 0.5 + 0.5 * Math.cos((k / n) * 2 * Math.PI), y: 0.5 + 0.5 * Math.sin((k / n) * 2 * Math.PI), s: 1 }));
 const arch = (spring: number): WinPoint[] => [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: spring, s: 1 }, { x: 0.5, y: 1, s: 1 }, { x: 0, y: spring, s: 1 }];
 
+/** What an opening holds when the shape does not say: entrances are doors (named arches stay open), the rest windows. */
+export function guessUse(name: string, anchor: 'center' | 'bottom'): OpeningUse {
+  if (/arch/i.test(name) && !/window/i.test(name)) return 'arch';
+  return anchor === 'bottom' || /door|entr/i.test(name) ? 'door' : 'window';
+}
+export const openingUse = (s: OpeningShape): OpeningUse => s.use ?? guessUse(s.name, s.anchor);
 export function defaultOpeningShapes(): OpeningShape[] {
   const o = (name: string, outline: WinPoint[], w: number, h: number, anchor: 'center' | 'bottom'): OpeningShape =>
-    ({ id: uid(), name, kind: 'opening', outlines: [outline], smooth: 0, w, h, anchor });
+    ({ id: uid(), name, kind: 'opening', outlines: [outline], smooth: 0, w, h, anchor, use: guessUse(name, anchor) });
   return [
     o('Window', rect(0, 0, 1, 1), 1.2, 1.5, 'center'),
     o('Door', rect(0, 0, 1, 1), 1.0, 2.2, 'bottom'),
@@ -462,6 +471,7 @@ export function normalize(p: Project): Project {
     }
     mergeAreaPlans(b);
     b.divLen ??= 3;
+    for (const s of b.openingShapes ?? []) if (s.kind === 'opening') s.use ??= guessUse(s.name, s.anchor);
     b.balconyShapes ??= defaultBalconyShapes();
     b.wallShapes ??= defaultWallShapes();
     b.pilasterShapes ??= defaultPilasterShapes();

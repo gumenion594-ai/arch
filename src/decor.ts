@@ -4,6 +4,7 @@ import type { Editor } from './editor';
 import {
   BalconyShape, DecoType, PILASTER_REF_H, PilasterShape, WallShape, DesignCategory, OpeningShape, Placement, PlacementType, PlanSegment, StructurePlan, WinPoint,
   divisionBorders, floorLabel, planForFloor, segColT, segDivLen, segKind, uid,
+  openingUse, type OpeningUse,
 } from './model';
 import { polyLength, sampleSeg } from './geometry';
 import { autoColumns, columnRange } from './build3d';
@@ -576,7 +577,7 @@ export function renderDesignPanel(ed: Editor, mode: DesignMode) {
   const create = () => ed.mutate(() => {
     let s: OpeningShape | BalconyShape;
     if (isBal) s = { id: uid(), name: `Balcony ${list.length + 1}`, outline: [], smooth: 0, w: 2.4, d: 1.1, thickness: 0.2, railing: true };
-    else if (mode === 'openings') s = { id: uid(), name: `Opening ${list.length + 1}`, kind: 'opening', outlines: [], smooth: 0, w: 1.2, h: 1.5, anchor: 'center' };
+    else if (mode === 'openings') s = { id: uid(), name: `Opening ${list.length + 1}`, kind: 'opening', outlines: [], smooth: 0, w: 1.2, h: 1.5, anchor: 'center', use: 'window' };
     else s = { id: uid(), name: `Niche ${list.length + 1}`, kind: 'niche', outlines: [], smooth: 0, w: 0.9, h: 1.8, anchor: 'bottom', depth: 0.2, side: [{ x: 1, y: 0 }, { x: 1, y: 1 }], bottom: [{ x: 0, y: 1 }, { x: 1, y: 1 }] };
     (isBal ? b.balconyShapes : b.openingShapes as (OpeningShape | BalconyShape)[]).push(s as any);
     select(s.id);
@@ -611,6 +612,7 @@ export function renderDesignPanel(ed: Editor, mode: DesignMode) {
       isBal ? field('Thickness (m)', () => (cur as BalconyShape).thickness, v => ((cur as BalconyShape).thickness = v), 0.02) : null,
       mode === 'niches' ? field('Depth (m)', () => (cur as OpeningShape).depth ?? 0.2, v => ((cur as OpeningShape).depth = v), 0.01) : null,
     ) : null,
+    cur && mode === 'openings' ? useField(ed, cur as OpeningShape) : null,
     cur && !isBal ? anchorField(ed, cur as OpeningShape) : null,
     cur && isBal ? ed.checkField('Railing of balusters', (cur as BalconyShape).railing, v => ((cur as BalconyShape).railing = v)) : null,
     cur ? ed.slider('Smoothness (whole shape)', cur.smooth, v => (cur.smooth = v)) : null,
@@ -640,6 +642,20 @@ export function renderDesignPanel(ed: Editor, mode: DesignMode) {
   );
 }
 
+/** Window (glass), door (a door: brown plane without a design) or arch (open). */
+function useField(ed: Editor, s: OpeningShape) {
+  const cur = openingUse(s);
+  const btn = (u: OpeningUse, label: string, title: string) => h('button', {
+    class: cur === u ? 'tab active' : 'tab', title,
+    onclick: () => ed.mutate(() => { s.use = u; if (u === 'door' && s.anchor !== 'bottom') s.anchor = 'bottom'; }),
+  }, label);
+  return h('div', {},
+    h('div', { class: 'box-title' }, 'Type'),
+    h('div', { class: 'row' },
+      btn('window', 'Window', 'Filled with glass'),
+      btn('door', 'Door', 'Filled with a door: its design, or a plain brown door without one. You can walk through it.'),
+      btn('arch', 'Arch', 'Left open: nothing in it')));
+}
 function anchorField(ed: Editor, s: OpeningShape) {
   const sel = h('select', { onchange: () => ed.mutate(() => (s.anchor = sel.value as 'center' | 'bottom')) },
     h('option', { value: 'center' }, 'Central (like windows)'), h('option', { value: 'bottom' }, 'Bottom (like entrances)'));
