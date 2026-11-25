@@ -57,6 +57,52 @@ export function levelUnder(s: SiteData, poly: SiteXY[], level: number, edge = 4)
 
 export interface SiteBuildOpts { detailed: boolean; selected: string | null; designs: Design[]; onLoad: () => void }
 
+/** A smooth curve through the points (centripetal Catmull–Rom), sampled about every `step` m. */
+export function smoothLine(pts: SiteXY[], step: number): SiteXY[] {
+  if (pts.length < 3) {
+    const out: SiteXY[] = [];
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1], m = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step));
+      for (let k = 0; k < m; k++) out.push({ x: a.x + ((b.x - a.x) * k) / m, y: a.y + ((b.y - a.y) * k) / m });
+    }
+    out.push(pts[pts.length - 1]);
+    return out;
+  }
+  const P = [{ x: 2 * pts[0].x - pts[1].x, y: 2 * pts[0].y - pts[1].y }, ...pts, { x: 2 * pts[pts.length - 1].x - pts[pts.length - 2].x, y: 2 * pts[pts.length - 1].y - pts[pts.length - 2].y }];
+  const out: SiteXY[] = [];
+  const tj = (a: SiteXY, b: SiteXY, t: number) => t + Math.max(1e-4, Math.sqrt(Math.hypot(b.x - a.x, b.y - a.y)));
+  for (let i = 1; i + 2 < P.length; i++) {
+    const p0 = P[i - 1], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2];
+    const t0 = 0, t1 = tj(p0, p1, t0), t2 = tj(p1, p2, t1), t3 = tj(p2, p3, t2);
+    const m = Math.max(2, Math.ceil(Math.hypot(p2.x - p1.x, p2.y - p1.y) / step));
+    for (let k = 0; k < m; k++) {
+      const t = t1 + ((t2 - t1) * k) / m;
+      const L = (a: SiteXY, b: SiteXY, ta: number, tb: number) => ({ x: ((tb - t) * a.x + (t - ta) * b.x) / (tb - ta), y: ((tb - t) * a.y + (t - ta) * b.y) / (tb - ta) });
+      const A1 = L(p0, p1, t0, t1), A2 = L(p1, p2, t1, t2), A3 = L(p2, p3, t2, t3);
+      const B1 = L(A1, A2, t0, t2), B2 = L(A2, A3, t1, t3);
+      out.push(L(B1, B2, t1, t2));
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+/** Lays roads, gravel and trees back on the ground after it changed (models and buildings keep their height). */
+export function redrape(s: SiteData, group: THREE.Object3D) {
+  group.traverse(o => {
+    const d = o.userData.drape as { xy: number[]; lift: number } | undefined;
+    if (d && (o as THREE.Mesh).isMesh) {
+      const pos = (o as THREE.Mesh).geometry.getAttribute('position');
+      for (let k = 0; k < pos.count; k++) pos.setY(k, heightAt(s, d.xy[k * 2], d.xy[k * 2 + 1]) + d.lift);
+      pos.needsUpdate = true;
+      (o as THREE.Mesh).geometry.computeVertexNormals();
+      (o as THREE.Mesh).geometry.computeBoundingSphere();
+    }
+    const gp = o.userData.onGround as SiteXY | undefined;
+    if (gp) o.position.y = heightAt(s, gp.x, gp.y);
+  });
+}
+
 /** The whole site: terrain, roads, gravel, trees, models and water (each piece tagged with userData.siteId for picking). */
 export function buildSite(s: SiteData, o: SiteBuildOpts): { group: THREE.Group; terrain: THREE.Mesh } {
   const g = new THREE.Group();
@@ -79,50 +125,52 @@ export function buildSite(s: SiteData, o: SiteBuildOpts): { group: THREE.Group; 
   terrain.userData.siteTerrain = true;
   g.add(terrain);
 
-  // a strip along a polyline, draped on the ground (lift: how far above it)
-  const strip = (pts: SiteXY[], width: number, lift: number, mat: THREE.Material, from = -0.5, to = 0.5) => {
-    const dense: SiteXY[] = [];
-    for (let i = 0; i + 1 < pts.length; i++) {
-      const a = pts[i], b = pts[i + 1], l = Math.hypot(b.x - a.x, b.y - a.y), m = Math.max(1, Math.ceil(l / 1.5));
-      for (let k = 0; k < m; k++) dense.push({ x: a.x + ((b.x - a.x) * k) / m, y: a.y + ((b.y - a.y) * k) / m });
-    }
-    dense.push(pts[pts.length - 1]);
-    const v: number[] = [], t: number[] = [], idx: number[] = [];
+  // a strip along a (smoothed) line, draped on the ground (lift: how far above it): a fine grid, so the ground never pokes through
+  const strip = (dense: SiteXY[], width: number, lift: number, mat: THREE.Material, from = -0.5, to = 0.5) => {
+    const across = Math.max(1, Math.ceil((width * (to - from)) / 1));
+    const v: number[] = [], t: number[] = [], idx: number[] = [], xy: number[] = [];
     let along = 0;
     dense.forEach((q, i) => {
       const p0 = dense[Math.max(0, i - 1)], p1 = dense[Math.min(dense.length - 1, i + 1)];
       const dx = p1.x - p0.x, dy = p1.y - p0.y, l = Math.hypot(dx, dy) || 1, nx = -dy / l, ny = dx / l;
       if (i > 0) along += Math.hypot(q.x - dense[i - 1].x, q.y - dense[i - 1].y);
-      for (const f of [from, to]) { const x = q.x + nx * width * f, y = q.y + ny * width * f; v.push(x, H(x, y) + lift, -y); t.push(width * f, along); }
-      if (i > 0) { const b = (i - 1) * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
+      for (let c = 0; c <= across; c++) {
+        const f = from + ((to - from) * c) / across, x = q.x + nx * width * f, y = q.y + ny * width * f;
+        v.push(x, H(x, y) + lift, -y); t.push(width * f, along); xy.push(x, y);
+      }
+      if (i > 0) for (let c = 0; c < across; c++) {
+        const a = (i - 1) * (across + 1) + c, b = i * (across + 1) + c;
+        idx.push(a, a + 1, b, a + 1, b + 1, b);
+      }
     });
     const sg = new THREE.BufferGeometry();
     sg.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
     sg.setAttribute('uv', new THREE.Float32BufferAttribute(t, 2));
     sg.setIndex(idx); sg.computeVertexNormals();
-    return new THREE.Mesh(sg, mat);
+    const m = new THREE.Mesh(sg, mat);
+    m.userData.drape = { xy, lift };
+    return m;
   };
 
-  // roads: asphalt, lane markings (dashed between lanes, solid at the edges)
+  // roads: a smooth curve through the clicked points; asphalt, lane markings (dashed between lanes, solid at the edges)
   const asphalt = o.detailed ? materialLook('asphalt', '#55575a') : new THREE.MeshStandardMaterial({ color: 0x4a4a4a, roughness: 1, side: THREE.DoubleSide });
   const paint = new THREE.MeshBasicMaterial({ color: 0xf2f2f2, side: THREE.DoubleSide });
   for (const r of s.roads) {
     if (r.points.length < 2) continue;
     const grp = new THREE.Group(), W = r.lanes * LANE;
-    grp.add(strip(r.points, W, 0.06, asphalt));
+    const c = smoothLine(r.points, 0.75);
+    grp.add(strip(c, W, 0.06, asphalt));
     const line = (off: number, dashed: boolean) => {
-      const f = off / W;
-      if (!dashed) { grp.add(strip(r.points, W, 0.075, paint, f - 0.06 / W, f + 0.06 / W)); return; }
-      // dashes: 3 m painted, 6 m gap
-      let acc = 0;
-      for (let i = 0; i + 1 < r.points.length; i++) {
-        const a = r.points[i], b = r.points[i + 1], l = Math.hypot(b.x - a.x, b.y - a.y);
-        for (let d = (9 - (acc % 9)) % 9; d < l; d += 9) {
-          const e = Math.min(l, d + 3), p0 = { x: a.x + ((b.x - a.x) * d) / l, y: a.y + ((b.y - a.y) * d) / l }, p1 = { x: a.x + ((b.x - a.x) * e) / l, y: a.y + ((b.y - a.y) * e) / l };
-          grp.add(strip([p0, p1], W, 0.075, paint, f - 0.06 / W, f + 0.06 / W));
-        }
-        acc += l;
-      }
+      const f = off / W, a = f - 0.06 / W, b = f + 0.06 / W;
+      if (!dashed) { grp.add(strip(c, W, 0.075, paint, a, b)); return; }
+      // dashes: 3 m painted, 6 m gap, measured along the curve
+      let acc = 0, run: SiteXY[] = [];
+      c.forEach((q, i) => {
+        if (i > 0) acc += Math.hypot(q.x - c[i - 1].x, q.y - c[i - 1].y);
+        if (acc % 9 < 3) run.push(q);
+        else if (run.length) { if (run.length > 1) grp.add(strip(run, W, 0.075, paint, a, b)); run = []; }
+      });
+      if (run.length > 1) grp.add(strip(run, W, 0.075, paint, a, b));
     };
     line(-W / 2 + 0.25, false); line(W / 2 - 0.25, false);
     for (let k = 1; k < r.lanes; k++) line(-W / 2 + k * LANE, true);
@@ -137,15 +185,18 @@ export function buildSite(s: SiteData, o: SiteBuildOpts): { group: THREE.Group; 
     const v: number[] = [], t: number[] = [];
     const emit = (a: SiteXY, b: SiteXY, c: SiteXY, depth: number) => {
       const l = Math.max(Math.hypot(a.x - b.x, a.y - b.y), Math.hypot(b.x - c.x, b.y - c.y), Math.hypot(c.x - a.x, c.y - a.y));
-      if (l > 2 && depth < 8) { const m = (p: SiteXY, q: SiteXY) => ({ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }); const ab = m(a, b), bc = m(b, c), ca = m(c, a); emit(a, ab, ca, depth + 1); emit(ab, b, bc, depth + 1); emit(ca, bc, c, depth + 1); emit(ab, bc, ca, depth + 1); return; }
+      if (l > 1 && depth < 9) { const m = (p: SiteXY, q: SiteXY) => ({ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }); const ab = m(a, b), bc = m(b, c), ca = m(c, a); emit(a, ab, ca, depth + 1); emit(ab, b, bc, depth + 1); emit(ca, bc, c, depth + 1); emit(ab, bc, ca, depth + 1); return; }
       for (const q of [a, b, c]) { v.push(q.x, H(q.x, q.y) + 0.045, -q.y); t.push(q.x, q.y); }
     };
     for (const [a, b, c] of tris) emit(gr.points[a], gr.points[b], gr.points[c], 0);
+    if (v.length > 30000 * 9) continue;
     const gg = new THREE.BufferGeometry();
     gg.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
     gg.setAttribute('uv', new THREE.Float32BufferAttribute(t, 2));
     gg.computeVertexNormals();
-    g.add(tag(new THREE.Mesh(gg, gravel), gr.id));
+    const gm = new THREE.Mesh(gg, gravel);
+    gm.userData.drape = { xy: t.slice(), lift: 0.045 };
+    g.add(tag(gm, gr.id));
   }
 
   // trees: a trunk and a crown (round: a ball of leaves; conifer: stacked cones)
@@ -162,6 +213,7 @@ export function buildSite(s: SiteData, o: SiteBuildOpts): { group: THREE.Group; 
       t.add(new THREE.Mesh(new THREE.IcosahedronGeometry(S * 0.32, 1).translate(0, S * 0.66, 0), leaves));
     }
     t.position.set(tr.x, y0, -tr.y);
+    t.userData.onGround = { x: tr.x, y: tr.y };
     g.add(tag(t, tr.id));
   }
 

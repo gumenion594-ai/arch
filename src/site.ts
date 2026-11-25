@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { Building, Design, History, Project, SiteData, SiteXY, loadProjects, newSiteData, saveProject, uid } from './model';
 import { Viewer, ViewMode } from './viewer';
-import { LANE, brush, buildSite, heightAt, levelUnder } from './sitebuild';
+import { LANE, brush, buildSite, heightAt, levelUnder, redrape, smoothLine } from './sitebuild';
 import { formatOf, importDesignFile } from './assets';
 import { BUILTIN_DESIGNS } from './builtin';
 import { fmt } from './planner';
@@ -14,8 +14,8 @@ type SiteTool = 'select' | 'building' | 'road' | 'gravel' | 'tree' | 'model' | '
 const TOOLS: [SiteTool, string, string][] = [
   ['select', 'Select / move', 'Click a building or anything on the ground to select it; drag it to move it.'],
   ['building', 'Building', 'Pick a building project below, then click the ground where it goes.'],
-  ['road', 'Road', 'Click along the road; Enter or double-click finishes it. Set the number of lanes first (or after, on the selected road).'],
-  ['gravel', 'Gravel', 'Click around the area; Enter or double-click closes it.'],
+  ['road', 'Road', 'Click along the road; Enter, Space or double-click finishes it; Esc cancels it. Set the number of lanes first (or after, on the selected road).'],
+  ['gravel', 'Gravel', 'Click around the area; Enter, Space or double-click closes it; Esc cancels it.'],
   ['tree', 'Tree', 'Click the ground to plant a tree.'],
   ['model', '3D model', 'Pick a model below, then click the ground to place it.'],
   ['water', 'Water', 'Click to place a water surface. Where the ground is higher than the water it is hidden, so in a valley it makes a lake.'],
@@ -75,8 +75,14 @@ export class SiteEditor {
     const t = (e.target as HTMLElement).tagName;
     if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); this.undo(); return; }
-    if (e.key === 'Enter') { e.preventDefault(); this.finishDraft(); }
-    if (e.key === 'Escape') { this.draft = []; this.sel = null; this.refresh(); }
+    // drawing a road / gravel: Enter or Space finishes it, Esc cancels it (a focused button must not take the key)
+    if (e.key === 'Enter' || e.key === ' ') {
+      if (this.draft.length || e.key === 'Enter') { e.preventDefault(); (document.activeElement as HTMLElement | null)?.blur?.(); this.finishDraft(); }
+    }
+    if (e.key === 'Escape') {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      if (this.draft.length) { this.draft = []; this.updatePreview(); toast('Cancelled'); } else { this.sel = null; this.refresh(); }
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') && this.sel) { e.preventDefault(); this.removeSelected(); }
   };
   mutate(fn: () => void) { this.hist.push(this.p); fn(); saveProject(this.p); this.refresh(); }
@@ -239,14 +245,17 @@ export class SiteEditor {
     for (let k = 0; k < pos.count; k++) pos.setY(k, heightAt(this.s, pos.getX(k), -pos.getZ(k)));
     pos.needsUpdate = true;
     t.geometry.computeVertexNormals();
+    t.geometry.computeBoundingSphere();
+    if (t.parent) redrape(this.s, t.parent); // roads, gravel and trees stay on the ground
   }
 
   /** The road / gravel being drawn: a line on the ground (and on to the pointer). */
   private updatePreview(hover?: SiteXY) {
     if (this.preview) { this.viewer.scene.remove(this.preview); this.preview = null; }
     if (!this.draft.length) return;
-    const pts = [...this.draft, ...(hover ? [hover] : [])];
+    let pts = [...this.draft, ...(hover ? [hover] : [])];
     if (this.tool === 'gravel' && pts.length > 2) pts.push(pts[0]);
+    if (this.tool === 'road') pts = smoothLine(pts, 1); // the curve the road will follow
     const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts.map(q => new THREE.Vector3(q.x, heightAt(this.s, q.x, q.y) + 0.3, -q.y))),
       new THREE.LineBasicMaterial({ color: this.tool === 'road' ? 0xffd400 : 0xffffff, depthTest: false }));
     line.renderOrder = 10;
